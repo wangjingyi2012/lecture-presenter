@@ -3,10 +3,10 @@
   "lastOpenedCourse": "",
   "theme": "dark",
   "fontSize": 18,
-  "updateServer": "https://www.hz-study-system.com",
-  "authServer": "https://www.hz-study-system.com",
-  "notificationServer": "https://www.hz-study-system.com",
-  "membershipUrl": "https://www.hz-study-system.com/membership",
-  "analyticsEndpoint": "https://www.hz-study-system.com/api/analytics/track",
+  "updateServer": "http://154.19.186.138:8080",
+  "authServer": "http://154.19.186.138:8080",
+  "notificationServer": "http://154.19.186.138:8080",
+  "membershipUrl": "http://154.19.186.138:8080/membership",
+  "analyticsEndpoint": "http://154.19.186.138:8080/api/analytics/track",
   "autoCheckUpdate": true
 }

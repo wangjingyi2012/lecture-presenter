@@ -5,7 +5,7 @@ if (window.errorLogs) {
 
 window.NotificationCenter = {
   notifications: [],
-  serverUrl: 'https://www.hz-study-system.com',
+  serverUrl: 'http://154.19.186.138:8080',
   currentVersion: '0.1.0',
 
   log(msg) {

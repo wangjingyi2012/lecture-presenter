@@ -1,7 +1,7 @@
 // tracker.js — login analytics only. Fire-and-forget; never affects app behavior.
 
 const Tracker = {
-  _endpoint: 'https://www.hz-study-system.com/api/analytics/track',
+  _endpoint: 'http://154.19.186.138:8080/api/analytics/track',
   _allowedActions: new Set(['login']),
 
   configure(config) {

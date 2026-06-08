@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' slide:; script-src 'self' 'unsafe-inline' slide:; style-src 'self' 'unsafe-inline' asset: https://asset.localhost slide:; font-src 'self' asset: https://asset.localhost slide: data:; img-src 'self' asset: https://asset.localhost slide: data:; media-src 'self' asset: https://asset.localhost slide:; connect-src 'self' ipc: http://ipc.localhost asset: https://asset.localhost slide: http://localhost:* https://api.deepseek.com https://api.minimaxi.com https://www.hz-study-system.com; frame-src 'self' asset: https://asset.localhost slide: http://localhost:* https://localhost:* https://* http://*",
+      "csp": "default-src 'self' slide:; script-src 'self' 'unsafe-inline' slide:; style-src 'self' 'unsafe-inline' asset: https://asset.localhost slide:; font-src 'self' asset: https://asset.localhost slide: data:; img-src 'self' asset: https://asset.localhost slide: data:; media-src 'self' asset: https://asset.localhost slide:; connect-src 'self' ipc: http://ipc.localhost asset: https://asset.localhost slide: http://localhost:* http://154.19.186.138:8080 https://api.deepseek.com https://api.minimaxi.com; frame-src 'self' asset: https://asset.localhost slide: http://localhost:* https://localhost:* https://* http://*",
       "assetProtocol": {
         "enable": true,
         "scope": ["**"]

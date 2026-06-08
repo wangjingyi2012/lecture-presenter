@@ -1249,7 +1249,7 @@ async fn call_lectureai(auth_token: String, system_prompt: String, user_msg: Str
     });
 
     let response = client
-        .post("https://www.hz-study-system.com/api/ai/chat")
+        .post("http://154.19.186.138:8080/api/ai/chat")
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", auth_token))
         .json(&body)
