@@ -1,0 +1,98 @@
+{
+  "id": "lecture-presenter-guide",
+  "title": "演讲宝使用指南",
+  "subtitle": "Lecture Presenter",
+  "instructor": "演讲宝团队",
+  "weeks": [
+    {
+      "number": 1,
+      "title": "快速入门",
+      "description": "欢迎使用演讲宝！本章将带你快速了解应用的核心功能，完成安装并熟悉基本操作。",
+      "resources": {
+        "slides": [
+          { "title": "欢迎使用演讲宝", "file": "docs/01-welcome.md" }
+        ],
+        "videos": [
+          { "title": "快速上手演示", "file": "videos/quick-start.mp4" }
+        ],
+        "readings": [
+          { "title": "安装与首次启动", "file": "docs/02-getting-started.md" }
+        ],
+        "assignments": [],
+        "sourceCode": []
+      }
+    },
+    {
+      "number": 2,
+      "title": "课程管理",
+      "description": "学习如何导入、创建和管理课程，了解课程文件夹的结构规范与 course.json 配置格式。",
+      "resources": {
+        "slides": [
+          { "title": "导入与管理课程", "file": "docs/03-course-management.md" }
+        ],
+        "videos": [],
+        "readings": [
+          { "title": "course.json 格式说明", "file": "docs/04-course-format.md" }
+        ],
+        "assignments": [],
+        "sourceCode": [
+          { "title": "hello_ppte.py", "file": "code/hello_ppte.py" }
+        ]
+      }
+    },
+    {
+      "number": 3,
+      "title": "内容浏览",
+      "description": "深入了解演讲宝支持的各类资源格式，包括 PDF、视频、Markdown、代码、HTML 和 PPTE 幻灯片。",
+      "resources": {
+        "slides": [
+          { "title": "支持的资源类型", "file": "docs/05-resource-types.md" },
+          { "title": "功能概览幻灯片", "ppt-extra": "ppt-extra/feature-overview" }
+        ],
+        "videos": [],
+        "readings": [
+          { "title": "示例 PDF 文档", "file": "pdfs/sample.pdf" },
+          { "title": "项目源码", "url": "https://github.com/wangjingyi2012/lecture-presenter" }
+        ],
+        "assignments": [],
+        "sourceCode": [
+          { "title": "data_demo.py", "file": "code/data_demo.py" }
+        ]
+      }
+    },
+    {
+      "number": 4,
+      "title": "PPTE 幻灯片",
+      "description": "掌握 PPT-EXTRA 幻灯片格式的创建与编辑，利用模板和 AI 辅助高效制作精美幻灯片。",
+      "resources": {
+        "slides": [
+          { "title": "PPTE 格式介绍", "file": "docs/06-ppte-guide.md" }
+        ],
+        "videos": [
+          { "title": "PPTE 编辑演示", "file": "videos/ppte-editing.mp4" }
+        ],
+        "readings": [
+          { "title": "模板与 AI 辅助", "file": "docs/07-template-ai.md" }
+        ],
+        "assignments": [],
+        "sourceCode": []
+      }
+    },
+    {
+      "number": 5,
+      "title": "高级功能",
+      "description": "探索快捷键、自配置 AI 助手等高级功能，以及常见问题的解答。",
+      "resources": {
+        "slides": [],
+        "videos": [],
+        "readings": [
+          { "title": "快捷键大全", "file": "docs/08-shortcuts.md" },
+          { "title": "AI 助手配置", "file": "docs/09-ai-membership.md" },
+          { "title": "常见问题", "file": "docs/10-faq.md" }
+        ],
+        "assignments": [],
+        "sourceCode": []
+      }
+    }
+  ]
+}

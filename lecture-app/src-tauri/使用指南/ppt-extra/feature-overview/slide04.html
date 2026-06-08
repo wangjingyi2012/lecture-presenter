@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>支持的格式</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;700;900&display=swap');
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(160deg, #0f0f23 0%, #1a1a3e 100%);
+            font-family: 'Noto Sans SC', -apple-system, 'PingFang SC', sans-serif;
+            color: #ffffff;
+        }
+
+        .slide {
+            width: min(100vw, 177.78vh);
+            height: min(100vh, 56.25vw);
+            max-width: 100vw;
+            max-height: 100vh;
+            padding: 50px 70px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .page-header {
+            margin-bottom: 36px;
+        }
+
+        .page-title {
+            font-size: 2em;
+            font-weight: 700;
+            margin: 0 0 6px 0;
+            background: linear-gradient(90deg, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .page-subtitle-line {
+            width: 60px;
+            height: 3px;
+            background: linear-gradient(90deg, #818cf8, #c084fc);
+            border-radius: 2px;
+        }
+
+        .format-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: repeat(2, 1fr);
+            gap: 20px;
+            flex: 1;
+        }
+
+        .format-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 16px;
+            padding: 28px;
+            display: flex;
+            flex-direction: column;
+            transition: all 0.3s ease;
+        }
+
+        .format-card:hover {
+            background: rgba(99, 102, 241, 0.06);
+            border-color: rgba(99, 102, 241, 0.15);
+            transform: translateY(-2px);
+        }
+
+        .card-icon {
+            font-size: 2.2em;
+            margin-bottom: 12px;
+        }
+
+        .card-title {
+            font-size: 1.2em;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .card-desc {
+            font-size: 0.85em;
+            color: rgba(255, 255, 255, 0.5);
+            font-weight: 300;
+            line-height: 1.6;
+        }
+
+        .card-tag {
+            display: inline-block;
+            margin-top: auto;
+            padding-top: 12px;
+            font-size: 0.75em;
+            color: rgba(129, 140, 248, 0.8);
+            font-weight: 400;
+            letter-spacing: 0.05em;
+        }
+    </style>
+</head>
+<body>
+    <div class="slide">
+        <div class="page-header">
+            <h1 class="page-title">支持的资源格式</h1>
+            <div class="page-subtitle-line"></div>
+        </div>
+
+        <div class="format-grid">
+            <div class="format-card">
+                <div class="card-icon">&#128196;</div>
+                <div class="card-title">PDF 文档</div>
+                <div class="card-desc">内置 PDF.js 高质量查看器，支持缩放、页码导航，流畅浏览课件与论文。</div>
+                <span class="card-tag">.pdf</span>
+            </div>
+
+            <div class="format-card">
+                <div class="card-icon">&#127909;</div>
+                <div class="card-title">视频播放</div>
+                <div class="card-desc">HTML5 内置播放器，支持进度拖拽、音量调节、全屏播放。</div>
+                <span class="card-tag">.mp4</span>
+            </div>
+
+            <div class="format-card">
+                <div class="card-icon">&#128187;</div>
+                <div class="card-title">代码查看</div>
+                <div class="card-desc">Highlight.js 语法高亮，支持数十种编程语言，行号显示。</div>
+                <span class="card-tag">.py .js .ts .go .rs ...</span>
+            </div>
+
+            <div class="format-card">
+                <div class="card-icon">&#128221;</div>
+                <div class="card-title">Markdown</div>
+                <div class="card-desc">自动渲染为富文本，支持标题、表格、代码块、列表等完整语法。</div>
+                <span class="card-tag">.md</span>
+            </div>
+
+            <div class="format-card">
+                <div class="card-icon">&#127912;</div>
+                <div class="card-title">PPTE 幻灯片</div>
+                <div class="card-desc">独创 HTML 幻灯片格式，16:9 标准比例，渐变、动画、无限创意。</div>
+                <span class="card-tag">ppt-extra/</span>
+            </div>
+
+            <div class="format-card">
+                <div class="card-icon">&#127760;</div>
+                <div class="card-title">HTML &amp; URL</div>
+                <div class="card-desc">HTML 文件内置渲染，外部链接一键跳转浏览器。</div>
+                <span class="card-tag">.html &amp; https://</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

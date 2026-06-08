@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PPT Catalog Demo</title>
+    <link rel="stylesheet" href="catalog.css">
+</head>
+<body>
+    <div class="ppt-container">
+        <div class="slide">
+            <!-- 页面标题 -->
+            <div class="page-header">
+                <h1 class="page-title">课程导览</h1>
+            </div>
+
+            <!-- 动态目录列表容器 -->
+            <div class="catalog-container" id="catalog-list">
+                <!-- 目录项将通过 JS 动态插入到这里 -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 目录数据配置
+        const catalogData = [
+            { id: '01', title: '目录一' },
+            { id: '02', title: '目录二' },
+            { id: '03', title: '目录三' },
+            { id: '04', title: '目录四' }
+        ];
+
+        // 动态生成目录
+        const catalogContainer = document.getElementById('catalog-list');
+        
+        catalogData.forEach(item => {
+            const itemDiv = document.createElement('div');
+            itemDiv.className = 'catalog-item';
+            
+            // 创建内部结构
+            itemDiv.innerHTML = `
+                <div class="catalog-index">${item.id}</div>
+                <div class="catalog-content">${item.title}</div>
+            `;
+            
+            catalogContainer.appendChild(itemDiv);
+        });
+    </script>
+</body>
+</html>

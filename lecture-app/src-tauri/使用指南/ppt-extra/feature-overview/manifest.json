@@ -1,0 +1,11 @@
+{
+  "title": "演讲宝 功能概览",
+  "slides": [
+    { "file": "slide01.html", "title": "封面" },
+    { "file": "slide02.html", "title": "目录" },
+    { "file": "slide03.html", "title": "多格式内容支持" },
+    { "file": "slide04.html", "title": "支持的格式" },
+    { "file": "slide05.html", "title": "AI 智能辅助" },
+    { "file": "slide06.html", "title": "开始使用" }
+  ]
+}

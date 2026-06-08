@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>观众窗口</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #000;
+    }
+    #slide-frame {
+      width: 100vw;
+      height: 100vh;
+      border: none;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <iframe id="slide-frame" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-forms"></iframe>
+  <script>
+    const { listen } = window.__TAURI__.event;
+    let currentSlideUrl = '';
+
+    // Listen for slide-change events from the presenter window
+    listen('slide-change', (event) => {
+      const slideUrl = event.payload;
+      if (slideUrl) {
+        currentSlideUrl = slideUrl;
+        document.getElementById('slide-frame').src = slideUrl;
+      }
+    });
+
+    window.addEventListener('message', async (event) => {
+      const frame = document.getElementById('slide-frame');
+      const data = event.data;
+      if (event.source !== frame.contentWindow) return;
+      if (!data || (data.type !== 'open-file' && data.type !== 'open-resource')) return;
+
+      if (data.url) {
+        const url = String(data.url).trim();
+        if (/^https?:\/\//i.test(url)) {
+          await window.__TAURI__.core.invoke('open_external', { path: url });
+        }
+        return;
+      }
+
+      if (!data.path) return;
+      const relativePath = String(data.path).replace(/\\/g, '/');
+      if (relativePath.startsWith('/') || relativePath.split('/').includes('..')) return;
+
+      const basePath = getCurrentSlideBasePath();
+      if (!basePath) return;
+      const filePath = `${basePath}/${relativePath}`.replace(/\\/g, '/');
+      await window.__TAURI__.core.invoke('open_external', { path: filePath });
+    });
+
+    function getCurrentSlideBasePath() {
+      if (!currentSlideUrl || !currentSlideUrl.startsWith('slide://')) return '';
+      const url = new URL(currentSlideUrl);
+      const decodedPath = url.pathname
+        .split('/')
+        .map(segment => decodeURIComponent(segment))
+        .join('/');
+      return decodedPath.slice(0, decodedPath.lastIndexOf('/'));
+    }
+  </script>
+</body>
+</html>

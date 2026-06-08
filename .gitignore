@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Rust build artifacts
+lecture-app/src-tauri/target/
+lecture-app/src-tauri/gen/
+target/
+dist/
+build/
+
+# Logs and caches
+*.log
+.cache/
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local config
+.claude/
+
+# Environment
+.env
+.env.*
+
+# Local/private app config backups
+*.local.json
+*secret*.json
+*token*.json
+*credentials*.json
+
+# Server-side code and deployment assets are intentionally not part of the
+# public client release.
+update-server/
+sync-to-server.sh
+*.db
+*.sqlite
+*.sqlite3

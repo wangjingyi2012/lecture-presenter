@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lecture Presenter</title>
+  <link rel="stylesheet" href="css/theme.css">
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="css/auth.css">
+  <link rel="stylesheet" href="css/course-creator.css">
+  <link rel="stylesheet" href="vendor/highlight-github-dark.min.css" id="hljs-theme">
+</head>
+<body data-theme="dark">
+  <!-- macOS titlebar drag region -->
+  <div id="titlebar">
+    <div id="titlebar-drag"></div>
+    <div id="titlebar-controls">
+      <!-- 课程区: Course selector -->
+      <div class="titlebar-group">
+        <select id="course-select" title="切换课程"></select>
+      </div>
+
+      <div class="titlebar-divider"></div>
+
+      <!-- 视图区: Font size + theme -->
+      <div class="titlebar-group">
+        <button id="btn-font-down" title="缩小字号">A-</button>
+        <button id="btn-font-up" title="放大字号">A+</button>
+        <button id="btn-theme" title="切换主题"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/>
+        </svg></button>
+      </div>
+
+      <div class="titlebar-divider"></div>
+
+      <!-- 功能区: PPTE + course management + settings -->
+      <div class="titlebar-group">
+        <button id="btn-ppte" title="PPTE管理"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <path d="M8 21h8M12 17v4"/>
+          <path d="M7 8h2v5H7zM11 6h2v7h-2zM15 10h2v3h-2z" fill="currentColor" stroke="none"/>
+        </svg></button>
+        <button id="btn-add-course" title="课程管理"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg></button>
+        <button id="btn-settings" title="开发者设置"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/>
+          <line x1="1" y1="14" x2="7" y2="14"/>
+          <line x1="9" y1="8" x2="15" y2="8"/>
+          <line x1="17" y1="16" x2="23" y2="16"/>
+        </svg></button>
+      </div>
+
+      <div class="titlebar-divider"></div>
+
+      <!-- 系统区: Error log + auth + notifications + about -->
+      <div class="titlebar-group">
+        <button id="btn-error-log" title="查看错误日志 (Ctrl+L)" style="display:none">📋</button>
+        <div id="auth-titlebar"></div>
+        <div id="notification-center"></div>
+        <button id="btn-about" title="关于"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="16" x2="12" y2="12"/>
+          <line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="app">
+    <!-- Sidebar -->
+    <nav id="sidebar">
+      <div id="course-header">
+        <h1 id="course-title"></h1>
+        <p id="course-subtitle"></p>
+      </div>
+      <ul id="week-list"></ul>
+    </nav>
+
+    <!-- Main content -->
+    <main id="content">
+      <div id="content-scroll">
+        <div id="week-header">
+          <h2 id="week-title"></h2>
+          <p id="week-description"></p>
+        </div>
+        <div id="resources"></div>
+      </div>
+
+      <!-- PPTE Management View -->
+      <div id="ppte-management" class="hidden">
+        <div style="padding:40px;max-width:800px;margin:0 auto;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;">
+            <h2 style="margin:0;font-size:24px;font-weight:600;">PPTE 幻灯片</h2>
+            <button id="ppte-back-to-course" style="padding:8px 16px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;">← 返回课程</button>
+          </div>
+
+          <div style="display:flex;gap:16px;margin-bottom:32px;">
+            <button id="ppte-create-btn" style="flex:1;padding:20px;border-radius:12px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;text-align:center;">
+              <div style="font-size:32px;margin-bottom:8px;">+</div>
+              <div style="font-size:16px;font-weight:600;">创建 PPTE</div>
+              <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">从模板创建新的幻灯片</div>
+            </button>
+            <button id="ppte-open-btn" style="flex:1;padding:20px;border-radius:12px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;text-align:center;">
+              <div style="font-size:32px;margin-bottom:8px;">📁</div>
+              <div style="font-size:16px;font-weight:600;">打开 PPTE</div>
+              <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">打开已有的幻灯片文件</div>
+            </button>
+          </div>
+
+          <div id="ppte-recent-list">
+            <h3 style="font-size:14px;font-weight:600;color:var(--text-secondary);margin-bottom:12px;">最近打开</h3>
+            <div id="ppte-recent-items" style="display:flex;flex-direction:column;gap:8px;">
+              <p style="color:var(--text-muted);font-size:14px;">暂无最近打开的 PPTE</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PPTE Editor (in main content) -->
+      <div id="ppte-editor" class="hidden">
+        <div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--bg-secondary);">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <button id="ppte-editor-back" style="padding:4px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);cursor:pointer;font-size:13px;">← 返回</button>
+            <span id="ppte-editor-title" style="font-weight:600;font-size:14px;">PPTE编辑</span>
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button id="ppt-reorder-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:13px;">调整顺序</button>
+            <button id="ppt-edit-config-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:13px;">编辑配置</button>
+            <button id="ppt-save-btn" style="padding:5px 12px;border-radius:4px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:13px;">保存</button>
+          </div>
+        </div>
+        <div style="display:flex;flex:1;overflow:hidden;">
+          <div id="ppte-page-list" style="width:280px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--bg-secondary);">
+            <div style="padding:8px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
+              <span style="font-size:12px;font-weight:500;color:var(--text-secondary);">页面目录</span>
+              <button id="ppte-add-page" style="padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);cursor:pointer;font-size:12px;">+ 添加</button>
+            </div>
+            <ul id="ppte-page-items" style="flex:1;overflow-y:auto;list-style:none;padding:0;margin:0;"></ul>
+          </div>
+          <div id="ppte-editor-content" style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:16px;">
+            <div id="ppte-editor-toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+              <input type="text" id="ppt-current-title" placeholder="页面标题" style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px;">
+              <button id="ppt-ai-chat-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;">AI助手</button>
+              <button id="ppt-visual-edit-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;">可视化调整</button>
+              <button id="ppt-preview-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;">预览</button>
+              <button id="ppt-play-btn2" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;">▶ 播放</button>
+              <button id="ppt-speaker-btn2" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;display:flex;align-items:center;gap:4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg> 演讲</button>
+              <button id="ppt-delete-current" style="padding:5px 12px;border-radius:4px;border:none;background:#e74c3c;color:#fff;cursor:pointer;font-size:12px;">删除</button>
+            </div>
+            <textarea id="ppt-current-html" placeholder="HTML 内容..." style="flex:1;width:100%;padding:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);font-family:monospace;font-size:13px;line-height:1.5;resize:none;box-sizing:border-box;"></textarea>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Auth Login Modal -->
+  <div id="auth-modal" class="hidden">
+    <div id="auth-modal-overlay"></div>
+    <div id="auth-modal-dialog">
+      <div class="auth-modal-header">
+        <span>账户</span>
+        <button id="auth-modal-close" title="关闭">✕</button>
+      </div>
+      <div class="auth-tabs">
+        <button class="auth-tab active" id="auth-tab-login">登录</button>
+        <button class="auth-tab" id="auth-tab-register">注册</button>
+      </div>
+      <div class="auth-modal-body">
+        <div id="auth-error" class="auth-error"></div>
+        <!-- Login Form -->
+        <div id="auth-login-form" class="auth-form">
+          <div class="auth-field">
+            <label for="auth-login-username">用户名</label>
+            <input type="text" id="auth-login-username" placeholder="请输入用户名" autocomplete="username">
+          </div>
+          <div class="auth-field">
+            <label for="auth-login-password">密码</label>
+            <input type="password" id="auth-login-password" placeholder="请输入密码" autocomplete="current-password">
+          </div>
+          <div class="auth-captcha" id="auth-captcha">
+            <div class="captcha-track" id="captcha-track">
+              <div class="captcha-fill" id="captcha-fill"></div>
+              <div class="captcha-thumb" id="captcha-thumb">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M8 5v14l11-7z"/>
+                </svg>
+              </div>
+              <span class="captcha-text" id="captcha-text">请向右滑动验证</span>
+            </div>
+            <div class="captcha-success" id="captcha-success" style="display:none;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="#52c41a">
+                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+              </svg>
+              <span>验证通过</span>
+            </div>
+          </div>
+          <button class="auth-submit-btn" id="auth-login-btn">登录</button>
+        </div>
+        <!-- Register Form -->
+        <div id="auth-register-form" class="auth-form" style="display:none;">
+          <div class="auth-field">
+            <label for="auth-register-username">用户名</label>
+            <input type="text" id="auth-register-username" placeholder="请输入用户名" autocomplete="username">
+          </div>
+          <div class="auth-field">
+            <label for="auth-register-password">密码</label>
+            <input type="password" id="auth-register-password" placeholder="请输入密码 (至少6位)" autocomplete="new-password">
+          </div>
+          <div class="auth-field">
+            <label for="auth-register-confirm">确认密码</label>
+            <input type="password" id="auth-register-confirm" placeholder="请再次输入密码" autocomplete="new-password">
+          </div>
+          <div class="auth-field">
+            <label for="auth-register-email">邮箱 <span class="auth-field-required">*</span></label>
+            <input type="email" id="auth-register-email" placeholder="请输入邮箱" autocomplete="email">
+          </div>
+          <div class="auth-captcha" id="auth-register-captcha">
+            <div class="captcha-track" id="register-captcha-track">
+              <div class="captcha-fill" id="register-captcha-fill"></div>
+              <div class="captcha-thumb" id="register-captcha-thumb">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M8 5v14l11-7z"/>
+                </svg>
+              </div>
+              <span class="captcha-text">请向右滑动验证</span>
+            </div>
+            <div class="captcha-success" id="register-captcha-success" style="display:none;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="#52c41a">
+                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+              </svg>
+              <span>验证通过</span>
+            </div>
+          </div>
+          <button class="auth-submit-btn" id="auth-register-btn">注册</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Profile Center Modal -->
+  <div id="profile-modal" class="hidden">
+    <div id="profile-modal-overlay"></div>
+    <div id="profile-modal-dialog">
+      <div class="auth-modal-header">
+        <span>个人中心</span>
+        <button id="profile-modal-close" title="关闭">✕</button>
+      </div>
+      <div class="profile-modal-body">
+        <!-- User Info Section -->
+        <div class="profile-section">
+          <div class="profile-user-info">
+            <div class="profile-avatar" id="profile-avatar"></div>
+            <div class="profile-details">
+              <div class="profile-username" id="profile-username"></div>
+              <div class="profile-email" id="profile-email"></div>
+              <div class="profile-role" id="profile-role"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Membership Section -->
+        <div class="profile-section" id="profile-membership-section">
+          <div class="profile-section-title">会员权益</div>
+          <div class="profile-membership-card" id="profile-membership-card">
+            <!-- Filled by JS -->
+          </div>
+          <div class="profile-benefits-list" id="profile-benefits-list">
+            <!-- Filled by JS -->
+          </div>
+        </div>
+
+        <!-- Change Password Section -->
+        <div class="profile-section">
+          <div class="profile-section-title">修改密码</div>
+          <div class="profile-password-form">
+            <div class="auth-field">
+              <label>当前密码</label>
+              <input type="password" id="profile-current-password" placeholder="请输入当前密码">
+            </div>
+            <div class="auth-field">
+              <label>新密码</label>
+              <input type="password" id="profile-new-password" placeholder="请输入新密码 (至少6位)">
+            </div>
+            <div class="auth-field">
+              <label>确认新密码</label>
+              <input type="password" id="profile-confirm-password" placeholder="请再次输入新密码">
+            </div>
+            <div id="profile-password-msg" class="profile-msg" style="display:none;"></div>
+            <button class="auth-submit-btn" id="profile-change-password-btn">修改密码</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Course Manager Modal -->
+  <div id="course-modal" class="hidden">
+    <div id="course-modal-overlay"></div>
+    <div id="course-modal-dialog">
+      <div class="course-modal-header">
+        <span>课程管理</span>
+        <button id="course-modal-close" title="关闭">✕</button>
+      </div>
+      <div class="course-modal-body">
+        <ul id="course-list"></ul>
+      </div>
+      <div class="course-modal-footer">
+        <button id="course-modal-create">+ 创建课程</button>
+        <button id="course-modal-import">+ 导入课程</button>
+        <button id="course-modal-create-ppt">+ 创建PPTE</button>
+        <button id="course-modal-open-ppt">打开PPTE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="hidden">
+    <div id="settings-modal-overlay"></div>
+    <div id="settings-modal-dialog">
+      <div class="course-modal-header">
+        <span>开发者设置</span>
+        <button id="settings-modal-close" title="关闭">✕</button>
+      </div>
+      <div class="settings-modal-body">
+        <div class="dev-settings-body" id="dev-settings-body">
+          <div class="dev-field">
+            <label>终端应用</label>
+            <div class="dev-field-row">
+              <select id="setting-terminal">
+                <option value="">自动检测</option>
+                <option value="iterm2">iTerm2</option>
+                <option value="terminal">Terminal.app</option>
+                <option value="warp">Warp (实验性)</option>
+              </select>
+              <button id="setting-detect-terminal" class="btn-detect" title="检测可用终端">检测</button>
+            </div>
+          </div>
+          <div class="dev-field">
+            <label>Python 路径</label>
+            <div class="dev-field-row">
+              <input type="text" id="setting-python-path" placeholder="自动检测 (如 /usr/bin/python3)">
+              <button id="setting-detect-python" class="btn-detect" title="检测 Python">检测</button>
+            </div>
+          </div>
+          <div class="dev-field">
+            <label>PPT-EXTRA 提示词</label>
+            <div class="dev-field-row">
+              <button id="btn-show-ppt-prompt" class="btn-detect" title="查看生成 PPT-EXTRA 的提示词">查看提示词</button>
+            </div>
+          </div>
+          <div class="dev-field">
+            <label>模板中心 - PPT-EXTRA 模板</label>
+            <div class="dev-field-row">
+              <input type="text" id="setting-template-path" placeholder="选择模板文件夹路径...">
+              <button id="setting-browse-template" class="btn-detect" title="浏览">浏览</button>
+              <button id="setting-export-template" class="btn-detect" title="导出模板到指定位置">导出模板</button>
+            </div>
+            <div class="dev-field-hint">设置 PPT-EXTRA 模板文件夹路径，或导出内置模板</div>
+          </div>
+          <div class="dev-field">
+            <label>AI 配置</label>
+            <div class="dev-field-row">
+              <select id="setting-ai-provider">
+                <option value="">未配置</option>
+                <option value="deepseek">Deepseek</option>
+                <option value="minimax">MINIMAX</option>
+              </select>
+            </div>
+            <div class="dev-field-row" style="margin-top:8px;">
+              <input type="password" id="setting-ai-apikey" placeholder="API Key">
+            </div>
+            <div class="dev-field-hint">选择 AI 提供商并配置你自己的 API Key</div>
+          </div>
+          <div class="dev-field" style="display:none">
+            <label>更新服务器</label>
+            <div class="dev-field-row">
+              <input type="text" id="setting-update-server" placeholder="https://example.com">
+            </div>
+            <div class="dev-field-hint">配置在线更新服务器地址</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDF Viewer Modal -->
+  <div id="pdf-modal" class="modal hidden">
+    <div class="modal-header">
+      <span id="pdf-title"></span>
+      <div class="modal-controls">
+        <button id="pdf-prev" title="上一页">‹</button>
+        <span id="pdf-page-info"></span>
+        <button id="pdf-next" title="下一页">›</button>
+        <button id="pdf-scroll-mode" title="切换滚动模式">☰</button>
+        <button id="pdf-close" title="关闭">✕</button>
+      </div>
+    </div>
+    <div id="pdf-container">
+      <canvas id="pdf-canvas"></canvas>
+      <div id="pdf-scroll-container" class="hidden"></div>
+    </div>
+  </div>
+
+  <!-- Markdown Viewer Modal -->
+  <div id="md-modal" class="modal hidden" tabindex="-1">
+    <div class="modal-header">
+      <span id="md-title"></span>
+      <button id="md-close" title="关闭">✕</button>
+    </div>
+    <div id="md-container">
+      <div id="md-body" class="markdown-body"></div>
+    </div>
+  </div>
+
+  <!-- Video Player Modal -->
+  <div id="video-modal" class="modal hidden">
+    <div class="modal-header">
+      <span id="video-title"></span>
+      <button id="video-close" title="关闭">✕</button>
+    </div>
+    <div id="video-container">
+      <video id="video-player" controls></video>
+    </div>
+  </div>
+
+  <!-- Code Viewer Modal -->
+  <div id="code-modal" class="modal hidden" tabindex="-1">
+    <div class="modal-header">
+      <span id="code-title"></span>
+      <div class="modal-controls">
+        <span id="code-lang-tag" class="code-lang-tag"></span>
+        <button id="code-copy" title="复制代码">复制</button>
+        <button id="code-run" class="hidden" title="在终端运行 (Cmd+R)">运行</button>
+        <button id="code-open-external" title="用外部编辑器打开">外部打开</button>
+        <button id="code-close" title="关闭">✕</button>
+      </div>
+    </div>
+    <div id="code-body" class="code-body"></div>
+  </div>
+
+  <!-- HTML Viewer Modal -->
+  <div id="html-modal" class="modal hidden">
+    <div class="modal-header">
+      <span id="html-title"></span>
+      <button id="html-close" title="关闭">✕</button>
+    </div>
+    <div id="html-container">
+      <iframe id="html-iframe" sandbox="allow-same-origin allow-scripts allow-popups" src="about:blank"></iframe>
+    </div>
+  </div>
+
+  <!-- PPT-EXTRA Viewer Modal -->
+  <div id="ppt-extra-modal" class="modal hidden">
+    <div class="ppt-extra-header">
+      <span id="ppt-extra-title"></span>
+      <div class="ppt-extra-actions">
+        <button id="ppt-extra-export" title="导出为 PowerPoint"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>
+        <button id="ppt-extra-speaker" title="演讲者模式 (S)" style="display:none"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg></button>
+        <button id="ppt-extra-play" title="播放模式 (F)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg></button>
+        <button id="ppt-extra-close" title="关闭 (Esc)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+    </div>
+    <div id="ppt-extra-body">
+      <div id="ppt-extra-toc">
+        <div class="ppt-extra-toc-header">目录</div>
+        <ul id="ppt-extra-toc-list"></ul>
+      </div>
+      <div id="ppt-extra-container">
+        <iframe id="ppt-extra-iframe" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation" src="about:blank"></iframe>
+      </div>
+    </div>
+    <!-- Speaker View (hidden by default) -->
+    <div id="speaker-view" class="hidden">
+      <div class="speaker-header">
+        <span id="speaker-title" class="speaker-title"></span>
+        <div class="speaker-timer-controls">
+          <span id="speaker-timer">00:00</span>
+          <button id="speaker-timer-toggle" title="开始/暂停计时">▶</button>
+        </div>
+      </div>
+      <div class="speaker-body">
+        <div class="speaker-left">
+          <div class="speaker-current-label">当前幻灯片</div>
+          <div class="speaker-current-frame">
+            <iframe id="speaker-current-slide" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation" src="about:blank"></iframe>
+          </div>
+          <div class="speaker-next-label">下一页预览</div>
+          <div class="speaker-next-frame">
+            <iframe id="speaker-next-slide" sandbox="allow-same-origin allow-scripts allow-popups" src="about:blank"></iframe>
+          </div>
+        </div>
+        <div class="speaker-right">
+          <div class="speaker-notes-header">
+            <span class="speaker-notes-label">演讲者笔记</span>
+            <button id="speaker-notes-toggle" class="speaker-notes-mode-btn" title="切换编辑/预览">编辑</button>
+          </div>
+          <div id="speaker-notes-preview" class="speaker-notes markdown-body"></div>
+          <textarea id="speaker-notes-edit" class="speaker-notes speaker-notes-editing hidden" placeholder="支持 Markdown 格式..."></textarea>
+        </div>
+      </div>
+      <div class="speaker-footer">
+        <div class="speaker-nav">
+          <button id="speaker-prev" title="上一页 (←)">⏮</button>
+          <button id="speaker-prev-fast" title="上一页">◀</button>
+          <span id="speaker-page-info">1/10</span>
+          <button id="speaker-next-fast" title="下一页">▶</button>
+          <button id="speaker-next" title="下一页 (→)">⏭</button>
+        </div>
+        <div class="speaker-actions">
+          <button id="speaker-toggle-audience" title="观众窗口全屏">🔲 全屏</button>
+          <button id="speaker-exit" title="退出演讲者模式">✕ 退出</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Course Creator Wizard -->
+  <div id="creator-modal" class="hidden">
+    <div class="creator-header">
+      <span class="creator-title">创建课程</span>
+      <span class="creator-step-info" id="creator-step-info">步骤 1 / 2</span>
+      <div class="creator-header-actions">
+        <button id="creator-cancel">取消</button>
+        <button id="creator-prev" style="display:none">上一步</button>
+        <button id="creator-next" class="btn-primary">下一步</button>
+        <button id="creator-save" class="btn-primary" style="display:none">保存课程</button>
+      </div>
+    </div>
+    <div class="creator-body">
+      <!-- Step 1: Metadata -->
+      <div id="creator-step-1" class="step active">
+        <div class="creator-field">
+          <label>课程标题 <span class="required">*</span></label>
+          <input type="text" id="creator-course-title" placeholder="如：机器学习导论">
+        </div>
+        <div class="creator-field">
+          <label>副标题</label>
+          <input type="text" id="creator-course-subtitle" placeholder="如：2026 春季学期">
+        </div>
+        <div class="creator-field">
+          <label>讲师</label>
+          <input type="text" id="creator-course-instructor" placeholder="如：张三">
+        </div>
+      </div>
+      <!-- Step 2: Sections & Resources -->
+      <div id="creator-step-2" class="step">
+        <div id="creator-sections" class="section-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- About Modal -->
+  <div id="about-modal" class="hidden">
+    <div id="about-modal-overlay"></div>
+    <div id="about-modal-dialog">
+      <div class="about-close-btn" id="about-modal-close" title="关闭">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </div>
+      <div class="about-icon">
+        <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <path d="M8 21h8M12 17v4"/>
+          <path d="M7 8h2v5H7zM11 6h2v7h-2zM15 10h2v3h-2z" fill="var(--accent)" stroke="none"/>
+        </svg>
+      </div>
+      <div class="about-app-name">Lecture Presenter</div>
+      <div class="about-version">Version 0.1.0</div>
+      <div class="about-description">专业的课程演示工具</div>
+      <div class="about-divider"></div>
+      <div class="about-info-grid">
+        <div class="about-info-label">Author</div>
+        <div class="about-info-value">jingyi.wang</div>
+        <div class="about-info-label">Email</div>
+        <div class="about-info-value">pentaqwang@gmail.com</div>
+      </div>
+      <div class="about-divider"></div>
+      <div class="about-copyright">Copyright &copy; 2026 jingyi.wang. All rights reserved.</div>
+    </div>
+  </div>
+
+  <script src="vendor/pdf.min.js"></script>
+  <script src="vendor/pptxgen.bundle.js"></script>
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
+  <script src="js/tracker.js"></script>
+  <script src="js/icons.js"></script>
+  <script src="js/course-loader.js"></script>
+  <script src="js/sidebar.js"></script>
+  <script src="js/pdf-viewer.js"></script>
+  <script src="js/video-player.js"></script>
+  <script src="js/md-viewer.js"></script>
+  <script src="js/html-viewer.js"></script>
+  <script src="js/ppte-ppt-exporter.js"></script>
+  <script src="js/ppt-extra-viewer.js"></script>
+  <script src="js/code-viewer.js"></script>
+  <script src="js/content.js"></script>
+  <script src="js/course-manager.js"></script>
+  <script src="js/course-creator.js"></script>
+  <script src="js/settings.js"></script>
+  <script src="js/drag.js"></script>
+  <script src="js/updater.js"></script>
+  <script src="js/notification-center.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

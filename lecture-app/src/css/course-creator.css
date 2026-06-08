@@ -1,0 +1,439 @@
+/* ===== Course Creator Wizard ===== */
+#creator-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3000;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+}
+
+#creator-modal.hidden {
+  display: none;
+}
+
+/* Header */
+.creator-header {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px 0 80px; /* 80px left for macOS traffic lights */
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.creator-header .creator-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.creator-header .creator-step-info {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.creator-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.creator-header-actions button {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.creator-header-actions button:hover {
+  background: var(--bg-hover);
+}
+
+.creator-header-actions .btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.creator-header-actions .btn-primary:hover {
+  opacity: 0.9;
+}
+
+.creator-header-actions .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Body */
+.creator-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 40px;
+}
+
+.creator-body .step {
+  display: none;
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.creator-body .step.active {
+  display: block;
+}
+
+/* Form fields */
+.creator-field {
+  margin-bottom: 20px;
+}
+
+.creator-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.creator-field label .required {
+  color: #f85149;
+  margin-left: 2px;
+}
+
+.creator-field input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.creator-field input:focus {
+  border-color: var(--accent);
+}
+
+.creator-field input.invalid {
+  border-color: #f85149;
+}
+
+/* Section list */
+.section-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.section-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+}
+
+.section-header:active {
+  cursor: grabbing;
+}
+
+.section-header .drag-handle {
+  color: var(--text-muted);
+  font-size: 14px;
+  user-select: none;
+}
+
+.section-header input {
+  flex: 1;
+  padding: 4px 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  outline: none;
+}
+
+.section-header input:focus {
+  border-color: var(--accent);
+}
+
+.section-header .section-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.section-header .section-actions button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.section-header .section-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.section-header .section-actions .btn-delete-section:hover {
+  color: #f85149;
+}
+
+/* Resource list inside section */
+.section-resources {
+  padding: 8px 16px 12px;
+  min-height: 40px;
+}
+
+.resource-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  transition: background 0.1s;
+  cursor: grab;
+}
+
+.resource-item:active {
+  cursor: grabbing;
+}
+
+.resource-item:hover {
+  background: var(--bg-hover);
+}
+
+.resource-item .res-drag {
+  color: var(--text-muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.resource-item .res-icon {
+  width: 24px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.resource-item .res-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.resource-item .res-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.resource-item .res-title {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-item .res-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-item .res-type {
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.resource-item .res-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.resource-item:hover .res-remove {
+  opacity: 1;
+}
+
+.resource-item .res-remove:hover {
+  color: #f85149;
+}
+
+.resource-item .res-title {
+  cursor: text;
+}
+
+.resource-item .res-title:hover {
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--text-muted);
+}
+
+.resource-item .res-title-input {
+  width: 100%;
+  padding: 1px 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  outline: none;
+}
+
+/* Section action buttons */
+.section-add-actions {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px 12px;
+}
+
+.section-add-actions button {
+  padding: 5px 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.section-add-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-style: solid;
+}
+
+/* Add section button */
+.btn-add-section {
+  width: 100%;
+  padding: 12px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-top: 8px;
+}
+
+.btn-add-section:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* URL input inline */
+.url-input-row {
+  display: flex;
+  gap: 6px;
+  padding: 4px 16px 8px;
+}
+
+.url-input-row input {
+  flex: 1;
+  padding: 5px 10px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  outline: none;
+}
+
+.url-input-row input:focus {
+  border-color: var(--accent);
+}
+
+.url-input-row button {
+  padding: 5px 10px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.url-input-row .btn-cancel-url {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+/* Drag states */
+.section-card.dragging {
+  opacity: 0.4;
+}
+
+.section-card.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+.resource-item.dragging {
+  opacity: 0.4;
+}
+
+.resource-item.drag-over {
+  border-top: 2px solid var(--accent);
+}
+
+/* PPT Builder Modal */
+#ppt-builder-modal .ppt-slide-item.dragging {
+  opacity: 0.4;
+}
+
+#ppt-builder-modal .ppt-slide-item.drag-over {
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+#ppt-builder-modal .ppt-slide-item:hover {
+  background: var(--bg-hover);
+}
+
+#ppt-builder-modal .ppt-slide-drag:hover {
+  color: var(--accent) !important;
+}

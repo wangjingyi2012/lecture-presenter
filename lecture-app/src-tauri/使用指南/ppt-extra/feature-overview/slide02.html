@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>目录</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;700;900&display=swap');
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(160deg, #0f0f23 0%, #1a1a3e 50%, #0f0f23 100%);
+            font-family: 'Noto Sans SC', -apple-system, 'PingFang SC', sans-serif;
+            color: #ffffff;
+        }
+
+        .slide {
+            width: min(100vw, 177.78vh);
+            height: min(100vh, 56.25vw);
+            max-width: 100vw;
+            max-height: 100vh;
+            padding: 60px 80px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .page-title {
+            font-size: 2.2em;
+            font-weight: 700;
+            margin: 0 0 8px 0;
+            background: linear-gradient(90deg, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .page-subtitle {
+            font-size: 1em;
+            color: rgba(255, 255, 255, 0.4);
+            margin: 0 0 40px 0;
+            font-weight: 300;
+        }
+
+        .catalog-list {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            flex: 1;
+            justify-content: center;
+        }
+
+        .catalog-item {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            padding: 20px 28px;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            transition: all 0.3s ease;
+        }
+
+        .catalog-item:hover {
+            background: rgba(99, 102, 241, 0.08);
+            border-color: rgba(99, 102, 241, 0.2);
+        }
+
+        .item-number {
+            font-size: 2em;
+            font-weight: 900;
+            background: linear-gradient(135deg, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            min-width: 50px;
+            text-align: center;
+        }
+
+        .item-content {
+            flex: 1;
+        }
+
+        .item-title {
+            font-size: 1.3em;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .item-desc {
+            font-size: 0.9em;
+            color: rgba(255, 255, 255, 0.5);
+            font-weight: 300;
+        }
+    </style>
+</head>
+<body>
+    <div class="slide">
+        <h1 class="page-title">目录</h1>
+        <p class="page-subtitle">CONTENTS</p>
+
+        <div class="catalog-list">
+            <div class="catalog-item">
+                <span class="item-number">01</span>
+                <div class="item-content">
+                    <div class="item-title">多格式内容支持</div>
+                    <div class="item-desc">PDF、视频、Markdown、代码、HTML、PPTE 一站浏览</div>
+                </div>
+            </div>
+
+            <div class="catalog-item">
+                <span class="item-number">02</span>
+                <div class="item-content">
+                    <div class="item-title">支持的资源格式</div>
+                    <div class="item-desc">内置专业查看器，覆盖所有常见教学资源格式</div>
+                </div>
+            </div>
+
+            <div class="catalog-item">
+                <span class="item-number">03</span>
+                <div class="item-content">
+                    <div class="item-title">AI 智能辅助</div>
+                    <div class="item-desc">自配置 AI 辅助幻灯片编辑与内容创作</div>
+                </div>
+            </div>
+
+            <div class="catalog-item">
+                <span class="item-number">04</span>
+                <div class="item-content">
+                    <div class="item-title">开始使用</div>
+                    <div class="item-desc">快速上手，开启你的智能演示之旅</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

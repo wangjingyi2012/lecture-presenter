@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多格式内容支持</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;700;900&display=swap');
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #0f0f23 0%, #1e1b4b 50%, #312e81 100%);
+            font-family: 'Noto Sans SC', -apple-system, 'PingFang SC', sans-serif;
+            color: #ffffff;
+        }
+
+        .slide {
+            width: min(100vw, 177.78vh);
+            height: min(100vh, 56.25vw);
+            max-width: 100vw;
+            max-height: 100vh;
+            padding: 60px 80px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+
+        .slide::before {
+            content: '';
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(99, 102, 241, 0.08) 0%, transparent 70%);
+            top: -200px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .chapter-number {
+            font-size: 1em;
+            font-weight: 300;
+            letter-spacing: 0.3em;
+            color: rgba(255, 255, 255, 0.3);
+            text-transform: uppercase;
+            margin-bottom: 16px;
+        }
+
+        .chapter-title {
+            font-size: 3.2em;
+            font-weight: 900;
+            margin: 0 0 20px 0;
+            background: linear-gradient(135deg, #818cf8 0%, #a78bfa 50%, #c084fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: 0.05em;
+        }
+
+        .chapter-desc {
+            font-size: 1.3em;
+            font-weight: 300;
+            color: rgba(255, 255, 255, 0.6);
+            text-align: center;
+            max-width: 700px;
+            line-height: 1.8;
+        }
+
+        .accent-line {
+            width: 80px;
+            height: 4px;
+            background: linear-gradient(90deg, #818cf8, #c084fc);
+            border-radius: 2px;
+            margin: 30px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="slide">
+        <div class="chapter-number">Chapter 01</div>
+        <h1 class="chapter-title">多格式内容支持</h1>
+        <div class="accent-line"></div>
+        <p class="chapter-desc">
+            一个应用，浏览所有教学资源<br>
+            PDF、视频、代码、Markdown、HTML、PPTE<br>
+            无需切换工具，专注于学习与教学
+        </p>
+    </div>
+</body>
+</html>

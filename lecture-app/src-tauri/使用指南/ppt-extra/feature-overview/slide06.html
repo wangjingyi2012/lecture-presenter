@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>开始使用演讲宝</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;700;900&display=swap');
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #0c0c1d 0%, #1a1a3e 30%, #2d1b69 60%, #1a1a3e 100%);
+            font-family: 'Noto Sans SC', -apple-system, 'PingFang SC', sans-serif;
+            color: #ffffff;
+        }
+
+        .slide {
+            width: min(100vw, 177.78vh);
+            height: min(100vh, 56.25vw);
+            max-width: 100vw;
+            max-height: 100vh;
+            padding: 60px 80px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .slide::before {
+            content: '';
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(168, 85, 247, 0.12) 0%, transparent 70%);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .finish-icon {
+            font-size: 3.5em;
+            margin-bottom: 24px;
+            filter: drop-shadow(0 4px 20px rgba(168, 85, 247, 0.4));
+        }
+
+        .finish-title {
+            font-size: 2.8em;
+            font-weight: 900;
+            margin: 0 0 16px 0;
+            background: linear-gradient(135deg, #818cf8 0%, #c084fc 50%, #f472b6 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: 0.06em;
+        }
+
+        .finish-subtitle {
+            font-size: 1.3em;
+            font-weight: 300;
+            color: rgba(255, 255, 255, 0.6);
+            margin: 0 0 40px 0;
+            letter-spacing: 0.08em;
+        }
+
+        .divider {
+            width: 100px;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, #818cf8, #c084fc, transparent);
+            border-radius: 2px;
+            margin-bottom: 40px;
+        }
+
+        .steps {
+            display: flex;
+            gap: 40px;
+            margin-bottom: 40px;
+        }
+
+        .step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .step-circle {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px solid rgba(129, 140, 248, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5em;
+        }
+
+        .step-label {
+            font-size: 0.85em;
+            color: rgba(255, 255, 255, 0.5);
+            font-weight: 300;
+        }
+
+        .step-connector {
+            display: flex;
+            align-items: center;
+            color: rgba(255, 255, 255, 0.15);
+            font-size: 1.5em;
+            padding-bottom: 28px;
+        }
+
+        .footer-text {
+            font-size: 1em;
+            color: rgba(255, 255, 255, 0.4);
+            font-weight: 300;
+            letter-spacing: 0.05em;
+        }
+
+        .footer-text span {
+            background: linear-gradient(90deg, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body>
+    <div class="slide">
+        <div class="finish-icon">&#127881;</div>
+        <h1 class="finish-title">开始使用演讲宝</h1>
+        <p class="finish-subtitle">你的智能演示之旅，从这里启程</p>
+        <div class="divider"></div>
+
+        <div class="steps">
+            <div class="step">
+                <div class="step-circle">&#128230;</div>
+                <div class="step-label">安装应用</div>
+            </div>
+            <div class="step-connector">&#10140;</div>
+            <div class="step">
+                <div class="step-circle">&#128194;</div>
+                <div class="step-label">导入课程</div>
+            </div>
+            <div class="step-connector">&#10140;</div>
+            <div class="step">
+                <div class="step-circle">&#128214;</div>
+                <div class="step-label">浏览内容</div>
+            </div>
+            <div class="step-connector">&#10140;</div>
+            <div class="step">
+                <div class="step-circle">&#127912;</div>
+                <div class="step-label">制作幻灯片</div>
+            </div>
+            <div class="step-connector">&#10140;</div>
+            <div class="step">
+                <div class="step-circle">&#129302;</div>
+                <div class="step-label">AI 辅助</div>
+            </div>
+        </div>
+
+        <p class="footer-text">感谢使用 <span>演讲宝</span> &mdash; Lecture Presenter</p>
+    </div>
+</body>
+</html>

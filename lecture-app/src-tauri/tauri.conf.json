@@ -1,0 +1,65 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/v2/crates/tauri-utils/schema.json",
+  "productName": "Lecture Presenter",
+  "version": "0.1.0",
+  "identifier": "com.lecture.presenter",
+  "build": {
+    "frontendDist": "../src",
+    "devUrl": "http://localhost:1420"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Lecture Presenter",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' slide:; script-src 'self' 'unsafe-inline' slide:; style-src 'self' 'unsafe-inline' asset: https://asset.localhost slide:; font-src 'self' asset: https://asset.localhost slide: data:; img-src 'self' asset: https://asset.localhost slide: data:; media-src 'self' asset: https://asset.localhost slide:; connect-src 'self' ipc: http://ipc.localhost asset: https://asset.localhost slide: http://localhost:* https://api.deepseek.com https://api.minimaxi.com; frame-src 'self' asset: https://asset.localhost slide: http://localhost:* https://localhost:* https://* http://*",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app", "nsis"],
+    "copyright": "Copyright 2026 jingyi.wang. All rights reserved.",
+    "shortDescription": "Professional course presentation and PPT editing tool",
+    "longDescription": "Lecture Presenter - 专业的课程演示与PPT编辑工具。A Tauri 2 desktop application for browsing course materials including slides, videos, readings, and assignments, with built-in PPT-EXTRA slide editing capabilities.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "nsis": {
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": true
+      }
+    },
+    "resources": [
+      "app-config.json",
+      "PPT-Template",
+      "使用指南"
+    ]
+  },
+  "plugins": {
+    "shell": {
+      "open": ".*"
+    }
+  }
+}

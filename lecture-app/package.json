@@ -1,0 +1,20 @@
+{
+  "name": "lecture-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:release": "node scripts/build-obfuscated.js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "javascript-obfuscator": "^5.3.0"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-shell": "^2.3.5",
+    "pptxgenjs": "^4.0.1"
+  }
+}

@@ -1,0 +1,48 @@
+/* ===== Theme Variables ===== */
+:root {
+  --font-size: 18px;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #1c2128;
+  --bg-hover: #1f2937;
+  --border: #30363d;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --accent: #58a6ff;
+  --accent-hover: #79b8ff;
+  --accent-bg: rgba(88, 166, 255, 0.1);
+  --card-bg: #161b22;
+  --card-border: #30363d;
+  --card-hover: #1c2128;
+  --scrollbar-track: #161b22;
+  --scrollbar-thumb: #30363d;
+  --modal-bg: #0d1117;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --sidebar-active: rgba(88, 166, 255, 0.15);
+}
+
+[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #eaeef2;
+  --bg-hover: #eaeef2;
+  --border: #d0d7de;
+  --text-primary: #1f2328;
+  --text-secondary: #656d76;
+  --text-muted: #8b949e;
+  --accent: #0969da;
+  --accent-hover: #0550ae;
+  --accent-bg: rgba(9, 105, 218, 0.08);
+  --card-bg: #ffffff;
+  --card-border: #d0d7de;
+  --card-hover: #f6f8fa;
+  --scrollbar-track: #f6f8fa;
+  --scrollbar-thumb: #d0d7de;
+  --modal-bg: #ffffff;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --sidebar-active: rgba(9, 105, 218, 0.1);
+}

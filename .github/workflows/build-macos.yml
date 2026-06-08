@@ -1,0 +1,43 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lecture-app/src-tauri
+
+      - name: Install dependencies
+        working-directory: lecture-app
+        run: npm ci
+
+      - name: Build Tauri app
+        working-directory: lecture-app
+        run: npm run build
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: LecturePresenter-macOS-DMG
+          path: lecture-app/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
