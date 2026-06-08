@@ -68,3 +68,29 @@ git commit -m "Initial public client release"
 git branch -M main
 git push -u origin main
 ```
+
+## macOS Releases / macOS 发布
+
+macOS installers are built by `.github/workflows/build-macos.yml`.
+
+Tag pushes such as `v0.1.0` create or update a GitHub Release with two DMG files:
+
+- `Lecture-Presenter_0.1.0_macOS_aarch64.dmg` for Apple Silicon Macs, including M1/M2/M3/M4.
+- `Lecture-Presenter_0.1.0_macOS_x64.dmg` for Intel Macs.
+
+Create a release from the repository root:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow can also be run manually from GitHub Actions. Manual runs upload the
+DMGs as workflow artifacts but do not create a GitHub Release unless the run is
+triggered by a tag.
+
+### Signing and Notarization / 签名与公证
+
+The current public workflow builds unsigned DMGs. macOS users may see a Gatekeeper
+warning when opening them. For a polished public release, configure an Apple
+Developer ID certificate and notarization credentials in GitHub Actions secrets.
