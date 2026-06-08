@@ -176,7 +176,7 @@ macOS: ~/Library/Application Support/com.lecture-presenter.app/
 
 ### Q: 如何反馈问题或建议？
 
-请在 GitHub 仓库提交 Issue 或 Pull Request。
+访问演讲宝官网 [www.hz-study-system.com](https://www.hz-study-system.com) 获取联系方式和反馈渠道。
 
 ### Q: 应用更新后课程数据会丢失吗？
 

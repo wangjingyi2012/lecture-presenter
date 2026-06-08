@@ -1,7 +1,7 @@
 // auth.js — Authentication state management and login UI
 window.Auth = {
-  serverUrl: '',
-  membershipUrl: '',
+  serverUrl: 'https://www.hz-study-system.com',
+  membershipUrl: 'https://www.hz-study-system.com/membership',
   _token: null,
   _user: null,
   _captchaVerified: false,
@@ -17,8 +17,8 @@ window.Auth = {
 
   async init(config = {}) {
     try {
-      this.serverUrl = config.authServer || '';
-      this.membershipUrl = config.membershipUrl || '';
+      this.serverUrl = config.authServer || this.serverUrl;
+      this.membershipUrl = config.membershipUrl || this.membershipUrl;
       this.log('Auth init');
       this._token = localStorage.getItem('auth_token');
       const savedUser = localStorage.getItem('auth_user');
@@ -92,9 +92,6 @@ window.Auth = {
   },
 
   async login(username, password) {
-    if (!this.serverUrl) {
-      return { success: false, detail: '当前公开版未配置账号服务' };
-    }
     try {
       const resp = await fetch(`${this.serverUrl}/api/auth/login`, {
         method: 'POST',
@@ -118,9 +115,6 @@ window.Auth = {
   },
 
   async register(username, password, email) {
-    if (!this.serverUrl) {
-      return { success: false, detail: '当前公开版未配置账号服务' };
-    }
     try {
       const body = { username, password, email };
 
@@ -136,7 +130,6 @@ window.Auth = {
       }
 
       this._setAuth(data.token, data.user);
-      Tracker.track('register', data.user.username);
       this.log('Register success: ' + data.user.username);
       return { success: true, user: data.user };
     } catch (err) {
@@ -146,7 +139,6 @@ window.Auth = {
   },
 
   logout() {
-    Tracker.track('logout');
     this._token = null;
     this._user = null;
     localStorage.removeItem('auth_token');
@@ -524,16 +516,6 @@ window.Auth = {
     const container = document.getElementById('auth-titlebar');
     if (!container) return;
 
-    if (!this.serverUrl) {
-      container.innerHTML = '';
-      const notifCenter = document.getElementById('notification-center');
-      if (notifCenter) notifCenter.style.display = 'none';
-      const aboutBtn = document.getElementById('btn-about');
-      if (aboutBtn) aboutBtn.style.display = '';
-      document.removeEventListener('click', this._closeDropdownHandler);
-      return;
-    }
-
     if (this.isLoggedIn()) {
       const level = this.getMembership();
       const membershipName = this.getMembershipName();
@@ -790,7 +772,7 @@ window.Auth = {
 
   async _handleChangePassword() {
     if (!this.serverUrl) {
-      this._showProfileMsg('当前公开版未配置账号服务', 'error');
+      this._showProfileMsg('账号服务暂不可用', 'error');
       return;
     }
     const current = document.getElementById('profile-current-password')?.value || '';

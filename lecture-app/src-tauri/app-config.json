@@ -3,5 +3,10 @@
   "lastOpenedCourse": "",
   "theme": "dark",
   "fontSize": 16,
-  "autoCheckUpdate": false
+  "updateServer": "https://www.hz-study-system.com",
+  "authServer": "https://www.hz-study-system.com",
+  "notificationServer": "https://www.hz-study-system.com",
+  "membershipUrl": "https://www.hz-study-system.com/membership",
+  "analyticsEndpoint": "https://www.hz-study-system.com/api/analytics/track",
+  "autoCheckUpdate": true
 }

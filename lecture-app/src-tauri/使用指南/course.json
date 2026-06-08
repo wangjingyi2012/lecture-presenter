@@ -52,7 +52,7 @@
         "videos": [],
         "readings": [
           { "title": "示例 PDF 文档", "file": "pdfs/sample.pdf" },
-          { "title": "项目源码", "url": "https://github.com/wangjingyi2012/lecture-presenter" }
+          { "title": "演讲宝官网", "url": "https://www.hz-study-system.com" }
         ],
         "assignments": [],
         "sourceCode": [
@@ -81,13 +81,13 @@
     {
       "number": 5,
       "title": "高级功能",
-      "description": "探索快捷键、自配置 AI 助手等高级功能，以及常见问题的解答。",
+      "description": "探索快捷键、LectureAI 智能助手、会员体系等高级功能，以及常见问题的解答。",
       "resources": {
         "slides": [],
         "videos": [],
         "readings": [
           { "title": "快捷键大全", "file": "docs/08-shortcuts.md" },
-          { "title": "AI 助手配置", "file": "docs/09-ai-membership.md" },
+          { "title": "LectureAI 与会员", "file": "docs/09-ai-membership.md" },
           { "title": "常见问题", "file": "docs/10-faq.md" }
         ],
         "assignments": [],

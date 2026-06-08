@@ -5,7 +5,7 @@ if (window.errorLogs) {
 
 window.NotificationCenter = {
   notifications: [],
-  serverUrl: '',
+  serverUrl: 'https://www.hz-study-system.com',
   currentVersion: '0.1.0',
 
   log(msg) {
@@ -17,7 +17,7 @@ window.NotificationCenter = {
 
   async init(config) {
     try {
-      this.serverUrl = (config && (config.notificationServer || config.updateServer)) || '';
+      this.serverUrl = (config && (config.notificationServer || config.updateServer)) || this.serverUrl;
       this.log('NotificationCenter init');
       if (!this.serverUrl) {
         this.notifications = [];

@@ -59,6 +59,14 @@ pub struct AppConfig {
     pub ai_api_key: Option<String>,
     #[serde(default, rename = "updateServer", skip_serializing_if = "Option::is_none")]
     pub update_server: Option<String>,
+    #[serde(default, rename = "authServer", skip_serializing_if = "Option::is_none")]
+    pub auth_server: Option<String>,
+    #[serde(default, rename = "notificationServer", skip_serializing_if = "Option::is_none")]
+    pub notification_server: Option<String>,
+    #[serde(default, rename = "membershipUrl", skip_serializing_if = "Option::is_none")]
+    pub membership_url: Option<String>,
+    #[serde(default, rename = "analyticsEndpoint", skip_serializing_if = "Option::is_none")]
+    pub analytics_endpoint: Option<String>,
     #[serde(default, rename = "autoCheckUpdate", skip_serializing_if = "Option::is_none")]
     pub auto_check_update: Option<bool>,
 }
@@ -1229,8 +1237,51 @@ async fn call_minimax(api_key: String, system_prompt: String, user_msg: String) 
 }
 
 async fn call_lectureai(auth_token: String, system_prompt: String, user_msg: String) -> Result<String, String> {
-    let _ = (auth_token, system_prompt, user_msg);
-    Err("当前公开版未配置托管 LectureAI 服务，请改用 DeepSeek 或 MiniMax 并填写自己的 API Key".to_string())
+    // Check login before making request
+    if auth_token.is_empty() {
+        return Err("请先登录后才能使用 LectureAI".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "system_prompt": system_prompt,
+        "user_msg": user_msg
+    });
+
+    let response = client
+        .post("https://www.hz-study-system.com/api/ai/chat")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", auth_token))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败，请检查网络连接: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let error_text = response.text().await.unwrap_or_default();
+        return match status {
+            401 => Err("请先登录后才能使用 LectureAI".to_string()),
+            403 => Err("账号已被禁用，请联系管理员".to_string()),
+            429 => {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_text) {
+                    if let Some(detail) = json.get("detail").and_then(|d| d.as_str()) {
+                        return Err(detail.to_string());
+                    }
+                }
+                Err("今日 AI 使用次数已达上限，请明天再试或升级会员".to_string())
+            },
+            503 => Err("AI 服务暂未配置，请联系管理员".to_string()),
+            _ => Err(format!("AI 服务错误 ({})", status)),
+        };
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+
+    data.get("content")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "响应格式错误".to_string())
 }
 
 async fn call_minimax_stream(

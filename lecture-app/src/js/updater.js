@@ -1,7 +1,7 @@
 const { invoke } = window.__TAURI__.core;
 
 window.Updater = {
-  serverUrl: '',
+  serverUrl: 'https://www.hz-study-system.com',
   currentVersion: '0.1.0',
 
   log(msg) {
@@ -12,11 +12,11 @@ window.Updater = {
   },
 
   async init(config) {
-    this.serverUrl = (config && config.updateServer) || '';
+    this.serverUrl = (config && config.updateServer) || this.serverUrl;
     this.log('Updater init');
     this.log('Update server URL: ' + this.serverUrl);
 
-    const autoCheck = !!this.serverUrl && config.autoCheckUpdate === true;
+    const autoCheck = !!this.serverUrl && config.autoCheckUpdate !== false;
     this.log('Auto check update: ' + autoCheck);
 
     if (autoCheck) {

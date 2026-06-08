@@ -12,18 +12,8 @@ Lecture Presenter（演讲宝）是一个基于 Tauri 2 的桌面课程演示工
 - 多格式预览：内置 PDF.js、Markdown 渲染、代码高亮和视频播放。
 - PPTE 幻灯片：支持 HTML 幻灯片播放、演讲者模式、可视化调整和导出。
 - 本地课程管理：可导入已有课程目录，也可在应用内创建课程。
-- 可选 AI 辅助：支持用户在本机配置自己的 DeepSeek 或 MiniMax API Key。
-
-### 公开仓库范围
-
-这个公开版本只包含客户端相关代码：
-
-- `lecture-app/`：Tauri 桌面应用
-- `lecture-app/src-tauri/使用指南/`：内置示例课程
-- `lecture-app/src-tauri/PPT-Template/`：内置 PPTE 模板
-- `COURSE_FORMAT.md`：课程格式说明
-
-不包含服务端、部署脚本、数据库、私有配置或密钥。在线更新、账号系统、会员系统、通知和托管 AI 服务对应的服务端代码不在本仓库中。
+- AI 辅助：支持 LectureAI，也支持用户配置自己的 DeepSeek 或 MiniMax API Key。
+- 在线服务：支持账号登录、会员权益、通知和在线更新。
 
 ### 开发环境
 
@@ -54,13 +44,9 @@ npm run build
 
 课程目录需要包含一个 `course.json`。详细字段和资源类型见 [COURSE_FORMAT.md](COURSE_FORMAT.md)。
 
-### 密钥与本地配置
+### 本地配置
 
-不要把真实密钥提交到 Git。应用内配置的 AI API Key 会写入本机应用数据目录中的 `app-config.json`，公开仓库中的默认 `app-config.json` 不应包含任何真实密钥、个人路径或私有服务地址。
-
-### GitHub 发布建议
-
-如果你的本地工作仓库历史中曾经包含密钥、服务端代码或私有课程内容，不要直接把原仓库历史推到公开 GitHub 仓库。请创建一个干净发布副本，重新初始化 Git，只提交公开客户端文件。
+应用设置会保存到本机应用数据目录。用户自配置的 AI API Key 只用于调用对应 AI 提供商，请不要把个人配置文件提交到 Git。
 
 ## English
 
@@ -72,18 +58,8 @@ Lecture Presenter is a Tauri 2 desktop app for presenting, browsing, and editing
 - Built-in PDF.js rendering, Markdown viewing, code highlighting, and video playback.
 - PPTE slide playback, speaker mode, visual adjustment tools, and export support.
 - Local course import and in-app course creation.
-- Optional AI assistance with user-provided DeepSeek or MiniMax API keys stored locally.
-
-### Public Repository Scope
-
-This public repository contains client-side code only:
-
-- `lecture-app/`: the Tauri desktop app
-- `lecture-app/src-tauri/使用指南/`: bundled sample course
-- `lecture-app/src-tauri/PPT-Template/`: bundled PPTE templates
-- `COURSE_FORMAT.md`: course format documentation
-
-It does not include server code, deployment scripts, databases, private configuration, or secrets. Server-side features such as hosted updates, accounts, memberships, notifications, and hosted AI are outside this repository.
+- AI assistance through LectureAI or user-provided DeepSeek / MiniMax API keys.
+- Online services for account login, memberships, notifications, and updates.
 
 ### Development
 
@@ -114,10 +90,6 @@ Build artifacts are generated under `lecture-app/src-tauri/target/release/bundle
 
 A course directory must contain a `course.json` file. See [COURSE_FORMAT.md](COURSE_FORMAT.md) for the full schema and supported resource types.
 
-### Secrets and Local Config
+### Local Config
 
-Do not commit real secrets. AI API keys configured in the app are stored in the local app data `app-config.json`. The default repository `app-config.json` should never contain real API keys, personal filesystem paths, or private service URLs.
-
-### GitHub Release Recommendation
-
-If your local working repository history has ever contained secrets, server code, or private course materials, do not push that original history to a public GitHub repository. Create a clean release copy, initialize a fresh Git repository, and commit only the public client files.
+App settings are stored in the local app data directory. User-provided AI API keys are used only for the selected AI provider. Do not commit personal configuration files to Git.

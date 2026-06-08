@@ -2,9 +2,9 @@
 
 ## Recommended Approach / 推荐方式
 
-Use a clean release repository instead of pushing this working repository directly. The current working repository has previously tracked files that should not be published, so rewriting or reusing its history is unnecessary risk.
+This directory is the GitHub working repository for Lecture Presenter. Make future public client changes here and push from here.
 
-不要直接推送当前工作仓库历史。当前仓库历史中曾经跟踪过不适合公开发布的文件，公开发布应使用干净副本重新初始化 Git。
+这个目录是 Lecture Presenter 的 GitHub 工作仓库。后续公开客户端代码建议都在这里维护并从这里推送。
 
 ## What to Publish / 应发布内容
 
@@ -14,10 +14,8 @@ Use a clean release repository instead of pushing this working repository direct
 - `.gitignore`
 - `.github/workflows/build-windows.yml`
 
-## What Not to Publish / 不应发布内容
+## Keep Out of Git / 不应提交内容
 
-- `update-server/`
-- deployment scripts such as `sync-to-server.sh`
 - databases such as `*.db`, `*.sqlite`, `*.sqlite3`
 - `.env*`
 - personal course folders or private teaching materials
@@ -62,7 +60,7 @@ git remote add origin https://github.com/wangjingyi2012/lecture-presenter.git
 
 ## First Push / 首次推送
 
-From the clean release repository:
+From this repository:
 
 ```bash
 git add .
