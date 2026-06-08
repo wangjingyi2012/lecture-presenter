@@ -52,7 +52,7 @@
         "videos": [],
         "readings": [
           { "title": "示例 PDF 文档", "file": "pdfs/sample.pdf" },
-          { "title": "演讲宝官网", "url": "http://154.19.186.138:8080" }
+          { "title": "演讲宝官网", "url": "https://design.hz-study-system.com" }
         ],
         "assignments": [],
         "sourceCode": [

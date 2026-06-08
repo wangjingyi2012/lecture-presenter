@@ -176,7 +176,7 @@ macOS: ~/Library/Application Support/com.lecture-presenter.app/
 
 ### Q: 如何反馈问题或建议？
 
-访问演讲宝官网 [154.19.186.138:8080](http://154.19.186.138:8080) 获取联系方式和反馈渠道。
+访问演讲宝官网 [design.hz-study-system.com](https://design.hz-study-system.com) 获取联系方式和反馈渠道。
 
 ### Q: 应用更新后课程数据会丢失吗？
 

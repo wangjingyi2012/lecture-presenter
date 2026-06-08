@@ -1,7 +1,7 @@
 // auth.js — Authentication state management and login UI
 window.Auth = {
-  serverUrl: 'http://154.19.186.138:8080',
-  membershipUrl: 'http://154.19.186.138:8080/membership',
+  serverUrl: 'https://design.hz-study-system.com',
+  membershipUrl: 'https://design.hz-study-system.com/membership',
   _token: null,
   _user: null,
   _captchaVerified: false,
