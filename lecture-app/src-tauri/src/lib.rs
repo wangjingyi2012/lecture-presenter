@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::Command;
 use tauri::{Manager, Emitter};
@@ -208,6 +209,141 @@ fn read_file_bytes(file_path: String) -> Result<Vec<u8>, String> {
 #[tauri::command]
 fn read_text_file(file_path: String) -> Result<String, String> {
     fs::read_to_string(&file_path).map_err(|e| format!("Failed to read {}: {}", file_path, e))
+}
+
+fn normalize_protocol_path(decoded: &str) -> String {
+    let path = decoded.replace('/', std::path::MAIN_SEPARATOR_STR);
+
+    #[cfg(target_os = "windows")]
+    {
+        let trimmed = path.trim_start_matches(std::path::MAIN_SEPARATOR);
+        if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+            return trimmed.to_string();
+        }
+    }
+
+    if path.starts_with(std::path::MAIN_SEPARATOR) {
+        path
+    } else {
+        format!("{}{}", std::path::MAIN_SEPARATOR, path)
+    }
+}
+
+fn parse_range_header(range: &str, total_len: u64) -> Option<(u64, u64)> {
+    let value = range.strip_prefix("bytes=")?;
+    let (start_raw, end_raw) = value.split_once('-')?;
+
+    if start_raw.is_empty() {
+        let suffix_len = end_raw.parse::<u64>().ok()?;
+        if suffix_len == 0 {
+            return None;
+        }
+        let start = total_len.saturating_sub(suffix_len);
+        let end = total_len.saturating_sub(1);
+        return Some((start, end));
+    }
+
+    let start = start_raw.parse::<u64>().ok()?;
+    if start >= total_len {
+        return None;
+    }
+
+    let end = if end_raw.is_empty() {
+        total_len.saturating_sub(1)
+    } else {
+        end_raw.parse::<u64>().ok()?.min(total_len.saturating_sub(1))
+    };
+
+    if end < start {
+        None
+    } else {
+        Some((start, end))
+    }
+}
+
+fn media_response(file_path: &str, range: Option<&str>) -> http::Response<Vec<u8>> {
+    let mut file = match fs::File::open(file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("[media://] File not found: {} (error: {})", file_path, e);
+            return http::Response::builder()
+                .status(404)
+                .header("Content-Type", "text/plain")
+                .body(format!("File not found: {}", file_path).into_bytes())
+                .unwrap();
+        }
+    };
+
+    let total_len = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(e) => {
+            return http::Response::builder()
+                .status(500)
+                .header("Content-Type", "text/plain")
+                .body(format!("Failed to read metadata: {}", e).into_bytes())
+                .unwrap();
+        }
+    };
+
+    let mime = mime_guess::from_path(file_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    if total_len == 0 {
+        return http::Response::builder()
+            .status(200)
+            .header("Content-Type", &mime)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Length", "0")
+            .body(Vec::new())
+            .unwrap();
+    }
+
+    if let Some(range_header) = range {
+        if let Some((start, end)) = parse_range_header(range_header, total_len) {
+            let len = end - start + 1;
+            let mut buffer = vec![0; len as usize];
+            if let Err(e) = file.seek(SeekFrom::Start(start)).and_then(|_| file.read_exact(&mut buffer)) {
+                return http::Response::builder()
+                    .status(500)
+                    .header("Content-Type", "text/plain")
+                    .body(format!("Failed to read range: {}", e).into_bytes())
+                    .unwrap();
+            }
+
+            return http::Response::builder()
+                .status(206)
+                .header("Content-Type", &mime)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Length", len.to_string())
+                .header("Content-Range", format!("bytes {}-{}/{}", start, end, total_len))
+                .body(buffer)
+                .unwrap();
+        }
+
+        return http::Response::builder()
+            .status(416)
+            .header("Content-Range", format!("bytes */{}", total_len))
+            .body(Vec::new())
+            .unwrap();
+    }
+
+    let mut buffer = Vec::new();
+    if let Err(e) = file.read_to_end(&mut buffer) {
+        return http::Response::builder()
+            .status(500)
+            .header("Content-Type", "text/plain")
+            .body(format!("Failed to read file: {}", e).into_bytes())
+            .unwrap();
+    }
+
+    http::Response::builder()
+        .status(200)
+        .header("Content-Type", &mime)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", total_len.to_string())
+        .body(buffer)
+        .unwrap()
 }
 
 #[tauri::command]
@@ -760,10 +896,30 @@ async fn import_course(app_handle: tauri::AppHandle) -> Result<CourseEntry, Stri
 
 #[tauri::command]
 fn open_external(path: String) -> Result<(), String> {
-    Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+
     Ok(())
 }
 
@@ -1402,7 +1558,7 @@ async fn open_audience_window(app_handle: tauri::AppHandle, slide_url: String, t
     }
 
     // Create new audience window — audience.html is in frontendDist (src/)
-    let window = WebviewWindowBuilder::new(
+    WebviewWindowBuilder::new(
         &app_handle,
         "audience",
         WebviewUrl::App("audience.html".into()),
@@ -1457,11 +1613,7 @@ pub fn run() {
                 .decode_utf8_lossy()
                 .to_string();
 
-            let file_path = if decoded.starts_with('/') {
-                decoded.clone()
-            } else {
-                format!("/{}", decoded)
-            };
+            let file_path = normalize_protocol_path(&decoded);
 
             match fs::read(&file_path) {
                 Ok(content) => {
@@ -1484,6 +1636,18 @@ pub fn run() {
                         .unwrap()
                 }
             }
+        })
+        .register_uri_scheme_protocol("media", |_app, request| {
+            let url_path = request.uri().path();
+            let decoded = percent_encoding::percent_decode_str(url_path)
+                .decode_utf8_lossy()
+                .to_string();
+            let file_path = normalize_protocol_path(&decoded);
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|value| value.to_str().ok());
+            media_response(&file_path, range)
         })
         .invoke_handler(tauri::generate_handler![
             read_app_config,

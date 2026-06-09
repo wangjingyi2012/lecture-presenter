@@ -190,12 +190,11 @@ const PptExtraViewer = {
       item.classList.toggle('active', index === this.currentIndex);
     });
 
-    // Load slide in iframe — use asset URL (works for iframe src on all platforms)
+    // Load slide in iframe. In Tauri/WebView2, direct iframe navigation to custom
+    // protocol localhost URLs can remain blank even when fetch works, so use srcdoc.
     const iframe = document.getElementById('ppt-extra-iframe');
     if (window.__TAURI__ && this.basePath) {
-      // Build asset URL from raw path for each slide file
-      const slidePath = (this.basePath + '/' + slide.file).replace(/\\/g, '/');
-      iframe.src = this._assetUrl(slidePath);
+      this._loadSlideFrame(iframe, slide);
     } else {
       iframe.src = this.baseUrl + '/' + slide.file;
     }
@@ -214,8 +213,7 @@ const PptExtraViewer = {
     // Current slide iframe
     const currentFrame = document.getElementById('speaker-current-slide');
     if (window.__TAURI__ && this.basePath) {
-      const slidePath = (this.basePath + '/' + slide.file).replace(/\\/g, '/');
-      currentFrame.src = this._assetUrl(slidePath);
+      this._loadSlideFrame(currentFrame, slide);
     } else {
       currentFrame.src = this.baseUrl + '/' + slide.file;
     }
@@ -223,8 +221,7 @@ const PptExtraViewer = {
     // Next slide iframe
     const nextFrame = document.getElementById('speaker-next-slide');
     if (window.__TAURI__ && this.basePath) {
-      const nextSlidePath = (this.basePath + '/' + nextSlide.file).replace(/\\/g, '/');
-      nextFrame.src = this._assetUrl(nextSlidePath);
+      this._loadSlideFrame(nextFrame, nextSlide);
     } else {
       nextFrame.src = this.baseUrl + '/' + nextSlide.file;
     }
@@ -257,13 +254,55 @@ const PptExtraViewer = {
     }
   },
 
-  // Build slide:// URL that preserves path separators for correct relative resource resolution.
+  // Build slide protocol URL that preserves path separators for correct relative resource resolution.
   // The built-in asset protocol (convertFileSrc) encodes / to %2F, breaking relative URLs.
   // Our custom "slide" protocol in Rust handles paths with real slashes.
   _assetUrl(filePath) {
-    const segments = filePath.split('/');
+    const normalizedPath = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    const segments = normalizedPath.split('/');
     const encoded = segments.map(s => encodeURIComponent(s)).join('/');
-    return 'slide://localhost' + encoded;
+    // Tauri v2 exposes custom protocols to WebView2 as http://<scheme>.localhost/.
+    // Using slide:// directly can leave iframes stuck at about:blank on Windows.
+    return 'http://slide.localhost/' + encoded;
+  },
+
+  _slidePath(slide) {
+    return (this.basePath + '/' + slide.file).replace(/\\/g, '/');
+  },
+
+  _slideBaseUrl(slidePath) {
+    const slash = slidePath.lastIndexOf('/');
+    const dirPath = slash >= 0 ? slidePath.slice(0, slash + 1) : slidePath;
+    return this._assetUrl(dirPath);
+  },
+
+  async _loadSlideFrame(frame, slide) {
+    if (!frame || !slide) return;
+    const slidePath = this._slidePath(slide);
+    const slideUrl = this._assetUrl(slidePath);
+    const baseUrl = this._slideBaseUrl(slidePath);
+
+    frame.dataset.slideUrl = slideUrl;
+    frame.removeAttribute('src');
+
+    try {
+      let html = await window.__TAURI__.core.invoke('read_text_file', { filePath: slidePath });
+      html = this._injectBaseHref(html, baseUrl);
+      frame.srcdoc = html;
+    } catch (e) {
+      console.warn('Tauri read slide failed, falling back to protocol URL:', e, slidePath);
+      frame.removeAttribute('srcdoc');
+      frame.src = slideUrl;
+    }
+  },
+
+  _injectBaseHref(html, baseUrl) {
+    const base = `<base href="${this._escapeHtml(baseUrl)}">`;
+    if (/<base\s/i.test(html)) return html;
+    if (/<head[^>]*>/i.test(html)) {
+      return html.replace(/<head([^>]*)>/i, `<head$1>${base}`);
+    }
+    return `${base}${html}`;
   },
 
   getSlideUrl(index) {

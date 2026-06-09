@@ -13,7 +13,7 @@
           { "title": "欢迎使用演讲宝", "file": "docs/01-welcome.md" }
         ],
         "videos": [
-          { "title": "快速上手演示", "file": "videos/quick-start.mp4" }
+          { "title": "快速上手演示", "file": "videos/quick-start.webm" }
         ],
         "readings": [
           { "title": "安装与首次启动", "file": "docs/02-getting-started.md" }
@@ -69,7 +69,7 @@
           { "title": "PPTE 格式介绍", "file": "docs/06-ppte-guide.md" }
         ],
         "videos": [
-          { "title": "PPTE 编辑演示", "file": "videos/ppte-editing.mp4" }
+          { "title": "PPTE 编辑演示", "file": "videos/ppte-editing.webm" }
         ],
         "readings": [
           { "title": "模板与 AI 辅助", "file": "docs/07-template-ai.md" }
