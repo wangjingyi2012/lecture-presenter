@@ -1404,10 +1404,7 @@ fn normalize_custom_api_config(
         .ok_or_else(|| "请配置 AI Base URL".to_string())?;
     let model = model
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| match api_type.as_str() {
-            "anthropic-messages" => "claude-sonnet-4-20250514".to_string(),
-            _ => "gpt-4o-mini".to_string(),
-        });
+        .unwrap_or_else(|| "gpt-5.5".to_string());
     Ok((api_type, base_url, model))
 }
 

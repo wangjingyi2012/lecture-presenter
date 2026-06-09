@@ -513,6 +513,7 @@ my-ppt-course/           # 文件夹名称（可自定义）
         appConfig.aiModel = 'MiniMax-M2.5';
       } else if (aiProviderSelect.value === 'custom') {
         appConfig.aiApiType = appConfig.aiApiType || 'openai-chat';
+        appConfig.aiModel = appConfig.aiModel || 'gpt-5.5';
       }
       aiApiTypeSelect.value = appConfig.aiApiType || 'openai-chat';
       aiBaseUrlInput.value = appConfig.aiBaseUrl || '';
