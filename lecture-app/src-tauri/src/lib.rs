@@ -58,6 +58,12 @@ pub struct AppConfig {
     pub ai_provider: Option<String>,
     #[serde(default, rename = "aiApiKey", skip_serializing_if = "Option::is_none")]
     pub ai_api_key: Option<String>,
+    #[serde(default, rename = "aiBaseUrl", skip_serializing_if = "Option::is_none")]
+    pub ai_base_url: Option<String>,
+    #[serde(default, rename = "aiApiType", skip_serializing_if = "Option::is_none")]
+    pub ai_api_type: Option<String>,
+    #[serde(default, rename = "aiModel", skip_serializing_if = "Option::is_none")]
+    pub ai_model: Option<String>,
     #[serde(default, rename = "updateServer", skip_serializing_if = "Option::is_none")]
     pub update_server: Option<String>,
     #[serde(default, rename = "authServer", skip_serializing_if = "Option::is_none")]
@@ -1285,11 +1291,57 @@ fn save_ppt_extra(folder_path: String, manifest_json: String, slide_files: Vec<(
 }
 
 #[tauri::command]
-async fn call_ai(provider: String, api_key: String, system_prompt: String, user_msg: String) -> Result<String, String> {
+async fn test_ai_config(
+    provider: String,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Result<String, String> {
+    let result = call_ai_with_config(
+        provider,
+        api_key,
+        api_type,
+        base_url,
+        model,
+        "你是一个连通性测试助手。".to_string(),
+        "请只回复 OK".to_string(),
+    ).await?;
+
+    if result.trim().is_empty() {
+        Err("AI 响应为空".to_string())
+    } else {
+        Ok(result)
+    }
+}
+
+#[tauri::command]
+async fn call_ai(
+    provider: String,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    system_prompt: String,
+    user_msg: String,
+) -> Result<String, String> {
+    call_ai_with_config(provider, api_key, api_type, base_url, model, system_prompt, user_msg).await
+}
+
+async fn call_ai_with_config(
+    provider: String,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    system_prompt: String,
+    user_msg: String,
+) -> Result<String, String> {
     match provider.as_str() {
         "deepseek" => call_deepseek(api_key, system_prompt, user_msg).await,
         "minimax" => call_minimax(api_key, system_prompt, user_msg).await,
         "lectureai" => call_lectureai(api_key, system_prompt, user_msg).await,
+        "custom" => call_custom_ai(api_key, api_type, base_url, model, system_prompt, user_msg).await,
         _ => Err("不支持的AI提供商".to_string()),
     }
 }
@@ -1299,11 +1351,21 @@ async fn call_ai_stream(
     app_handle: tauri::AppHandle,
     provider: String,
     api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
     system_prompt: String,
     user_msg: String,
 ) -> Result<(), String> {
     match provider.as_str() {
         "minimax" => call_minimax_stream(app_handle, api_key, system_prompt, user_msg).await,
+        "custom" => call_custom_ai_stream(app_handle, api_key, api_type, base_url, model, system_prompt, user_msg).await,
+        "deepseek" => {
+            let result = call_deepseek(api_key, system_prompt, user_msg).await?;
+            app_handle.emit("ai-stream-chunk", result).map_err(|e| e.to_string())?;
+            app_handle.emit("ai-stream-done", "").map_err(|e| e.to_string())?;
+            Ok(())
+        },
         "lectureai" => {
             // LectureAI: use non-streaming, then emit complete result
             let result = call_lectureai(api_key, system_prompt, user_msg).await?;
@@ -1313,6 +1375,229 @@ async fn call_ai_stream(
         },
         _ => Err("该提供商不支持流式输出".to_string()),
     }
+}
+
+fn join_api_url(base_url: &str, path: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let suffix = path.trim_start_matches('/');
+    if trimmed.ends_with(suffix) {
+        trimmed.to_string()
+    } else if let Some(rest) = suffix.strip_prefix("v1/") {
+        if trimmed.ends_with("/v1") || trimmed.ends_with("/v1/") {
+            format!("{}/{}", trimmed.trim_end_matches('/'), rest)
+        } else {
+            format!("{}/{}", trimmed, suffix)
+        }
+    } else {
+        format!("{}/{}", trimmed, suffix)
+    }
+}
+
+fn normalize_custom_api_config(
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Result<(String, String, String), String> {
+    let api_type = api_type.unwrap_or_else(|| "openai-chat".to_string());
+    let base_url = base_url
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "请配置 AI Base URL".to_string())?;
+    let model = model
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| match api_type.as_str() {
+            "anthropic-messages" => "claude-sonnet-4-20250514".to_string(),
+            _ => "gpt-4o-mini".to_string(),
+        });
+    Ok((api_type, base_url, model))
+}
+
+async fn call_custom_ai(
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    system_prompt: String,
+    user_msg: String,
+) -> Result<String, String> {
+    let (api_type, base_url, model) = normalize_custom_api_config(api_type, base_url, model)?;
+    match api_type.as_str() {
+        "openai-chat" => call_openai_chat(api_key, base_url, model, system_prompt, user_msg, false).await,
+        "openai-responses" => call_openai_responses(api_key, base_url, model, system_prompt, user_msg, false).await,
+        "anthropic-messages" => call_anthropic_messages(api_key, base_url, model, system_prompt, user_msg, false).await,
+        _ => Err("不支持的 API 类型".to_string()),
+    }
+}
+
+async fn call_custom_ai_stream(
+    app_handle: tauri::AppHandle,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    system_prompt: String,
+    user_msg: String,
+) -> Result<(), String> {
+    let result = call_custom_ai(api_key, api_type, base_url, model, system_prompt, user_msg).await?;
+    app_handle.emit("ai-stream-chunk", result).map_err(|e| e.to_string())?;
+    app_handle.emit("ai-stream-done", "").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn call_openai_chat(
+    api_key: String,
+    base_url: String,
+    model: String,
+    system_prompt: String,
+    user_msg: String,
+    stream: bool,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg}
+        ],
+        "stream": stream
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/chat/completions"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_openai_chat_response(response).await
+}
+
+async fn call_openai_responses(
+    api_key: String,
+    base_url: String,
+    model: String,
+    system_prompt: String,
+    user_msg: String,
+    stream: bool,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg}
+        ],
+        "stream": stream
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/responses"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_openai_responses_response(response).await
+}
+
+async fn call_anthropic_messages(
+    api_key: String,
+    base_url: String,
+    model: String,
+    system_prompt: String,
+    user_msg: String,
+    stream: bool,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 4000,
+        "system": system_prompt,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": user_msg}]}
+        ],
+        "stream": stream
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/messages"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_anthropic_messages_response(response).await
+}
+
+async fn parse_openai_chat_response(response: reqwest::Response) -> Result<String, String> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API错误 {}: {}", status, error_text));
+    }
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    data["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "响应格式错误".to_string())
+}
+
+async fn parse_openai_responses_response(response: reqwest::Response) -> Result<String, String> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API错误 {}: {}", status, error_text));
+    }
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    if let Some(text) = data["output_text"].as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(output) = data["output"].as_array() {
+        let mut text = String::new();
+        for item in output {
+            if let Some(content) = item["content"].as_array() {
+                for part in content {
+                    if let Some(value) = part["text"].as_str() {
+                        text.push_str(value);
+                    }
+                }
+            }
+        }
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    Err("响应格式错误".to_string())
+}
+
+async fn parse_anthropic_messages_response(response: reqwest::Response) -> Result<String, String> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API错误 {}: {}", status, error_text));
+    }
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    if let Some(content_array) = data["content"].as_array() {
+        let mut text = String::new();
+        for item in content_array {
+            if item["type"] == "text" {
+                if let Some(value) = item["text"].as_str() {
+                    text.push_str(value);
+                }
+            }
+        }
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    Err("响应格式错误".to_string())
 }
 
 async fn call_deepseek(api_key: String, system_prompt: String, user_msg: String) -> Result<String, String> {
@@ -1674,6 +1959,7 @@ pub fn run() {
             save_ppt_extra,
             call_ai,
             call_ai_stream,
+            test_ai_config,
             check_update,
             fetch_notifications,
             open_audience_window,
