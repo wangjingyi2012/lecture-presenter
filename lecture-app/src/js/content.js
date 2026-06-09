@@ -127,7 +127,7 @@ const Content = {
 
     // Markdown / JSON / YAML
     if (type === 'md') {
-      MdViewer.open(item.title, assetUrl);
+      MdViewer.open(item.title, assetUrl, fullPath);
       return;
     }
 
@@ -139,7 +139,7 @@ const Content = {
 
     // Video
     if (type === 'video') {
-      VideoPlayer.open(item.title, assetUrl);
+      VideoPlayer.open(item.title, assetUrl, fullPath);
       return;
     }
 

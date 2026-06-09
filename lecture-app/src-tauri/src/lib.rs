@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::Command;
 use tauri::{Manager, Emitter};
@@ -57,6 +58,12 @@ pub struct AppConfig {
     pub ai_provider: Option<String>,
     #[serde(default, rename = "aiApiKey", skip_serializing_if = "Option::is_none")]
     pub ai_api_key: Option<String>,
+    #[serde(default, rename = "aiBaseUrl", skip_serializing_if = "Option::is_none")]
+    pub ai_base_url: Option<String>,
+    #[serde(default, rename = "aiApiType", skip_serializing_if = "Option::is_none")]
+    pub ai_api_type: Option<String>,
+    #[serde(default, rename = "aiModel", skip_serializing_if = "Option::is_none")]
+    pub ai_model: Option<String>,
     #[serde(default, rename = "updateServer", skip_serializing_if = "Option::is_none")]
     pub update_server: Option<String>,
     #[serde(default, rename = "authServer", skip_serializing_if = "Option::is_none")]
@@ -208,6 +215,141 @@ fn read_file_bytes(file_path: String) -> Result<Vec<u8>, String> {
 #[tauri::command]
 fn read_text_file(file_path: String) -> Result<String, String> {
     fs::read_to_string(&file_path).map_err(|e| format!("Failed to read {}: {}", file_path, e))
+}
+
+fn normalize_protocol_path(decoded: &str) -> String {
+    let path = decoded.replace('/', std::path::MAIN_SEPARATOR_STR);
+
+    #[cfg(target_os = "windows")]
+    {
+        let trimmed = path.trim_start_matches(std::path::MAIN_SEPARATOR);
+        if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+            return trimmed.to_string();
+        }
+    }
+
+    if path.starts_with(std::path::MAIN_SEPARATOR) {
+        path
+    } else {
+        format!("{}{}", std::path::MAIN_SEPARATOR, path)
+    }
+}
+
+fn parse_range_header(range: &str, total_len: u64) -> Option<(u64, u64)> {
+    let value = range.strip_prefix("bytes=")?;
+    let (start_raw, end_raw) = value.split_once('-')?;
+
+    if start_raw.is_empty() {
+        let suffix_len = end_raw.parse::<u64>().ok()?;
+        if suffix_len == 0 {
+            return None;
+        }
+        let start = total_len.saturating_sub(suffix_len);
+        let end = total_len.saturating_sub(1);
+        return Some((start, end));
+    }
+
+    let start = start_raw.parse::<u64>().ok()?;
+    if start >= total_len {
+        return None;
+    }
+
+    let end = if end_raw.is_empty() {
+        total_len.saturating_sub(1)
+    } else {
+        end_raw.parse::<u64>().ok()?.min(total_len.saturating_sub(1))
+    };
+
+    if end < start {
+        None
+    } else {
+        Some((start, end))
+    }
+}
+
+fn media_response(file_path: &str, range: Option<&str>) -> http::Response<Vec<u8>> {
+    let mut file = match fs::File::open(file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("[media://] File not found: {} (error: {})", file_path, e);
+            return http::Response::builder()
+                .status(404)
+                .header("Content-Type", "text/plain")
+                .body(format!("File not found: {}", file_path).into_bytes())
+                .unwrap();
+        }
+    };
+
+    let total_len = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(e) => {
+            return http::Response::builder()
+                .status(500)
+                .header("Content-Type", "text/plain")
+                .body(format!("Failed to read metadata: {}", e).into_bytes())
+                .unwrap();
+        }
+    };
+
+    let mime = mime_guess::from_path(file_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    if total_len == 0 {
+        return http::Response::builder()
+            .status(200)
+            .header("Content-Type", &mime)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Length", "0")
+            .body(Vec::new())
+            .unwrap();
+    }
+
+    if let Some(range_header) = range {
+        if let Some((start, end)) = parse_range_header(range_header, total_len) {
+            let len = end - start + 1;
+            let mut buffer = vec![0; len as usize];
+            if let Err(e) = file.seek(SeekFrom::Start(start)).and_then(|_| file.read_exact(&mut buffer)) {
+                return http::Response::builder()
+                    .status(500)
+                    .header("Content-Type", "text/plain")
+                    .body(format!("Failed to read range: {}", e).into_bytes())
+                    .unwrap();
+            }
+
+            return http::Response::builder()
+                .status(206)
+                .header("Content-Type", &mime)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Length", len.to_string())
+                .header("Content-Range", format!("bytes {}-{}/{}", start, end, total_len))
+                .body(buffer)
+                .unwrap();
+        }
+
+        return http::Response::builder()
+            .status(416)
+            .header("Content-Range", format!("bytes */{}", total_len))
+            .body(Vec::new())
+            .unwrap();
+    }
+
+    let mut buffer = Vec::new();
+    if let Err(e) = file.read_to_end(&mut buffer) {
+        return http::Response::builder()
+            .status(500)
+            .header("Content-Type", "text/plain")
+            .body(format!("Failed to read file: {}", e).into_bytes())
+            .unwrap();
+    }
+
+    http::Response::builder()
+        .status(200)
+        .header("Content-Type", &mime)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", total_len.to_string())
+        .body(buffer)
+        .unwrap()
 }
 
 #[tauri::command]
@@ -760,10 +902,30 @@ async fn import_course(app_handle: tauri::AppHandle) -> Result<CourseEntry, Stri
 
 #[tauri::command]
 fn open_external(path: String) -> Result<(), String> {
-    Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+
     Ok(())
 }
 
@@ -1129,11 +1291,57 @@ fn save_ppt_extra(folder_path: String, manifest_json: String, slide_files: Vec<(
 }
 
 #[tauri::command]
-async fn call_ai(provider: String, api_key: String, system_prompt: String, user_msg: String) -> Result<String, String> {
+async fn test_ai_config(
+    provider: String,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Result<String, String> {
+    let result = call_ai_with_config(
+        provider,
+        api_key,
+        api_type,
+        base_url,
+        model,
+        "你是一个连通性测试助手。".to_string(),
+        "请只回复 OK".to_string(),
+    ).await?;
+
+    if result.trim().is_empty() {
+        Err("AI 响应为空".to_string())
+    } else {
+        Ok(result)
+    }
+}
+
+#[tauri::command]
+async fn call_ai(
+    provider: String,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    system_prompt: String,
+    user_msg: String,
+) -> Result<String, String> {
+    call_ai_with_config(provider, api_key, api_type, base_url, model, system_prompt, user_msg).await
+}
+
+async fn call_ai_with_config(
+    provider: String,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    system_prompt: String,
+    user_msg: String,
+) -> Result<String, String> {
     match provider.as_str() {
         "deepseek" => call_deepseek(api_key, system_prompt, user_msg).await,
         "minimax" => call_minimax(api_key, system_prompt, user_msg).await,
         "lectureai" => call_lectureai(api_key, system_prompt, user_msg).await,
+        "custom" => call_custom_ai(api_key, api_type, base_url, model, system_prompt, user_msg).await,
         _ => Err("不支持的AI提供商".to_string()),
     }
 }
@@ -1143,11 +1351,21 @@ async fn call_ai_stream(
     app_handle: tauri::AppHandle,
     provider: String,
     api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
     system_prompt: String,
     user_msg: String,
 ) -> Result<(), String> {
     match provider.as_str() {
         "minimax" => call_minimax_stream(app_handle, api_key, system_prompt, user_msg).await,
+        "custom" => call_custom_ai_stream(app_handle, api_key, api_type, base_url, model, system_prompt, user_msg).await,
+        "deepseek" => {
+            let result = call_deepseek(api_key, system_prompt, user_msg).await?;
+            app_handle.emit("ai-stream-chunk", result).map_err(|e| e.to_string())?;
+            app_handle.emit("ai-stream-done", "").map_err(|e| e.to_string())?;
+            Ok(())
+        },
         "lectureai" => {
             // LectureAI: use non-streaming, then emit complete result
             let result = call_lectureai(api_key, system_prompt, user_msg).await?;
@@ -1157,6 +1375,226 @@ async fn call_ai_stream(
         },
         _ => Err("该提供商不支持流式输出".to_string()),
     }
+}
+
+fn join_api_url(base_url: &str, path: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let suffix = path.trim_start_matches('/');
+    if trimmed.ends_with(suffix) {
+        trimmed.to_string()
+    } else if let Some(rest) = suffix.strip_prefix("v1/") {
+        if trimmed.ends_with("/v1") || trimmed.ends_with("/v1/") {
+            format!("{}/{}", trimmed.trim_end_matches('/'), rest)
+        } else {
+            format!("{}/{}", trimmed, suffix)
+        }
+    } else {
+        format!("{}/{}", trimmed, suffix)
+    }
+}
+
+fn normalize_custom_api_config(
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Result<(String, String, String), String> {
+    let api_type = api_type.unwrap_or_else(|| "openai-chat".to_string());
+    let base_url = base_url
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "请配置 AI Base URL".to_string())?;
+    let model = model
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "gpt-5.5".to_string());
+    Ok((api_type, base_url, model))
+}
+
+async fn call_custom_ai(
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    system_prompt: String,
+    user_msg: String,
+) -> Result<String, String> {
+    let (api_type, base_url, model) = normalize_custom_api_config(api_type, base_url, model)?;
+    match api_type.as_str() {
+        "openai-chat" => call_openai_chat(api_key, base_url, model, system_prompt, user_msg, false).await,
+        "openai-responses" => call_openai_responses(api_key, base_url, model, system_prompt, user_msg, false).await,
+        "anthropic-messages" => call_anthropic_messages(api_key, base_url, model, system_prompt, user_msg, false).await,
+        _ => Err("不支持的 API 类型".to_string()),
+    }
+}
+
+async fn call_custom_ai_stream(
+    app_handle: tauri::AppHandle,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    system_prompt: String,
+    user_msg: String,
+) -> Result<(), String> {
+    let result = call_custom_ai(api_key, api_type, base_url, model, system_prompt, user_msg).await?;
+    app_handle.emit("ai-stream-chunk", result).map_err(|e| e.to_string())?;
+    app_handle.emit("ai-stream-done", "").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn call_openai_chat(
+    api_key: String,
+    base_url: String,
+    model: String,
+    system_prompt: String,
+    user_msg: String,
+    stream: bool,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg}
+        ],
+        "stream": stream
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/chat/completions"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_openai_chat_response(response).await
+}
+
+async fn call_openai_responses(
+    api_key: String,
+    base_url: String,
+    model: String,
+    system_prompt: String,
+    user_msg: String,
+    stream: bool,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg}
+        ],
+        "stream": stream
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/responses"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_openai_responses_response(response).await
+}
+
+async fn call_anthropic_messages(
+    api_key: String,
+    base_url: String,
+    model: String,
+    system_prompt: String,
+    user_msg: String,
+    stream: bool,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 4000,
+        "system": system_prompt,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": user_msg}]}
+        ],
+        "stream": stream
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/messages"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_anthropic_messages_response(response).await
+}
+
+async fn parse_openai_chat_response(response: reqwest::Response) -> Result<String, String> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API错误 {}: {}", status, error_text));
+    }
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    data["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "响应格式错误".to_string())
+}
+
+async fn parse_openai_responses_response(response: reqwest::Response) -> Result<String, String> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API错误 {}: {}", status, error_text));
+    }
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    if let Some(text) = data["output_text"].as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(output) = data["output"].as_array() {
+        let mut text = String::new();
+        for item in output {
+            if let Some(content) = item["content"].as_array() {
+                for part in content {
+                    if let Some(value) = part["text"].as_str() {
+                        text.push_str(value);
+                    }
+                }
+            }
+        }
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    Err("响应格式错误".to_string())
+}
+
+async fn parse_anthropic_messages_response(response: reqwest::Response) -> Result<String, String> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API错误 {}: {}", status, error_text));
+    }
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    if let Some(content_array) = data["content"].as_array() {
+        let mut text = String::new();
+        for item in content_array {
+            if item["type"] == "text" {
+                if let Some(value) = item["text"].as_str() {
+                    text.push_str(value);
+                }
+            }
+        }
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    Err("响应格式错误".to_string())
 }
 
 async fn call_deepseek(api_key: String, system_prompt: String, user_msg: String) -> Result<String, String> {
@@ -1402,7 +1840,7 @@ async fn open_audience_window(app_handle: tauri::AppHandle, slide_url: String, t
     }
 
     // Create new audience window — audience.html is in frontendDist (src/)
-    let window = WebviewWindowBuilder::new(
+    WebviewWindowBuilder::new(
         &app_handle,
         "audience",
         WebviewUrl::App("audience.html".into()),
@@ -1457,11 +1895,7 @@ pub fn run() {
                 .decode_utf8_lossy()
                 .to_string();
 
-            let file_path = if decoded.starts_with('/') {
-                decoded.clone()
-            } else {
-                format!("/{}", decoded)
-            };
+            let file_path = normalize_protocol_path(&decoded);
 
             match fs::read(&file_path) {
                 Ok(content) => {
@@ -1484,6 +1918,18 @@ pub fn run() {
                         .unwrap()
                 }
             }
+        })
+        .register_uri_scheme_protocol("media", |_app, request| {
+            let url_path = request.uri().path();
+            let decoded = percent_encoding::percent_decode_str(url_path)
+                .decode_utf8_lossy()
+                .to_string();
+            let file_path = normalize_protocol_path(&decoded);
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|value| value.to_str().ok());
+            media_response(&file_path, range)
         })
         .invoke_handler(tauri::generate_handler![
             read_app_config,
@@ -1510,6 +1956,7 @@ pub fn run() {
             save_ppt_extra,
             call_ai,
             call_ai_stream,
+            test_ai_config,
             check_update,
             fetch_notifications,
             open_audience_window,

@@ -368,12 +368,27 @@
                 <option value="lectureai">LectureAI (深度适配)</option>
                 <option value="deepseek">Deepseek</option>
                 <option value="minimax">MINIMAX</option>
+                <option value="custom">自定义 API</option>
               </select>
+            </div>
+            <div class="dev-field-row ai-custom-row" style="margin-top:8px;">
+              <select id="setting-ai-api-type" title="API 类型">
+                <option value="openai-chat">OpenAI Chat Completions</option>
+                <option value="openai-responses">OpenAI Responses</option>
+                <option value="anthropic-messages">Anthropic Messages</option>
+              </select>
+            </div>
+            <div class="dev-field-row ai-custom-row" style="margin-top:8px;">
+              <input type="text" id="setting-ai-baseurl" placeholder="Base URL，例如 https://api.openai.com">
+            </div>
+            <div class="dev-field-row ai-custom-row" style="margin-top:8px;">
+              <input type="text" id="setting-ai-model" placeholder="模型，例如 gpt-5.5">
             </div>
             <div class="dev-field-row" style="margin-top:8px;">
               <input type="password" id="setting-ai-apikey" placeholder="API Key">
+              <button id="setting-ai-test" class="btn-detect" title="测试 AI 配置">测试</button>
             </div>
-            <div class="dev-field-hint">选择AI提供商并配置API Key</div>
+            <div class="dev-field-hint" id="setting-ai-hint">选择AI提供商并配置API Key</div>
           </div>
           <div class="dev-field" style="display:none">
             <label>更新服务器</label>

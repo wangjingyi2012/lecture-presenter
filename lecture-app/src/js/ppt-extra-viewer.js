@@ -34,10 +34,20 @@ const PptExtraViewer = {
 
     // Listen for open-file/open-url requests from slide iframes
     window.addEventListener('message', (e) => this._handleSlideOpenMessage(e.data, e.source));
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      window.__TAURI__.event.listen('audience-navigate', (event) => {
+        if (!this.isSpeakerMode) return;
+        this._handleNavigationAction(event.payload);
+      }).catch(e => console.warn('Failed to listen audience navigation:', e));
+    }
     document.getElementById('speaker-prev').addEventListener('click', () => this.prev());
     document.getElementById('speaker-prev-fast').addEventListener('click', () => this.prev());
     document.getElementById('speaker-next').addEventListener('click', () => this.next());
     document.getElementById('speaker-next-fast').addEventListener('click', () => this.next());
+    document.querySelector('.speaker-current-frame').addEventListener('click', (e) => {
+      if (!this.isSpeakerMode || e.defaultPrevented || e.button !== 0) return;
+      this.next();
+    });
     document.getElementById('speaker-timer-toggle').addEventListener('click', () => this.toggleTimer());
     document.getElementById('speaker-toggle-audience').addEventListener('click', () => this.toggleAudienceFullscreen());
     document.getElementById('speaker-notes-toggle').addEventListener('click', () => this.toggleNotesMode());
@@ -55,8 +65,7 @@ const PptExtraViewer = {
         else this.close();
       }
       if (isEditing) return;
-      if (e.key === 'ArrowLeft') this.prev();
-      if (e.key === 'ArrowRight') this.next();
+      if (this._handleNavigationKey(e)) return;
       if (e.key === 'f' || e.key === 'F') this.togglePlayMode();
       if (e.key === 's' || e.key === 'S') this.toggleSpeakerMode();
     });
@@ -190,12 +199,11 @@ const PptExtraViewer = {
       item.classList.toggle('active', index === this.currentIndex);
     });
 
-    // Load slide in iframe — use asset URL (works for iframe src on all platforms)
+    // Load slide in iframe. In Tauri/WebView2, direct iframe navigation to custom
+    // protocol localhost URLs can remain blank even when fetch works, so use srcdoc.
     const iframe = document.getElementById('ppt-extra-iframe');
     if (window.__TAURI__ && this.basePath) {
-      // Build asset URL from raw path for each slide file
-      const slidePath = (this.basePath + '/' + slide.file).replace(/\\/g, '/');
-      iframe.src = this._assetUrl(slidePath);
+      this._loadSlideFrame(iframe, slide);
     } else {
       iframe.src = this.baseUrl + '/' + slide.file;
     }
@@ -214,8 +222,7 @@ const PptExtraViewer = {
     // Current slide iframe
     const currentFrame = document.getElementById('speaker-current-slide');
     if (window.__TAURI__ && this.basePath) {
-      const slidePath = (this.basePath + '/' + slide.file).replace(/\\/g, '/');
-      currentFrame.src = this._assetUrl(slidePath);
+      this._loadSlideFrame(currentFrame, slide);
     } else {
       currentFrame.src = this.baseUrl + '/' + slide.file;
     }
@@ -223,8 +230,7 @@ const PptExtraViewer = {
     // Next slide iframe
     const nextFrame = document.getElementById('speaker-next-slide');
     if (window.__TAURI__ && this.basePath) {
-      const nextSlidePath = (this.basePath + '/' + nextSlide.file).replace(/\\/g, '/');
-      nextFrame.src = this._assetUrl(nextSlidePath);
+      this._loadSlideFrame(nextFrame, nextSlide);
     } else {
       nextFrame.src = this.baseUrl + '/' + nextSlide.file;
     }
@@ -257,13 +263,57 @@ const PptExtraViewer = {
     }
   },
 
-  // Build slide:// URL that preserves path separators for correct relative resource resolution.
+  // Build slide protocol URL that preserves path separators for correct relative resource resolution.
   // The built-in asset protocol (convertFileSrc) encodes / to %2F, breaking relative URLs.
   // Our custom "slide" protocol in Rust handles paths with real slashes.
   _assetUrl(filePath) {
-    const segments = filePath.split('/');
+    const normalizedPath = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    const segments = normalizedPath.split('/');
     const encoded = segments.map(s => encodeURIComponent(s)).join('/');
-    return 'slide://localhost' + encoded;
+    // Tauri v2 exposes custom protocols to WebView2 as http://<scheme>.localhost/.
+    // Using slide:// directly can leave iframes stuck at about:blank on Windows.
+    return 'http://slide.localhost/' + encoded;
+  },
+
+  _slidePath(slide) {
+    return (this.basePath + '/' + slide.file).replace(/\\/g, '/');
+  },
+
+  _slideBaseUrl(slidePath) {
+    const slash = slidePath.lastIndexOf('/');
+    const dirPath = slash >= 0 ? slidePath.slice(0, slash + 1) : slidePath;
+    return this._assetUrl(dirPath);
+  },
+
+  async _loadSlideFrame(frame, slide) {
+    if (!frame || !slide) return;
+    const slidePath = this._slidePath(slide);
+    const slideUrl = this._assetUrl(slidePath);
+    const baseUrl = this._slideBaseUrl(slidePath);
+
+    frame.dataset.slideUrl = slideUrl;
+    frame.removeAttribute('src');
+
+    try {
+      let html = await window.__TAURI__.core.invoke('read_text_file', { filePath: slidePath });
+      html = this._injectBaseHref(html, baseUrl);
+      frame.srcdoc = html;
+      frame.addEventListener('load', () => this._installFrameNavigation(frame), { once: true });
+    } catch (e) {
+      console.warn('Tauri read slide failed, falling back to protocol URL:', e, slidePath);
+      frame.removeAttribute('srcdoc');
+      frame.src = slideUrl;
+      frame.addEventListener('load', () => this._installFrameNavigation(frame), { once: true });
+    }
+  },
+
+  _injectBaseHref(html, baseUrl) {
+    const base = `<base href="${this._escapeHtml(baseUrl)}">`;
+    if (/<base\s/i.test(html)) return html;
+    if (/<head[^>]*>/i.test(html)) {
+      return html.replace(/<head([^>]*)>/i, `<head$1>${base}`);
+    }
+    return `${base}${html}`;
   },
 
   getSlideUrl(index) {
@@ -276,7 +326,14 @@ const PptExtraViewer = {
   },
 
   async _handleSlideOpenMessage(data, source) {
-    if (!data || (data.type !== 'open-file' && data.type !== 'open-resource')) return;
+    if (!data) return;
+    if (data.type === 'slide-navigate') {
+      if (!this.isOpen() || !this._isSlideMessageSource(source)) return;
+      this._handleNavigationAction(data.direction || data.action);
+      return;
+    }
+
+    if (data.type !== 'open-file' && data.type !== 'open-resource') return;
     if (!this.isOpen() || !this._isSlideMessageSource(source)) return;
 
     if (data.url) {
@@ -321,6 +378,71 @@ const PptExtraViewer = {
       return;
     }
     window.open(pathOrUrl, '_blank');
+  },
+
+  _handleNavigationKey(e) {
+    const key = e.key;
+    if (key === 'ArrowLeft' || key === 'PageUp') {
+      e.preventDefault();
+      this.prev();
+      return true;
+    }
+    if (key === 'ArrowRight' || key === 'PageDown' || key === ' ' || key === 'Spacebar' || key === 'Enter') {
+      e.preventDefault();
+      this.next();
+      return true;
+    }
+    return false;
+  },
+
+  _handleNavigationAction(action) {
+    if (action === 'prev' || action === 'previous' || action === 'back') {
+      this.prev();
+      return;
+    }
+    this.next();
+  },
+
+  _installFrameNavigation(frame) {
+    try {
+      const doc = frame.contentDocument || frame.contentWindow.document;
+      if (!doc || doc.__pptNavigationInstalled) return;
+      doc.__pptNavigationInstalled = true;
+
+      doc.addEventListener('keydown', (e) => {
+        if (this._isEditableTarget(e.target)) return;
+        const direction = this._navigationDirectionFromKey(e.key);
+        if (!direction) return;
+        e.preventDefault();
+        frame.contentWindow.parent.postMessage({ type: 'slide-navigate', direction }, '*');
+      }, true);
+
+      doc.addEventListener('click', (e) => {
+        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+        if (this._isInteractiveClickTarget(e.target)) return;
+        e.preventDefault();
+        frame.contentWindow.parent.postMessage({ type: 'slide-navigate', direction: 'next' }, '*');
+      }, true);
+    } catch (e) {
+      console.warn('Unable to install slide frame navigation:', e);
+    }
+  },
+
+  _isEditableTarget(target) {
+    if (!target) return false;
+    const tag = target.tagName;
+    return target.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  },
+
+  _navigationDirectionFromKey(key) {
+    if (key === 'ArrowLeft' || key === 'PageUp') return 'prev';
+    if (key === 'ArrowRight' || key === 'PageDown' || key === ' ' || key === 'Spacebar' || key === 'Enter') return 'next';
+    return '';
+  },
+
+  _isInteractiveClickTarget(target) {
+    if (!target || !target.closest) return false;
+    return !!target.closest('a, button, input, textarea, select, label, [contenteditable="true"], [data-no-slide-nav]');
   },
 
   async exportToPpt() {
