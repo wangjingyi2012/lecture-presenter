@@ -309,7 +309,9 @@ const PptExtraViewer = {
 
   _injectBaseHref(html, baseUrl) {
     const base = `<base href="${this._escapeHtml(baseUrl)}">`;
-    if (/<base\s/i.test(html)) return html;
+    if (/<base\b[^>]*>/i.test(html)) {
+      return html.replace(/<base\b[^>]*>/i, base);
+    }
     if (/<head[^>]*>/i.test(html)) {
       return html.replace(/<head([^>]*)>/i, `<head$1>${base}`);
     }
