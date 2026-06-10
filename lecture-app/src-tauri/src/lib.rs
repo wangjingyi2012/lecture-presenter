@@ -134,9 +134,6 @@ fn read_app_config(app_handle: tauri::AppHandle) -> Result<AppConfig, String> {
 /// Auto-inject the built-in tutorial course if it exists in resources and isn't already in config.
 fn inject_builtin_course(app_handle: &tauri::AppHandle, config: &mut AppConfig) {
     let guide_id = "lecture-presenter-guide";
-    if config.courses.iter().any(|c| c.id == guide_id) {
-        return; // Already present
-    }
 
     // Check resource dir for bundled tutorial
     if let Ok(resource_dir) = app_handle.path().resource_dir() {
@@ -144,16 +141,22 @@ fn inject_builtin_course(app_handle: &tauri::AppHandle, config: &mut AppConfig) 
         if guide_path.join("course.json").exists() {
             // Always use forward slashes for cross-platform compatibility
             let path_str = guide_path.to_string_lossy().replace('\\', "/");
-            config.courses.insert(0, CourseEntry {
-                id: guide_id.to_string(),
-                path: path_str,
-                label: "演讲宝使用指南 — Lecture Presenter".to_string(),
-                created_by_app: None,
-            });
+            if let Some(entry) = config.courses.iter_mut().find(|c| c.id == guide_id) {
+                entry.path = path_str;
+                entry.label = "演讲宝使用指南 — Lecture Presenter".to_string();
+            } else {
+                config.courses.insert(0, CourseEntry {
+                    id: guide_id.to_string(),
+                    path: path_str,
+                    label: "演讲宝使用指南 — Lecture Presenter".to_string(),
+                    created_by_app: None,
+                });
+            }
             // Set as default if no course is open
             if config.last_opened_course.is_empty() {
                 config.last_opened_course = guide_id.to_string();
             }
+            return;
         }
     }
 

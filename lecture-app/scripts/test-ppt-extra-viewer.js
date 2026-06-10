@@ -16,6 +16,10 @@ function escapeHtml(value) {
 
 const context = {
   console,
+  navigator: {
+    platform: 'MacIntel',
+    userAgent: 'Macintosh',
+  },
   document: {
     createElement() {
       return {
@@ -38,24 +42,32 @@ const viewer = context.PptExtraViewer;
 
 {
   const html = '<!doctype html><html><head><base href="slide://localhost/old/"><script src="vendor/gsap.min.js"></script></head></html>';
-  const output = viewer._injectBaseHref(html, 'http://slide.localhost/Users/course/');
+  const output = viewer._injectBaseHref(html, 'slide://localhost/Users/course/');
 
-  assert.match(output, /<base href="http:\/\/slide\.localhost\/Users\/course\/">/);
+  assert.match(output, /<base href="slide:\/\/localhost\/Users\/course\/">/);
   assert.doesNotMatch(output, /slide:\/\/localhost\/old\//);
   assert.equal((output.match(/<base\b/gi) || []).length, 1);
 }
 
 {
   const html = '<!doctype html><html><head><title>Slide</title></head><body></body></html>';
-  const output = viewer._injectBaseHref(html, 'http://slide.localhost/Users/course/');
+  const output = viewer._injectBaseHref(html, 'slide://localhost/Users/course/');
 
-  assert.match(output, /<head><base href="http:\/\/slide\.localhost\/Users\/course\/"><title>Slide<\/title>/);
+  assert.match(output, /<head><base href="slide:\/\/localhost\/Users\/course\/"><title>Slide<\/title>/);
 }
 
 {
   const output = viewer._assetUrl('/Users/jingyi/课件/slide06.html');
 
-  assert.equal(output, 'http://slide.localhost/Users/jingyi/%E8%AF%BE%E4%BB%B6/slide06.html');
+  assert.equal(output, 'slide://localhost/Users/jingyi/%E8%AF%BE%E4%BB%B6/slide06.html');
+}
+
+{
+  context.navigator.platform = 'Win32';
+  context.navigator.userAgent = 'Windows';
+  const output = viewer._assetUrl('C:/Users/jingyi/课件/slide06.html');
+
+  assert.equal(output, 'http://slide.localhost/C%3A/Users/jingyi/%E8%AF%BE%E4%BB%B6/slide06.html');
 }
 
 console.log('ppt-extra-viewer tests passed');

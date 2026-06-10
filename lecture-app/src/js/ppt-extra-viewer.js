@@ -199,13 +199,17 @@ const PptExtraViewer = {
       item.classList.toggle('active', index === this.currentIndex);
     });
 
-    // Load slide in iframe. In Tauri/WebView2, direct iframe navigation to custom
-    // protocol localhost URLs can remain blank even when fetch works, so use srcdoc.
+    // Load slide in iframe. Windows WebView2 needs srcdoc with http://slide.localhost;
+    // macOS WebKit loads the registered slide:// protocol directly and needs it for subresources.
     const iframe = document.getElementById('ppt-extra-iframe');
-    if (window.__TAURI__ && this.basePath) {
+    if (window.__TAURI__ && this.basePath && this._usesCustomProtocolHost()) {
       this._loadSlideFrame(iframe, slide);
     } else {
-      iframe.src = this.baseUrl + '/' + slide.file;
+      iframe.removeAttribute('srcdoc');
+      iframe.src = window.__TAURI__ && this.basePath
+        ? this.getSlideUrl(this.currentIndex)
+        : this.baseUrl + '/' + slide.file;
+      iframe.addEventListener('load', () => this._installFrameNavigation(iframe), { once: true });
     }
 
     // Update speaker view if active
@@ -221,18 +225,26 @@ const PptExtraViewer = {
 
     // Current slide iframe
     const currentFrame = document.getElementById('speaker-current-slide');
-    if (window.__TAURI__ && this.basePath) {
+    if (window.__TAURI__ && this.basePath && this._usesCustomProtocolHost()) {
       this._loadSlideFrame(currentFrame, slide);
     } else {
-      currentFrame.src = this.baseUrl + '/' + slide.file;
+      currentFrame.removeAttribute('srcdoc');
+      currentFrame.src = window.__TAURI__ && this.basePath
+        ? this.getSlideUrl(this.currentIndex)
+        : this.baseUrl + '/' + slide.file;
+      currentFrame.addEventListener('load', () => this._installFrameNavigation(currentFrame), { once: true });
     }
 
     // Next slide iframe
     const nextFrame = document.getElementById('speaker-next-slide');
-    if (window.__TAURI__ && this.basePath) {
+    if (window.__TAURI__ && this.basePath && this._usesCustomProtocolHost()) {
       this._loadSlideFrame(nextFrame, nextSlide);
     } else {
-      nextFrame.src = this.baseUrl + '/' + nextSlide.file;
+      nextFrame.removeAttribute('srcdoc');
+      nextFrame.src = window.__TAURI__ && this.basePath
+        ? this.getSlideUrl(nextIndex)
+        : this.baseUrl + '/' + nextSlide.file;
+      nextFrame.addEventListener('load', () => this._installFrameNavigation(nextFrame), { once: true });
     }
 
     this.updateSpeakerNotes();
@@ -270,9 +282,16 @@ const PptExtraViewer = {
     const normalizedPath = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
     const segments = normalizedPath.split('/');
     const encoded = segments.map(s => encodeURIComponent(s)).join('/');
-    // Tauri v2 exposes custom protocols to WebView2 as http://<scheme>.localhost/.
-    // Using slide:// directly can leave iframes stuck at about:blank on Windows.
-    return 'http://slide.localhost/' + encoded;
+    if (this._usesCustomProtocolHost()) {
+      return 'http://slide.localhost/' + encoded;
+    }
+    return 'slide://localhost/' + encoded;
+  },
+
+  _usesCustomProtocolHost() {
+    const platform = (navigator.platform || '').toLowerCase();
+    const userAgent = (navigator.userAgent || '').toLowerCase();
+    return platform.includes('win') || userAgent.includes('windows');
   },
 
   _slidePath(slide) {
