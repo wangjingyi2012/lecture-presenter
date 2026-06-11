@@ -12,6 +12,7 @@ const PptExtraViewer = {
   // Speaker mode state
   isSpeakerMode: false,
   audienceWindow: null,
+  annotator: null,
   notes: {},       // { slideIndex: "note content" }
   timer: {
     start: null,
@@ -28,6 +29,21 @@ const PptExtraViewer = {
     document.getElementById('ppt-extra-export').addEventListener('click', () => this.exportToPpt());
     document.getElementById('ppt-extra-play').addEventListener('click', () => this.togglePlayMode());
     document.getElementById('ppt-extra-speaker').addEventListener('click', () => this.toggleSpeakerMode());
+    document.getElementById('ppt-extra-annotate').addEventListener('click', () => {
+      if (this.annotator) this.annotator.toggle();
+    });
+
+    // Transient annotation overlay over the slide iframe (memory-only, discarded on close)
+    if (window.PpteAnnotator) {
+      this.annotator = PpteAnnotator.create({
+        container: document.getElementById('ppt-extra-container'),
+        isAvailable: () => this.isOpen() && !this.isSpeakerMode,
+        onActiveChange: (active) => {
+          const btn = document.getElementById('ppt-extra-annotate');
+          btn.classList.toggle('annotating', active);
+        }
+      });
+    }
 
     // Speaker mode controls
     document.getElementById('speaker-exit').addEventListener('click', () => this.exitSpeakerMode());
@@ -83,6 +99,7 @@ const PptExtraViewer = {
     this.currentIndex = 0;
     this.isPlaying = false;
     this.isSpeakerMode = false;
+    if (this.annotator) this.annotator.reset();
     this.modal.classList.remove('playing-mode', 'speaker-mode');
     document.getElementById('ppt-extra-speaker').style.display = '';
     document.getElementById('speaker-view').classList.add('hidden');
@@ -192,6 +209,7 @@ const PptExtraViewer = {
   updateUI() {
     const slide = this.slides[this.currentIndex];
     document.getElementById('ppt-extra-title').textContent = this.title;
+    if (this.annotator) this.annotator.setPage(this.currentIndex);
 
     // Update TOC selection
     const tocItems = document.querySelectorAll('#ppt-extra-toc-list li');
@@ -571,6 +589,7 @@ const PptExtraViewer = {
 
   async enterSpeakerMode() {
     this.isSpeakerMode = true;
+    if (this.annotator) this.annotator.setActive(false);
     document.getElementById('ppt-extra-speaker').style.display = 'none';
     document.getElementById('ppt-extra-toc').style.display = 'none';
     document.getElementById('ppt-extra-container').style.display = 'none';
@@ -706,6 +725,7 @@ const PptExtraViewer = {
     }
 
     this.modal.classList.add('hidden');
+    if (this.annotator) this.annotator.reset();
     const iframe = document.getElementById('ppt-extra-iframe');
     iframe.src = 'about:blank';
     this.slides = [];

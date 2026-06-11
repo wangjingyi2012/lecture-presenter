@@ -1,0 +1,40 @@
+/* ppte-annotator.css — styles for the transient PPTE annotation overlay.
+   Loaded via <link> (not runtime injection) because Tauri's production CSP
+   adds inline-style hashes on pages with <style> blocks (audience.html),
+   which disables 'unsafe-inline' and blocks JS-injected <style> elements. */
+
+.ppte-anno-layer { position: absolute; inset: 0; pointer-events: none; z-index: 9; }
+.ppte-anno-canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+.ppte-anno-layer.active .ppte-anno-canvas { pointer-events: auto; cursor: crosshair; }
+.ppte-anno-texts { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.ppte-anno-text { position: absolute; min-width: 1em; padding: 2px 4px; pointer-events: none;
+  font-weight: 600; line-height: 1.25; white-space: pre-wrap; outline: none;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.35); }
+.ppte-anno-layer.active.tool-text .ppte-anno-text,
+.ppte-anno-layer.active.tool-eraser .ppte-anno-text { pointer-events: auto; cursor: pointer; }
+.ppte-anno-layer.active.tool-text .ppte-anno-text { cursor: text; }
+.ppte-anno-text:focus { background: rgba(0,0,0,0.25); border-radius: 4px;
+  box-shadow: 0 0 0 1px currentColor; }
+.ppte-anno-toolbar { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+  display: none; align-items: center; gap: 4px; padding: 6px 10px;
+  background: rgba(20,20,24,0.92); border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 24px; z-index: 11; pointer-events: auto;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4); user-select: none; -webkit-user-select: none; }
+.ppte-anno-layer.active .ppte-anno-toolbar { display: flex; }
+.ppte-anno-btn { width: 30px; height: 30px; display: flex; align-items: center;
+  justify-content: center; background: transparent; border: none; border-radius: 50%;
+  color: #cfcfd4; cursor: pointer; font-size: 14px; font-weight: 700; padding: 0; }
+.ppte-anno-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+.ppte-anno-btn.selected { background: rgba(10,132,255,0.3); color: #7ab8ff; }
+.ppte-anno-sep { width: 1px; height: 20px; background: rgba(255,255,255,0.15); margin: 0 4px; }
+.ppte-anno-swatch { width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid transparent; cursor: pointer; padding: 0; flex-shrink: 0; }
+.ppte-anno-swatch.selected { border-color: #fff; }
+.ppte-anno-fab { position: absolute; right: 16px; bottom: 16px; width: 38px; height: 38px;
+  border-radius: 50%; background: rgba(20,20,24,0.6); color: #fff;
+  border: 1px solid rgba(255,255,255,0.2); cursor: pointer; z-index: 11; opacity: 0.35;
+  transition: opacity 0.15s; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; pointer-events: auto; }
+.ppte-anno-fab:hover { opacity: 1; }
+.ppte-anno-fab.active { opacity: 1; background: #0a84ff; border-color: #0a84ff; }

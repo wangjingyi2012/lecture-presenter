@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>观众窗口</title>
+  <link rel="stylesheet" href="css/ppte-annotator.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
@@ -27,21 +28,32 @@
       background: transparent;
       cursor: default;
       outline: none;
+      /* Clicks must pass through to the slide iframe — slides handle their own
+         click-driven animations (same behavior as play mode). Page navigation
+         from this window is keyboard-only. */
+      pointer-events: none;
     }
   </style>
 </head>
 <body>
   <iframe id="slide-frame" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-forms"></iframe>
   <div id="nav-layer" tabindex="0" aria-label="幻灯片导航层"></div>
+  <script src="js/ppte-annotator.js"></script>
   <script>
     const { listen, emit } = window.__TAURI__.event;
     let currentSlideUrl = '';
+
+    // Transient annotation overlay (toggle with the corner button or the P key)
+    const annotator = window.PpteAnnotator
+      ? window.PpteAnnotator.create({ container: document.body, floatingToggle: true })
+      : null;
 
     // Listen for slide-change events from the presenter window
     listen('slide-change', (event) => {
       const slideUrl = event.payload;
       if (slideUrl) {
         currentSlideUrl = slideUrl;
+        if (annotator) annotator.setPage(slideUrl);
         document.getElementById('slide-frame').src = slideUrl;
         document.getElementById('nav-layer').focus();
       }
@@ -108,11 +120,18 @@
     }
 
     window.addEventListener('keydown', handleNavigationKey, true);
-    document.getElementById('nav-layer').addEventListener('click', (event) => {
-      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      document.getElementById('nav-layer').focus();
-      emit('audience-navigate', 'next');
-    }, true);
+
+    // Clicks pass through to the slide iframe (nav-layer is pointer-events:none),
+    // but clicking a cross-origin slide moves focus into the iframe, which would
+    // swallow subsequent arrow-key navigation. Pull focus back to this window.
+    window.addEventListener('blur', () => {
+      setTimeout(() => {
+        const activeEl = document.activeElement;
+        if (activeEl && activeEl.id === 'slide-frame') {
+          document.getElementById('nav-layer').focus();
+        }
+      }, 0);
+    });
   </script>
 </body>
 </html>

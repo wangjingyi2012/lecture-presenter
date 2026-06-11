@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="css/main.css">
   <link rel="stylesheet" href="css/auth.css">
   <link rel="stylesheet" href="css/course-creator.css">
+  <link rel="stylesheet" href="css/ppte-annotator.css">
   <link rel="stylesheet" href="vendor/highlight-github-dark.min.css" id="hljs-theme">
 </head>
 <body data-theme="dark">
@@ -473,6 +474,7 @@
     <div class="ppt-extra-header">
       <span id="ppt-extra-title"></span>
       <div class="ppt-extra-actions">
+        <button id="ppt-extra-annotate" title="标注模式 (P)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg></button>
         <button id="ppt-extra-export" title="导出为 PowerPoint"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>
         <button id="ppt-extra-speaker" title="演讲者模式 (S)" style="display:none"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg></button>
         <button id="ppt-extra-play" title="播放模式 (F)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg></button>
@@ -613,6 +615,7 @@
   <script src="js/md-viewer.js"></script>
   <script src="js/html-viewer.js"></script>
   <script src="js/ppte-ppt-exporter.js"></script>
+  <script src="js/ppte-annotator.js"></script>
   <script src="js/ppt-extra-viewer.js"></script>
   <script src="js/code-viewer.js"></script>
   <script src="js/content.js"></script>

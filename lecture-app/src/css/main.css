@@ -1107,6 +1107,11 @@ body.presentation-mode #week-title {
   color: var(--accent);
 }
 
+#ppt-extra-annotate.annotating {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
 #ppt-extra-body {
   flex: 1;
   display: flex;
