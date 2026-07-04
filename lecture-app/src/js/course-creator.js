@@ -543,6 +543,7 @@ const CourseCreator = {
         folderPath: pb.folderPath,
         manifestJson: JSON.stringify(pb.manifest, null, 2),
         slideFiles,
+        expectedMtimes: null,
       });
 
       // Add to section resources

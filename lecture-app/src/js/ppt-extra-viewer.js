@@ -8,6 +8,8 @@ const PptExtraViewer = {
   manifest: null,
   currentIndex: 0,
   isPlaying: false,
+  _watchUnlisten: null,
+  _reloadSeq: 0,
 
   // Speaker mode state
   isSpeakerMode: false,
@@ -26,6 +28,7 @@ const PptExtraViewer = {
     if (!this.modal) return;
 
     document.getElementById('ppt-extra-close').addEventListener('click', () => this.close());
+    document.getElementById('ppt-extra-refresh').addEventListener('click', () => this.refreshCurrentSlide());
     document.getElementById('ppt-extra-export').addEventListener('click', () => this.exportToPpt());
     document.getElementById('ppt-extra-play').addEventListener('click', () => this.togglePlayMode());
     document.getElementById('ppt-extra-speaker').addEventListener('click', () => this.toggleSpeakerMode());
@@ -92,6 +95,7 @@ const PptExtraViewer = {
   },
 
   async open(title, baseUrl, basePath) {
+    await this._stopWatchingPpte();
     this.title = title;
     this.baseUrl = baseUrl;
     this.basePath = basePath || '';
@@ -99,6 +103,7 @@ const PptExtraViewer = {
     this.currentIndex = 0;
     this.isPlaying = false;
     this.isSpeakerMode = false;
+    this._reloadSeq = 0;
     if (this.annotator) this.annotator.reset();
     this.modal.classList.remove('playing-mode', 'speaker-mode');
     document.getElementById('ppt-extra-speaker').style.display = '';
@@ -144,6 +149,7 @@ const PptExtraViewer = {
     this.renderTOC();
     this.updateUI();
     this.modal.classList.remove('hidden');
+    await this._startWatchingPpte();
 
     // Preload notes in background, store promise for speaker mode to await.
     this._notesReady = this.preloadNotes().then(() => {
@@ -190,6 +196,108 @@ const PptExtraViewer = {
     }
   },
 
+  async _startWatchingPpte() {
+    if (!window.__TAURI__ || !window.__TAURI__.event || !this.basePath) return;
+    try {
+      if (this._watchUnlisten) await this._stopWatchingPpte();
+      this._watchUnlisten = await window.__TAURI__.event.listen('ppte-file-changed', (event) => {
+        this._handlePpteFileChanged(event.payload).catch(e => {
+          console.warn('Failed to handle PPTE file change:', e);
+        });
+      });
+      await window.__TAURI__.core.invoke('watch_ppte_folder', { folderPath: this.basePath });
+    } catch (e) {
+      console.warn('Failed to watch PPTE folder:', e);
+    }
+  },
+
+  async _stopWatchingPpte() {
+    const folderPath = this.basePath;
+    if (this._watchUnlisten) {
+      try {
+        this._watchUnlisten();
+      } catch (e) {
+        console.warn('Failed to remove PPTE watch listener:', e);
+      }
+      this._watchUnlisten = null;
+    }
+    if (window.__TAURI__ && folderPath) {
+      try {
+        await window.__TAURI__.core.invoke('unwatch_ppte_folder', { folderPath });
+      } catch (e) {
+        console.warn('Failed to unwatch PPTE folder:', e);
+      }
+    }
+  },
+
+  _normalizePpteRelativePath(path) {
+    return String(path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  },
+
+  async _handlePpteFileChanged(payload) {
+    if (!payload || !this.isOpen() || !this.basePath) return;
+    const changedFolder = String(payload.folderPath || '').replace(/\\/g, '/');
+    const currentFolder = String(this.basePath || '').replace(/\\/g, '/');
+    if (changedFolder !== currentFolder) return;
+
+    const files = (payload.files || []).map(path => this._normalizePpteRelativePath(path));
+    if (files.length === 0) return;
+
+    if (files.includes('manifest.json')) {
+      await this._reloadManifest();
+      this.refreshCurrentSlide();
+      return;
+    }
+
+    const currentSlide = this.slides[this.currentIndex];
+    const currentFile = this._normalizePpteRelativePath(currentSlide?.file);
+    const currentNote = this._normalizePpteRelativePath(this._noteFileNameForSlide(currentSlide || {}));
+    if (currentFile && files.includes(currentFile)) {
+      this.refreshCurrentSlide();
+    }
+    if (currentNote && files.includes(currentNote) && !this._notesEditing) {
+      await this._reloadNote(this.currentIndex);
+      this.updateSpeakerNotes();
+    }
+  },
+
+  async _reloadManifest() {
+    if (!window.__TAURI__ || !this.basePath) return;
+    const manifestPath = (this.basePath + '/manifest.json').replace(/\\/g, '/');
+    const content = await window.__TAURI__.core.invoke('read_text_file', { filePath: manifestPath });
+    const manifest = JSON.parse(content);
+    this.manifest = manifest;
+    this.slides = manifest.slides || [];
+    this.currentIndex = Math.min(this.currentIndex, Math.max(0, this.slides.length - 1));
+    this.renderTOC();
+  },
+
+  async _reloadNote(index) {
+    if (!window.__TAURI__ || !this.basePath || !this.slides[index]) return;
+    const notePath = (this.basePath + '/' + this._noteFileNameForSlide(this.slides[index])).replace(/\\/g, '/');
+    try {
+      this.notes[index] = await window.__TAURI__.core.invoke('read_text_file', { filePath: notePath });
+    } catch (e) {
+      this.notes[index] = '';
+    }
+  },
+
+  refreshCurrentSlide() {
+    if (!this.isOpen() || this.slides.length === 0) return;
+    const token = this._nextReloadToken();
+    const mainFrame = document.getElementById('ppt-extra-iframe');
+    this._reloadFrame(mainFrame, this.currentIndex, { bustCache: true, token });
+
+    if (this.isSpeakerMode) {
+      const currentFrame = document.getElementById('speaker-current-slide');
+      const nextFrame = document.getElementById('speaker-next-slide');
+      const nextIndex = Math.min(this.currentIndex + 1, this.slides.length - 1);
+      this._reloadFrame(currentFrame, this.currentIndex, { bustCache: true, token });
+      this._reloadFrame(nextFrame, nextIndex, { bustCache: true, token });
+      this.updateAudienceSlide(this.currentIndex, { bustCache: true, token });
+    }
+  },
+
   renderTOC() {
     const list = document.getElementById('ppt-extra-toc-list');
     list.innerHTML = '';
@@ -217,18 +325,8 @@ const PptExtraViewer = {
       item.classList.toggle('active', index === this.currentIndex);
     });
 
-    // Load slide in iframe. Windows WebView2 needs srcdoc with http://slide.localhost;
-    // macOS WebKit loads the registered slide:// protocol directly and needs it for subresources.
     const iframe = document.getElementById('ppt-extra-iframe');
-    if (window.__TAURI__ && this.basePath && this._usesCustomProtocolHost()) {
-      this._loadSlideFrame(iframe, slide);
-    } else {
-      iframe.removeAttribute('srcdoc');
-      iframe.src = window.__TAURI__ && this.basePath
-        ? this.getSlideUrl(this.currentIndex)
-        : this.baseUrl + '/' + slide.file;
-      iframe.addEventListener('load', () => this._installFrameNavigation(iframe), { once: true });
-    }
+    this._reloadFrame(iframe, this.currentIndex);
 
     // Update speaker view if active
     if (this.isSpeakerMode) {
@@ -243,27 +341,11 @@ const PptExtraViewer = {
 
     // Current slide iframe
     const currentFrame = document.getElementById('speaker-current-slide');
-    if (window.__TAURI__ && this.basePath && this._usesCustomProtocolHost()) {
-      this._loadSlideFrame(currentFrame, slide);
-    } else {
-      currentFrame.removeAttribute('srcdoc');
-      currentFrame.src = window.__TAURI__ && this.basePath
-        ? this.getSlideUrl(this.currentIndex)
-        : this.baseUrl + '/' + slide.file;
-      currentFrame.addEventListener('load', () => this._installFrameNavigation(currentFrame), { once: true });
-    }
+    this._reloadFrame(currentFrame, this.currentIndex);
 
     // Next slide iframe
     const nextFrame = document.getElementById('speaker-next-slide');
-    if (window.__TAURI__ && this.basePath && this._usesCustomProtocolHost()) {
-      this._loadSlideFrame(nextFrame, nextSlide);
-    } else {
-      nextFrame.removeAttribute('srcdoc');
-      nextFrame.src = window.__TAURI__ && this.basePath
-        ? this.getSlideUrl(nextIndex)
-        : this.baseUrl + '/' + nextSlide.file;
-      nextFrame.addEventListener('load', () => this._installFrameNavigation(nextFrame), { once: true });
-    }
+    this._reloadFrame(nextFrame, nextIndex);
 
     this.updateSpeakerNotes();
 
@@ -322,10 +404,40 @@ const PptExtraViewer = {
     return this._assetUrl(dirPath);
   },
 
-  async _loadSlideFrame(frame, slide) {
+  _withCacheBust(url, token) {
+    if (!token) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}`;
+  },
+
+  _nextReloadToken() {
+    this._reloadSeq += 1;
+    return String(this._reloadSeq);
+  },
+
+  _reloadFrame(frame, index, options = {}) {
+    if (!frame || index < 0 || index >= this.slides.length) return;
+    const slide = this.slides[index];
+    const token = options.bustCache ? (options.token || this._nextReloadToken()) : '';
+
+    // Windows WebView2 needs srcdoc with http://slide.localhost;
+    // macOS WebKit loads the registered slide:// protocol directly and needs it for subresources.
+    if (window.__TAURI__ && this.basePath && this._usesCustomProtocolHost()) {
+      this._loadSlideFrame(frame, slide, { bustCache: !!options.bustCache, token });
+      return;
+    }
+
+    frame.removeAttribute('srcdoc');
+    frame.src = window.__TAURI__ && this.basePath
+      ? this.getSlideUrl(index, { bustCache: !!options.bustCache, token })
+      : this._withCacheBust(this.baseUrl + '/' + slide.file, token);
+    frame.addEventListener('load', () => this._installFrameNavigation(frame), { once: true });
+  },
+
+  async _loadSlideFrame(frame, slide, options = {}) {
     if (!frame || !slide) return;
     const slidePath = this._slidePath(slide);
-    const slideUrl = this._assetUrl(slidePath);
+    const token = options.bustCache ? (options.token || this._nextReloadToken()) : '';
+    const slideUrl = this._withCacheBust(this._assetUrl(slidePath), token);
     const baseUrl = this._slideBaseUrl(slidePath);
 
     frame.dataset.slideUrl = slideUrl;
@@ -355,13 +467,13 @@ const PptExtraViewer = {
     return `${base}${html}`;
   },
 
-  getSlideUrl(index) {
+  getSlideUrl(index, options = {}) {
     const slide = this.slides[index];
     if (window.__TAURI__ && this.basePath) {
       const slidePath = (this.basePath + '/' + slide.file).replace(/\\/g, '/');
-      return this._assetUrl(slidePath);
+      return this._withCacheBust(this._assetUrl(slidePath), options.bustCache ? options.token : '');
     }
-    return this.baseUrl + '/' + slide.file;
+    return this._withCacheBust(this.baseUrl + '/' + slide.file, options.bustCache ? options.token : '');
   },
 
   async _handleSlideOpenMessage(data, source) {
@@ -640,10 +752,10 @@ const PptExtraViewer = {
     }
   },
 
-  async updateAudienceSlide(index) {
+  async updateAudienceSlide(index, options = {}) {
     if (!window.__TAURI__ || !this.isSpeakerMode) return;
     try {
-      const slideUrl = this.getSlideUrl(index);
+      const slideUrl = this.getSlideUrl(index, options);
       await window.__TAURI__.core.invoke('emit_slide_change', { slideUrl });
     } catch (e) {
       console.error('Failed to update audience slide:', e);
@@ -716,6 +828,7 @@ const PptExtraViewer = {
   },
 
   close() {
+    this._stopWatchingPpte();
     this.isPlaying = false;
     this.modal.classList.remove('playing-mode');
     document.getElementById('ppt-extra-play').innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';

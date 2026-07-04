@@ -23,23 +23,37 @@ const Content = {
 
     const resources = section.resources || [];
     if (resources.length === 0) {
-      container.innerHTML = '<p style="color:var(--text-muted);margin-top:16px;">本章节暂无资源</p>';
+      container.innerHTML = '<p class="resource-empty">本章节暂无资源</p>';
       return;
     }
 
-    // Render resources in original order (no grouping by type)
+    const summary = document.createElement('div');
+    summary.className = 'resource-toolbar';
+    const counts = this._countResources(resources);
+    summary.innerHTML = `
+      <div>
+        <div class="resource-toolbar-title">章节资源</div>
+        <div class="resource-toolbar-subtitle">${resources.length} 个资源 · ${this._escapeHtml(counts)}</div>
+      </div>
+    `;
+    container.appendChild(summary);
+
+    const list = document.createElement('div');
+    list.className = 'resource-list';
+    container.appendChild(list);
+
+    // Render resources in original order.
     resources.forEach((r, index) => {
-      container.appendChild(this._createResourceCard(r, index + 1));
+      list.appendChild(this._createResourceCard(r, index + 1));
     });
   },
 
   _createResourceCard(item, index) {
     const type = item.type || 'code';
-    const icon = this.TYPE_ICONS[type] || '📄';
     const label = this.TYPE_LABELS[type] || type;
 
     const card = document.createElement('div');
-    card.className = 'resource-card';
+    card.className = `resource-card resource-card-${this._safeClass(type)}`;
 
     let subtitle = '';
     if (item.path) subtitle = item.path.split('/').pop();
@@ -49,9 +63,11 @@ const Content = {
 
     card.innerHTML = `
       <div class="resource-num">${index}</div>
-      <div class="resource-icon">${Icons[type] || icon}</div>
+      <div class="resource-icon">${Icons[type] || Icons.code}</div>
       <div class="resource-info">
-        <div class="title">${this._escapeHtml(item.title)}</div>
+        <div class="resource-title-row">
+          <div class="title">${this._escapeHtml(item.title)}</div>
+        </div>
         <div class="subtitle">${this._escapeHtml(subtitle)}</div>
       </div>
       <div class="resource-type-tag">${label}</div>
@@ -59,6 +75,21 @@ const Content = {
 
     card.addEventListener('click', () => this._handleClick(item));
     return card;
+  },
+
+  _countResources(resources) {
+    const counts = resources.reduce((acc, item) => {
+      const type = item.type || 'code';
+      acc[type] = (acc[type] || 0) + 1;
+      return acc;
+    }, {});
+    return Object.entries(counts)
+      .map(([type, count]) => `${this.TYPE_LABELS[type] || type} ${count}`)
+      .join(' / ');
+  },
+
+  _safeClass(type) {
+    return String(type || 'code').replace(/[^a-z0-9_-]/gi, '-').toLowerCase();
   },
 
   async _handleClick(item) {

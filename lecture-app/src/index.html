@@ -83,74 +83,138 @@
     <main id="content">
       <div id="content-scroll">
         <div id="week-header">
-          <h2 id="week-title"></h2>
-          <p id="week-description"></p>
+          <div class="week-heading-main">
+            <div>
+              <h2 id="week-title"></h2>
+              <p id="week-description"></p>
+            </div>
+            <button id="ppte-workbench-entry" class="workspace-entry-btn" title="进入 PPTE 工作台">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2"/>
+                <path d="M8 21h8M12 17v4"/>
+                <path d="M7 8h2v5H7zM11 6h2v7h-2zM15 10h2v3h-2z" fill="currentColor" stroke="none"/>
+              </svg>
+              PPTE 工作台
+            </button>
+          </div>
         </div>
         <div id="resources"></div>
       </div>
 
       <!-- PPTE Management View -->
       <div id="ppte-management" class="hidden">
-        <div style="padding:40px;max-width:800px;margin:0 auto;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;">
-            <h2 style="margin:0;font-size:24px;font-weight:600;">PPTE 幻灯片</h2>
-            <button id="ppte-back-to-course" style="padding:8px 16px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;">← 返回课程</button>
-          </div>
-
-          <div style="display:flex;gap:16px;margin-bottom:32px;">
-            <button id="ppte-create-btn" style="flex:1;padding:20px;border-radius:12px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;text-align:center;">
-              <div style="font-size:32px;margin-bottom:8px;">+</div>
-              <div style="font-size:16px;font-weight:600;">创建 PPTE</div>
-              <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">从模板创建新的幻灯片</div>
-            </button>
-            <button id="ppte-open-btn" style="flex:1;padding:20px;border-radius:12px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;text-align:center;">
-              <div style="font-size:32px;margin-bottom:8px;">📁</div>
-              <div style="font-size:16px;font-weight:600;">打开 PPTE</div>
-              <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">打开已有的幻灯片文件</div>
-            </button>
-          </div>
-
-          <div id="ppte-recent-list">
-            <h3 style="font-size:14px;font-weight:600;color:var(--text-secondary);margin-bottom:12px;">最近打开</h3>
-            <div id="ppte-recent-items" style="display:flex;flex-direction:column;gap:8px;">
-              <p style="color:var(--text-muted);font-size:14px;">暂无最近打开的 PPTE</p>
+        <div class="ppte-workbench">
+          <div class="ppte-workbench-header">
+            <div>
+              <div class="ppte-workbench-kicker">PPT-EXTRA</div>
+              <h2>PPTE 工作台</h2>
+              <p>创建、打开和继续编辑你的 HTML 幻灯片课件。</p>
             </div>
+            <button id="ppte-back-to-course" class="ppte-workbench-back">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+              返回课程
+            </button>
+          </div>
+
+          <div class="ppte-workbench-grid">
+            <section class="ppte-workbench-primary">
+              <button id="ppte-create-btn" class="ppte-workbench-action ppte-workbench-action-primary">
+                <span class="ppte-action-icon">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                </span>
+                <span class="ppte-action-copy">
+                  <strong>创建 PPTE</strong>
+                  <span>从模板开始，生成新的课件目录。</span>
+                </span>
+              </button>
+              <button id="ppte-open-btn" class="ppte-workbench-action">
+                <span class="ppte-action-icon">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h4"/></svg>
+                </span>
+                <span class="ppte-action-copy">
+                  <strong>打开已有 PPTE</strong>
+                  <span>选择包含 manifest.json 的课件文件夹。</span>
+                </span>
+              </button>
+            </section>
+
+            <section id="ppte-recent-list" class="ppte-workbench-recent">
+              <div class="ppte-recent-header">
+                <div>
+                  <h3>最近打开</h3>
+                  <p>继续上次编辑的课件。</p>
+                </div>
+              </div>
+              <div id="ppte-recent-items" class="ppte-recent-items">
+                <p class="ppte-empty-state">暂无最近打开的 PPTE</p>
+              </div>
+            </section>
+
+            <aside class="ppte-workbench-notes">
+              <div class="ppte-note-item">
+                <span>保存保护</span>
+                <p>外部改动会在保存前提示，避免静默覆盖。</p>
+              </div>
+              <div class="ppte-note-item">
+                <span>实时刷新</span>
+                <p>播放和编辑时会监听课件目录变化。</p>
+              </div>
+              <div class="ppte-note-item">
+                <span>Gitee 备份</span>
+                <p>打开课件后可一键备份到远程仓库。</p>
+              </div>
+            </aside>
           </div>
         </div>
       </div>
-
       <!-- PPTE Editor (in main content) -->
       <div id="ppte-editor" class="hidden">
-        <div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--bg-secondary);">
-          <div style="display:flex;align-items:center;gap:12px;">
-            <button id="ppte-editor-back" style="padding:4px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);cursor:pointer;font-size:13px;">← 返回</button>
-            <span id="ppte-editor-title" style="font-weight:600;font-size:14px;">PPTE编辑</span>
+        <div class="ppte-editor-header">
+          <div class="ppte-editor-header-main">
+            <button id="ppte-editor-back" class="ppte-editor-button ppte-editor-button-ghost" title="返回资源列表">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+              返回
+            </button>
+            <div class="ppte-editor-title-wrap">
+              <span class="ppte-editor-kicker">PPT-EXTRA</span>
+              <span id="ppte-editor-title">PPTE编辑</span>
+            </div>
           </div>
-          <div style="display:flex;gap:6px;">
-            <button id="ppt-reorder-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:13px;">调整顺序</button>
-            <button id="ppt-edit-config-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:13px;">编辑配置</button>
-            <button id="ppt-save-btn" style="padding:5px 12px;border-radius:4px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:13px;">保存</button>
+          <div class="ppte-editor-primary-actions">
+            <button id="ppt-play-btn2" class="ppte-editor-button">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              播放
+            </button>
+            <button id="ppt-speaker-btn2" class="ppte-editor-button">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>
+              演讲
+            </button>
+            <button id="ppt-gitee-backup-btn" class="ppte-editor-button">备份到Gitee</button>
+            <button id="ppt-save-btn" class="ppte-editor-button ppte-editor-button-primary">保存</button>
           </div>
         </div>
-        <div style="display:flex;flex:1;overflow:hidden;">
-          <div id="ppte-page-list" style="width:280px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--bg-secondary);">
-            <div style="padding:8px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
-              <span style="font-size:12px;font-weight:500;color:var(--text-secondary);">页面目录</span>
-              <button id="ppte-add-page" style="padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);cursor:pointer;font-size:12px;">+ 添加</button>
+        <div class="ppte-editor-body">
+          <div id="ppte-page-list">
+            <div class="ppte-page-list-header">
+              <span>页面目录</span>
+              <button id="ppte-add-page" class="ppte-editor-button ppte-editor-button-compact">+ 添加</button>
             </div>
-            <ul id="ppte-page-items" style="flex:1;overflow-y:auto;list-style:none;padding:0;margin:0;"></ul>
+            <ul id="ppte-page-items"></ul>
           </div>
-          <div id="ppte-editor-content" style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:16px;">
-            <div id="ppte-editor-toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
-              <input type="text" id="ppt-current-title" placeholder="页面标题" style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px;">
-              <button id="ppt-ai-chat-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;">AI助手</button>
-              <button id="ppt-visual-edit-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;">可视化调整</button>
-              <button id="ppt-preview-btn" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;">预览</button>
-              <button id="ppt-play-btn2" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;">▶ 播放</button>
-              <button id="ppt-speaker-btn2" style="padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);cursor:pointer;font-size:12px;display:flex;align-items:center;gap:4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg> 演讲</button>
-              <button id="ppt-delete-current" style="padding:5px 12px;border-radius:4px;border:none;background:#e74c3c;color:#fff;cursor:pointer;font-size:12px;">删除</button>
+          <div id="ppte-editor-content">
+            <div id="ppte-editor-toolbar">
+              <input type="text" id="ppt-current-title" placeholder="页面标题">
+              <div class="ppte-editor-tool-actions">
+                <button id="ppt-ai-chat-btn" class="ppte-editor-button ppte-editor-button-compact">AI助手</button>
+                <button id="ppt-resources-btn" class="ppte-editor-button ppte-editor-button-compact">资源</button>
+                <button id="ppt-visual-edit-btn" class="ppte-editor-button ppte-editor-button-compact">可视化调整</button>
+                <button id="ppt-preview-btn" class="ppte-editor-button ppte-editor-button-compact">预览</button>
+                <button id="ppt-reorder-btn" class="ppte-editor-button ppte-editor-button-compact">调整顺序</button>
+                <button id="ppt-edit-config-btn" class="ppte-editor-button ppte-editor-button-compact">编辑配置</button>
+                <button id="ppt-delete-current" class="ppte-editor-button ppte-editor-button-danger ppte-editor-button-compact">删除</button>
+              </div>
             </div>
-            <textarea id="ppt-current-html" placeholder="HTML 内容..." style="flex:1;width:100%;padding:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-tertiary);color:var(--text-primary);font-family:monospace;font-size:13px;line-height:1.5;resize:none;box-sizing:border-box;"></textarea>
+            <textarea id="ppt-current-html" placeholder="HTML 内容..."></textarea>
           </div>
         </div>
       </div>
@@ -391,6 +455,15 @@
             </div>
             <div class="dev-field-hint" id="setting-ai-hint">选择AI提供商并配置API Key</div>
           </div>
+          <div class="dev-field">
+            <label>Gitee 备份</label>
+            <div class="dev-field-row">
+              <input type="password" id="setting-gitee-token" placeholder="Gitee Personal Access Token">
+              <button id="setting-gitee-save" class="btn-detect" title="保存到系统钥匙串">保存</button>
+              <button id="setting-gitee-clear" class="btn-detect" title="清除已保存 Token">清除</button>
+            </div>
+            <div class="dev-field-hint" id="setting-gitee-hint">用于创建私有仓库；Token 只保存到系统钥匙串，不写入配置文件</div>
+          </div>
           <div class="dev-field" style="display:none">
             <label>更新服务器</label>
             <div class="dev-field-row">
@@ -475,6 +548,7 @@
       <span id="ppt-extra-title"></span>
       <div class="ppt-extra-actions">
         <button id="ppt-extra-annotate" title="标注模式 (P)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg></button>
+        <button id="ppt-extra-refresh" title="刷新当前页"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
         <button id="ppt-extra-export" title="导出为 PowerPoint"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>
         <button id="ppt-extra-speaker" title="演讲者模式 (S)" style="display:none"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg></button>
         <button id="ppt-extra-play" title="播放模式 (F)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg></button>
@@ -622,6 +696,12 @@
   <script src="js/course-manager.js"></script>
   <script src="js/course-creator.js"></script>
   <script src="js/settings.js"></script>
+  <script src="js/ai-settings.js"></script>
+  <script src="js/gitee-settings.js"></script>
+  <script src="js/dev-settings.js"></script>
+  <script src="js/ppte-recent.js"></script>
+  <script src="js/ppte-editor.js"></script>
+  <script src="js/ppte-create.js"></script>
   <script src="js/drag.js"></script>
   <script src="js/updater.js"></script>
   <script src="js/notification-center.js"></script>

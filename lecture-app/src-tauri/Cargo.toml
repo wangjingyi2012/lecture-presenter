@@ -20,6 +20,8 @@ futures-util = "0.3"
 percent-encoding = "2"
 mime_guess = "2"
 http = "1"
+notify = "6"
+keyring = "3"
 
 [lib]
 name = "lecture_app_lib"

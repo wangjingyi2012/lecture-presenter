@@ -12,6 +12,7 @@ build/
 # Logs and caches
 *.log
 .cache/
+.codegraph/
 
 # OS files
 .DS_Store

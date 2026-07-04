@@ -16,6 +16,9 @@ function escapeHtml(value) {
 
 const context = {
   console,
+  window: {
+    __TAURI__: {},
+  },
   navigator: {
     platform: 'MacIntel',
     userAgent: 'Macintosh',
@@ -63,11 +66,26 @@ const viewer = context.PptExtraViewer;
 }
 
 {
+  viewer.basePath = '/Users/jingyi/课件';
+  viewer.baseUrl = 'asset://localhost/Users/jingyi/课件';
+  viewer.slides = [{ file: 'slide06.html' }];
+  const output = viewer.getSlideUrl(0, { bustCache: true, token: '7' });
+
+  assert.equal(output, 'slide://localhost/Users/jingyi/%E8%AF%BE%E4%BB%B6/slide06.html?t=7');
+}
+
+{
   context.navigator.platform = 'Win32';
   context.navigator.userAgent = 'Windows';
   const output = viewer._assetUrl('C:/Users/jingyi/课件/slide06.html');
 
   assert.equal(output, 'http://slide.localhost/C%3A/Users/jingyi/%E8%AF%BE%E4%BB%B6/slide06.html');
+}
+
+{
+  const output = viewer.getSlideUrl(0, { bustCache: true, token: '8' });
+
+  assert.equal(output, 'http://slide.localhost/Users/jingyi/%E8%AF%BE%E4%BB%B6/slide06.html?t=8');
 }
 
 console.log('ppt-extra-viewer tests passed');

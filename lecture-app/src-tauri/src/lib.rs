@@ -1,10 +1,28 @@
 use serde::{Deserialize, Serialize};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Manager, Emitter};
 use reqwest;
+
+const GITEE_KEYRING_SERVICE: &str = "Lecture Presenter";
+const GITEE_KEYRING_USER: &str = "gitee-access-token";
+
+#[derive(Default)]
+struct PpteWatcherState {
+    watchers: Mutex<HashMap<String, PpteWatcherEntry>>,
+}
+
+struct PpteWatcherEntry {
+    _watcher: RecommendedWatcher,
+    refs: usize,
+}
 
 #[derive(Serialize, Deserialize)]
 struct UpdateInfo {
@@ -565,9 +583,11 @@ async fn pick_files(app_handle: tauri::AppHandle) -> Result<Vec<String>, String>
         .add_filter("All Supported", &[
             "pdf", "ppt", "pptx",
             "mp4", "mov", "webm",
+            "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp",
             "md", "html", "htm",
             "py", "js", "ts", "rs", "java", "go", "c", "cpp", "h", "css", "sh", "sql",
             "json", "yml", "yaml",
+            "woff", "woff2", "ttf", "otf",
         ])
         .pick_files(move |files| {
             let _ = tx.send(files);
@@ -1052,6 +1072,397 @@ struct PptManifest {
     slides: Vec<PptSlide>,
 }
 
+#[derive(Serialize)]
+struct FileStat {
+    path: String,
+    exists: bool,
+    #[serde(rename = "mtimeMs")]
+    mtime_ms: Option<i64>,
+    size: Option<u64>,
+    #[serde(rename = "contentHash")]
+    content_hash: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExpectedFileStat {
+    path: String,
+    #[serde(default, rename = "mtimeMs")]
+    mtime_ms: Option<i64>,
+    #[serde(default)]
+    exists: Option<bool>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default, rename = "contentHash")]
+    content_hash: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SaveResult {
+    saved: Vec<String>,
+    conflicts: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TokenStatus {
+    configured: bool,
+}
+
+#[derive(Serialize)]
+struct GiteeRepoInfo {
+    name: String,
+    #[serde(rename = "fullName")]
+    full_name: Option<String>,
+    #[serde(rename = "htmlUrl")]
+    html_url: Option<String>,
+    #[serde(rename = "cloneUrl")]
+    clone_url: Option<String>,
+    #[serde(rename = "sshUrl")]
+    ssh_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GiteeRepoResponse {
+    name: Option<String>,
+    #[serde(rename = "full_name")]
+    full_name: Option<String>,
+    #[serde(rename = "html_url")]
+    html_url: Option<String>,
+    #[serde(rename = "clone_url")]
+    clone_url: Option<String>,
+    #[serde(rename = "ssh_url")]
+    ssh_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GitSyncResult {
+    committed: bool,
+    pushed: bool,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct GitInfo {
+    #[serde(rename = "isRepo")]
+    is_repo: bool,
+    #[serde(rename = "originUrl")]
+    origin_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PpteResourceEntry {
+    path: String,
+    kind: String,
+    size: u64,
+}
+
+#[derive(Serialize, Clone)]
+struct PpteFileChangedPayload {
+    #[serde(rename = "folderPath")]
+    folder_path: String,
+    files: Vec<String>,
+}
+
+fn file_stat_for_path(path: &PathBuf, label: String) -> FileStat {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            let mtime_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as i64);
+            let content_hash = if metadata.is_file() {
+                fs::read(path).ok().map(|bytes| {
+                    let mut hasher = DefaultHasher::new();
+                    bytes.hash(&mut hasher);
+                    format!("{:016x}", hasher.finish())
+                })
+            } else {
+                None
+            };
+
+            FileStat {
+                path: label,
+                exists: true,
+                mtime_ms,
+                size: Some(metadata.len()),
+                content_hash,
+            }
+        }
+        Err(_) => FileStat {
+            path: label,
+            exists: false,
+            mtime_ms: None,
+            size: None,
+            content_hash: None,
+        },
+    }
+}
+
+#[tauri::command]
+fn stat_files(paths: Vec<String>) -> Result<Vec<FileStat>, String> {
+    Ok(paths
+        .into_iter()
+        .map(|path| file_stat_for_path(&PathBuf::from(&path), path))
+        .collect())
+}
+
+fn ppte_resource_kind(path: &str) -> String {
+    let lower = path.to_lowercase();
+    if lower == "manifest.json" {
+        return "manifest".to_string();
+    }
+    if lower.ends_with(".html") || lower.ends_with(".htm") {
+        return "slide".to_string();
+    }
+    if lower.ends_with(".note") {
+        return "note".to_string();
+    }
+    if lower.ends_with(".css") {
+        return "style".to_string();
+    }
+    if matches!(
+        PathBuf::from(&lower).extension().and_then(|e| e.to_str()),
+        Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp")
+    ) {
+        return "image".to_string();
+    }
+    if matches!(
+        PathBuf::from(&lower).extension().and_then(|e| e.to_str()),
+        Some("js" | "mjs" | "json")
+    ) {
+        return "script".to_string();
+    }
+    "other".to_string()
+}
+
+fn collect_ppte_resources(
+    base_dir: &PathBuf,
+    current_dir: &PathBuf,
+    output: &mut Vec<PpteResourceEntry>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(current_dir)
+        .map_err(|e| format!("Failed to read PPTE resources: {}", e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read PPTE resource entry: {}", e))?;
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if file_name == ".git" || file_name == ".DS_Store" || file_name.starts_with("._") {
+            continue;
+        }
+
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to stat PPTE resource {}: {}", file_name, e))?;
+        if metadata.is_dir() {
+            collect_ppte_resources(base_dir, &path, output)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(base_dir)
+            .map_err(|e| format!("Failed to resolve PPTE resource path: {}", e))?
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        output.push(PpteResourceEntry {
+            kind: ppte_resource_kind(&relative),
+            path: relative,
+            size: metadata.len(),
+        });
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn list_ppte_resources(folder_path: String) -> Result<Vec<PpteResourceEntry>, String> {
+    let base_dir = PathBuf::from(folder_path);
+    if !base_dir.is_dir() {
+        return Err("PPTE folder does not exist".to_string());
+    }
+
+    let mut resources = Vec::new();
+    collect_ppte_resources(&base_dir, &base_dir, &mut resources)?;
+    resources.sort_by(|a, b| {
+        let kind_order = |kind: &str| match kind {
+            "manifest" => 0,
+            "slide" => 1,
+            "note" => 2,
+            "style" => 3,
+            "image" => 4,
+            "script" => 5,
+            _ => 6,
+        };
+        kind_order(&a.kind)
+            .cmp(&kind_order(&b.kind))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    Ok(resources)
+}
+
+fn unique_resource_destination(dest_dir: &PathBuf, file_name: &str) -> PathBuf {
+    let original = PathBuf::from(file_name);
+    let stem = original
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "resource".to_string());
+    let extension = original
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .filter(|e| !e.trim().is_empty());
+
+    let mut candidate = dest_dir.join(file_name);
+    let mut index = 1;
+    while candidate.exists() {
+        let next_name = if let Some(extension) = &extension {
+            format!("{}-{}.{}", stem, index, extension)
+        } else {
+            format!("{}-{}", stem, index)
+        };
+        candidate = dest_dir.join(next_name);
+        index += 1;
+    }
+    candidate
+}
+
+#[tauri::command]
+fn import_ppte_resources(folder_path: String, source_paths: Vec<String>) -> Result<Vec<PpteResourceEntry>, String> {
+    let base_dir = PathBuf::from(folder_path);
+    if !base_dir.is_dir() {
+        return Err("PPTE folder does not exist".to_string());
+    }
+    let dest_dir = base_dir.join("resources");
+    fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("Failed to create resources folder: {}", e))?;
+
+    let mut imported = Vec::new();
+    for source_path in source_paths {
+        let source = PathBuf::from(&source_path);
+        if !source.is_file() {
+            continue;
+        }
+        let Some(file_name) = source.file_name().map(|name| name.to_string_lossy().to_string()) else {
+            continue;
+        };
+        if file_name == ".DS_Store" || file_name.starts_with("._") {
+            continue;
+        }
+
+        let destination = unique_resource_destination(&dest_dir, &file_name);
+        fs::copy(&source, &destination)
+            .map_err(|e| format!("Failed to import {}: {}", source.display(), e))?;
+
+        let relative = destination
+            .strip_prefix(&base_dir)
+            .map_err(|e| format!("Failed to resolve imported resource path: {}", e))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let size = fs::metadata(&destination)
+            .map_err(|e| format!("Failed to stat imported resource: {}", e))?
+            .len();
+        imported.push(PpteResourceEntry {
+            kind: ppte_resource_kind(&relative),
+            path: relative,
+            size,
+        });
+    }
+
+    Ok(imported)
+}
+
+#[tauri::command]
+fn watch_ppte_folder(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, PpteWatcherState>,
+    folder_path: String,
+) -> Result<(), String> {
+    let folder = PathBuf::from(&folder_path);
+    if !folder.is_dir() {
+        return Err(format!("PPTE folder does not exist: {}", folder_path));
+    }
+
+    let folder_key = folder.to_string_lossy().to_string();
+    {
+        let mut watchers = state.watchers.lock().map_err(|e| e.to_string())?;
+        if let Some(entry) = watchers.get_mut(&folder_key) {
+            entry.refs += 1;
+            return Ok(());
+        }
+    }
+
+    let watch_root = folder.clone();
+    let event_root = folder.clone();
+    let event_folder_key = folder_key.clone();
+    let app = app_handle.clone();
+
+    let mut watcher = notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
+        match result {
+            Ok(event) => {
+                let mut files: Vec<String> = event
+                    .paths
+                    .into_iter()
+                    .filter_map(|path| {
+                        let rel = path
+                            .strip_prefix(&event_root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        if rel.is_empty() || rel.starts_with(".git/") || rel == ".git" {
+                            None
+                        } else {
+                            Some(rel)
+                        }
+                    })
+                    .collect();
+
+                files.sort();
+                files.dedup();
+
+                if !files.is_empty() {
+                    let _ = app.emit("ppte-file-changed", PpteFileChangedPayload {
+                        folder_path: event_folder_key.clone(),
+                        files,
+                    });
+                }
+            }
+            Err(error) => {
+                eprintln!("[ppte-watch] watch error: {}", error);
+            }
+        }
+    })
+    .map_err(|e| format!("Failed to create watcher: {}", e))?;
+
+    watcher
+        .watch(&watch_root, RecursiveMode::Recursive)
+        .map_err(|e| format!("Failed to watch PPTE folder: {}", e))?;
+
+    let mut watchers = state.watchers.lock().map_err(|e| e.to_string())?;
+    watchers.insert(folder_key, PpteWatcherEntry { _watcher: watcher, refs: 1 });
+    Ok(())
+}
+
+#[tauri::command]
+fn unwatch_ppte_folder(
+    state: tauri::State<'_, PpteWatcherState>,
+    folder_path: String,
+) -> Result<(), String> {
+    let folder_key = PathBuf::from(&folder_path).to_string_lossy().to_string();
+    let mut watchers = state.watchers.lock().map_err(|e| e.to_string())?;
+    if let Some(entry) = watchers.get_mut(&folder_key) {
+        if entry.refs > 1 {
+            entry.refs -= 1;
+            return Ok(());
+        }
+    }
+    watchers.remove(&folder_key);
+    Ok(())
+}
+
 #[tauri::command]
 fn create_ppt_extra_folder(
     app_handle: tauri::AppHandle,
@@ -1259,17 +1670,60 @@ fn create_ppt_extra_folder(
     // Write slide HTML files
     for (filename, _, html) in html_contents {
         fs::write(ppt_dir.join(&filename), html).map_err(|e| format!("Failed to save {}: {}", filename, e))?;
+        if filename.to_lowercase().ends_with(".html") {
+            let note_filename = filename.trim_end_matches(".html").to_string() + ".note";
+            fs::write(ppt_dir.join(&note_filename), "")
+                .map_err(|e| format!("Failed to save {}: {}", note_filename, e))?;
+        }
     }
 
     Ok(ppt_dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-fn save_ppt_extra(folder_path: String, manifest_json: String, slide_files: Vec<(String, String)>) -> Result<(), String> {
+fn save_ppt_extra(
+    folder_path: String,
+    manifest_json: String,
+    slide_files: Vec<(String, String)>,
+    expected_mtimes: Option<Vec<ExpectedFileStat>>,
+) -> Result<SaveResult, String> {
     let base_dir = PathBuf::from(&folder_path);
+    let mut saved = Vec::new();
+
+    if let Some(expected_files) = expected_mtimes {
+        let mut conflicts = Vec::new();
+
+        for expected in expected_files {
+            let relative_path = expected.path.trim_start_matches('/').trim_start_matches('\\');
+            let file_path = base_dir.join(relative_path);
+            let current = file_stat_for_path(&file_path, expected.path.clone());
+            let expected_exists = expected.exists.unwrap_or(expected.mtime_ms.is_some() || expected.size.is_some());
+            let changed = if expected_exists != current.exists {
+                true
+            } else if !expected_exists {
+                false
+            } else {
+                current.mtime_ms != expected.mtime_ms
+                    || current.size != expected.size
+                    || current.content_hash != expected.content_hash
+            };
+
+            if changed {
+                conflicts.push(expected.path);
+            }
+        }
+
+        if !conflicts.is_empty() {
+            return Ok(SaveResult {
+                saved: Vec::new(),
+                conflicts,
+            });
+        }
+    }
 
     // Save manifest
     fs::write(base_dir.join("manifest.json"), &manifest_json).map_err(|e| format!("Failed to save manifest: {}", e))?;
+    saved.push("manifest.json".to_string());
 
     // Save each slide file
     for (filename, content) in slide_files {
@@ -1288,9 +1742,793 @@ fn save_ppt_extra(folder_path: String, manifest_json: String, slide_files: Vec<(
             // Save as-is (HTML, CSS, manifest)
             fs::write(&file_path, &content).map_err(|e| format!("Failed to save {}: {}", filename, e))?;
         }
+        saved.push(filename);
     }
 
+    Ok(SaveResult {
+        saved,
+        conflicts: Vec::new(),
+    })
+}
+
+fn gitee_keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(GITEE_KEYRING_SERVICE, GITEE_KEYRING_USER)
+        .map_err(|e| format!("Failed to open system keyring: {}", e))
+}
+
+fn read_gitee_token_keyring() -> Result<String, String> {
+    gitee_keyring_entry()?
+        .get_password()
+        .map_err(|e| format!("Gitee token is not configured: {}", e))
+}
+
+#[cfg(target_os = "macos")]
+fn read_gitee_token_macos_security() -> Result<String, String> {
+    let output = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            GITEE_KEYRING_SERVICE,
+            "-a",
+            GITEE_KEYRING_USER,
+            "-w",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to read macOS Keychain: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_gitee_token_macos_security() -> Result<String, String> {
+    Err("macOS Keychain fallback is not available on this platform".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn store_gitee_token_macos_security(token: &str) -> Result<(), String> {
+    let output = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-s",
+            GITEE_KEYRING_SERVICE,
+            "-a",
+            GITEE_KEYRING_USER,
+            "-w",
+            token,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to write macOS Keychain: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn store_gitee_token_macos_security(_token: &str) -> Result<(), String> {
+    Err("macOS Keychain fallback is not available on this platform".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn clear_gitee_token_macos_security() -> Result<(), String> {
+    let output = Command::new("security")
+        .args([
+            "delete-generic-password",
+            "-s",
+            GITEE_KEYRING_SERVICE,
+            "-a",
+            GITEE_KEYRING_USER,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to clear macOS Keychain: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clear_gitee_token_macos_security() -> Result<(), String> {
+    Err("macOS Keychain fallback is not available on this platform".to_string())
+}
+
+fn read_gitee_token() -> Result<String, String> {
+    if let Ok(token) = read_gitee_token_keyring() {
+        if !token.trim().is_empty() {
+            return Ok(token);
+        }
+    }
+    let token = read_gitee_token_macos_security()
+        .map_err(|e| format!("Gitee token is not configured: {}", e))?;
+    if token.trim().is_empty() {
+        Err("Gitee token is not configured".to_string())
+    } else {
+        Ok(token)
+    }
+}
+
+fn store_gitee_token(token: &str) -> Result<(), String> {
+    let keyring_result = gitee_keyring_entry()
+        .and_then(|entry| entry.set_password(token).map_err(|e| format!("Failed to save Gitee token: {}", e)));
+    if read_gitee_token_keyring()
+        .map(|stored| stored.trim() == token)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    store_gitee_token_macos_security(token)
+        .map_err(|fallback_error| {
+            if let Err(keyring_error) = keyring_result {
+                format!("Failed to save Gitee token: {}; fallback failed: {}", keyring_error, fallback_error)
+            } else {
+                format!("Failed to verify keyring token; fallback failed: {}", fallback_error)
+            }
+        })?;
+
+    let stored = read_gitee_token_macos_security()
+        .map_err(|e| format!("Saved Gitee token but failed to verify it: {}", e))?;
+    if stored.trim() == token {
+        Ok(())
+    } else {
+        Err("Saved Gitee token but verification returned a different value".to_string())
+    }
+}
+
+fn clear_gitee_token() {
+    if let Ok(entry) = gitee_keyring_entry() {
+        let _ = entry.delete_credential();
+    }
+    let _ = clear_gitee_token_macos_security();
+}
+
+fn sanitize_gitee_repo_name(name: &str) -> String {
+    let mut output = String::new();
+    let mut last_dash = false;
+
+    for ch in name.trim().chars() {
+        let normalized = if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.' {
+            Some(ch.to_ascii_lowercase())
+        } else if ch.is_whitespace() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+            Some('-')
+        } else {
+            Some('-')
+        };
+
+        if let Some(ch) = normalized {
+            if ch == '-' {
+                if !last_dash {
+                    output.push(ch);
+                    last_dash = true;
+                }
+            } else {
+                output.push(ch);
+                last_dash = false;
+            }
+        }
+    }
+
+    let trimmed = output.trim_matches(|ch| ch == '-' || ch == '.').to_string();
+    if trimmed.is_empty() {
+        let mut hasher = DefaultHasher::new();
+        name.hash(&mut hasher);
+        format!("ppte-{:08x}", (hasher.finish() & 0xffff_ffff) as u32)
+    } else {
+        trimmed.chars().take(100).collect()
+    }
+}
+
+fn ppte_gitignore_content() -> &'static str {
+    ".DS_Store\n._*\n__MACOSX/\n*.tmp\n*.temp\n*.swp\n*.swo\n~$*\n"
+}
+
+fn ensure_ppte_gitignore(folder_path: &PathBuf) -> Result<(), String> {
+    let gitignore_path = folder_path.join(".gitignore");
+    if !gitignore_path.exists() {
+        fs::write(&gitignore_path, ppte_gitignore_content())
+            .map_err(|e| format!("Failed to write .gitignore: {}", e))?;
+        return Ok(());
+    }
+
+    let existing = fs::read_to_string(&gitignore_path)
+        .map_err(|e| format!("Failed to read .gitignore: {}", e))?;
+    let mut updated = existing.clone();
+    let mut changed = false;
+    for line in ppte_gitignore_content().lines() {
+        if !existing.lines().any(|existing_line| existing_line.trim() == line) {
+            if !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(line);
+            updated.push('\n');
+            changed = true;
+        }
+    }
+    if changed {
+        fs::write(&gitignore_path, updated)
+            .map_err(|e| format!("Failed to update .gitignore: {}", e))?;
+    }
     Ok(())
+}
+
+fn run_git(folder_path: &PathBuf, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(folder_path)
+        .output()
+        .map_err(|e| format!("Failed to run git {:?}: {}", args, e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Err(format!(
+            "git {:?} failed: {}{}{}",
+            args,
+            stderr,
+            if stderr.is_empty() || stdout.is_empty() { "" } else { "\n" },
+            stdout
+        ))
+    }
+}
+
+fn git_remote_url(folder_path: &PathBuf, remote: &str) -> Option<String> {
+    Command::new("git")
+        .args(["remote", "get-url", remote])
+        .current_dir(folder_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
+fn gitee_username_from_remote(remote_url: &str) -> Option<String> {
+    let marker = "gitee.com/";
+    let start = remote_url.find(marker)? + marker.len();
+    let rest = &remote_url[start..];
+    let username = rest.split('/').next()?.trim();
+    if username.is_empty() || username.contains('@') {
+        None
+    } else {
+        Some(username.to_string())
+    }
+}
+
+fn strip_url_credentials(remote_url: &str) -> String {
+    let trimmed = remote_url.trim();
+    let Some(scheme_pos) = trimmed.find("://") else {
+        return trimmed.to_string();
+    };
+    let authority_start = scheme_pos + 3;
+    let path_start = trimmed[authority_start..]
+        .find('/')
+        .map(|offset| authority_start + offset)
+        .unwrap_or(trimmed.len());
+    let authority = &trimmed[authority_start..path_start];
+    let Some(at_pos) = authority.rfind('@') else {
+        return trimmed.to_string();
+    };
+    format!(
+        "{}{}{}",
+        &trimmed[..authority_start],
+        &authority[at_pos + 1..],
+        &trimmed[path_start..]
+    )
+}
+
+fn normalize_gitee_remote_url(remote_url: &str) -> String {
+    let stripped = strip_url_credentials(remote_url);
+    let value = stripped.trim();
+    if let Some(rest) = value.strip_prefix("git@gitee.com:") {
+        return format!("https://gitee.com/{}", rest);
+    }
+    if let Some(rest) = value.strip_prefix("ssh://git@gitee.com/") {
+        return format!("https://gitee.com/{}", rest);
+    }
+    value.to_string()
+}
+
+fn ensure_gitee_https_origin(folder_path: &PathBuf) -> Result<(), String> {
+    let Some(origin_url) = git_remote_url(folder_path, "origin") else {
+        return Ok(());
+    };
+    let normalized = normalize_gitee_remote_url(&origin_url);
+    if normalized != origin_url && normalized.starts_with("https://gitee.com/") {
+        run_git(folder_path, &["remote", "set-url", "origin", &normalized])?;
+    }
+    Ok(())
+}
+
+fn write_askpass_script() -> Result<PathBuf, String> {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("lecture-presenter-git-askpass-{}", unique));
+
+    #[cfg(windows)]
+    let content = "@echo off\r\necho %1 | findstr /I \"Username\" >NUL\r\nif %ERRORLEVEL%==0 (echo %GITEE_GIT_USERNAME%) else (echo %GITEE_GIT_SECRET%)\r\n";
+
+    #[cfg(not(windows))]
+    let content = "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf \"%s\" \"$GITEE_GIT_USERNAME\" ;;\n  *) printf \"%s\" \"$GITEE_GIT_SECRET\" ;;\nesac\n";
+
+    fs::write(&path, content).map_err(|e| format!("Failed to write askpass script: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&path)
+            .map_err(|e| format!("Failed to stat askpass script: {}", e))?
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&path, permissions)
+            .map_err(|e| format!("Failed to chmod askpass script: {}", e))?;
+    }
+
+    Ok(path)
+}
+
+fn run_git_push(folder_path: &PathBuf, args: &[&str]) -> Result<String, String> {
+    let remote_url = git_remote_url(folder_path, "origin").unwrap_or_default();
+    if !(remote_url.starts_with("https://") && remote_url.contains("gitee.com/")) {
+        return run_git(folder_path, args);
+    }
+
+    let token = match read_gitee_token() {
+        Ok(token) if !token.trim().is_empty() => token,
+        _ => return run_git(folder_path, args),
+    };
+    let username = gitee_username_from_remote(&remote_url).unwrap_or_else(|| "oauth2".to_string());
+    let askpass_path = write_askpass_script()?;
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(folder_path)
+        .env("GIT_ASKPASS", &askpass_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GITEE_GIT_USERNAME", username)
+        .env("GITEE_GIT_SECRET", token)
+        .output()
+        .map_err(|e| format!("Failed to run git {:?}: {}", args, e));
+    let _ = fs::remove_file(&askpass_path);
+    let output = output?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Err(format!(
+            "git {:?} failed: {}{}{}",
+            args,
+            stderr,
+            if stderr.is_empty() || stdout.is_empty() { "" } else { "\n" },
+            stdout
+        ))
+    }
+}
+
+fn git_has_commits(folder_path: &PathBuf) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(folder_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn git_has_remote(folder_path: &PathBuf, remote: &str) -> bool {
+    Command::new("git")
+        .args(["remote", "get-url", remote])
+        .current_dir(folder_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn git_is_repo(folder_path: &PathBuf) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(folder_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn git_config_exists(folder_path: &PathBuf, key: &str) -> bool {
+    Command::new("git")
+        .args(["config", "--get", key])
+        .current_dir(folder_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn ensure_git_identity(folder_path: &PathBuf) -> Result<(), String> {
+    if !git_config_exists(folder_path, "user.name") {
+        run_git(folder_path, &["config", "user.name", "Lecture Presenter"])?;
+    }
+    if !git_config_exists(folder_path, "user.email") {
+        run_git(folder_path, &["config", "user.email", "lecture-presenter@example.invalid"])?;
+    }
+    Ok(())
+}
+
+fn git_has_changes(folder_path: &PathBuf) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(folder_path)
+        .output()
+        .map_err(|e| format!("Failed to run git status: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+#[tauri::command]
+fn gitee_token_status() -> Result<TokenStatus, String> {
+    let configured = read_gitee_token()
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+    Ok(TokenStatus { configured })
+}
+
+#[tauri::command]
+fn gitee_token_set(token: String) -> Result<TokenStatus, String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("Gitee token cannot be empty".to_string());
+    }
+    store_gitee_token(token)?;
+    Ok(TokenStatus { configured: true })
+}
+
+#[tauri::command]
+fn gitee_token_clear() -> Result<TokenStatus, String> {
+    clear_gitee_token();
+    Ok(TokenStatus { configured: false })
+}
+
+#[tauri::command]
+async fn gitee_create_repo(name: String, description: Option<String>) -> Result<GiteeRepoInfo, String> {
+    let token = read_gitee_token()?;
+    let repo_name = sanitize_gitee_repo_name(&name);
+    let client = reqwest::Client::new();
+    let mut form = vec![
+        ("access_token".to_string(), token),
+        ("name".to_string(), repo_name.clone()),
+        ("private".to_string(), "true".to_string()),
+        ("has_issues".to_string(), "false".to_string()),
+        ("has_wiki".to_string(), "false".to_string()),
+    ];
+    if let Some(description) = description {
+        let description = description.trim();
+        if !description.is_empty() {
+            form.push(("description".to_string(), description.to_string()));
+        }
+    }
+
+    let response = client
+        .post("https://gitee.com/api/v5/user/repos")
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create Gitee repo: {}", e))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Gitee response: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!("Gitee repo creation failed ({}): {}", status, body));
+    }
+
+    let parsed: GiteeRepoResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse Gitee response: {}", e))?;
+    Ok(GiteeRepoInfo {
+        name: parsed.name.unwrap_or(repo_name),
+        full_name: parsed.full_name,
+        html_url: parsed.html_url.map(|url| strip_url_credentials(&url)),
+        clone_url: parsed.clone_url.map(|url| normalize_gitee_remote_url(&url)),
+        ssh_url: parsed.ssh_url.map(|url| normalize_gitee_remote_url(&url)),
+    })
+}
+
+#[tauri::command]
+fn ppte_git_info(folder_path: String) -> Result<GitInfo, String> {
+    let folder = PathBuf::from(folder_path);
+    if !folder.is_dir() {
+        return Err("PPTE folder does not exist".to_string());
+    }
+    let is_repo = git_is_repo(&folder);
+    let origin_url = if is_repo {
+        git_remote_url(&folder, "origin").map(|url| normalize_gitee_remote_url(&url))
+    } else {
+        None
+    };
+    Ok(GitInfo { is_repo, origin_url })
+}
+
+#[tauri::command]
+fn ppte_git_init(folder_path: String, remote_url: Option<String>) -> Result<GitSyncResult, String> {
+    let folder = PathBuf::from(folder_path);
+    if !folder.is_dir() {
+        return Err("PPTE folder does not exist".to_string());
+    }
+    ensure_ppte_gitignore(&folder)?;
+    if !folder.join(".git").exists() {
+        run_git(&folder, &["init"])?;
+    }
+    ensure_git_identity(&folder)?;
+    if let Some(remote_url) = remote_url {
+        let sanitized_remote_url = normalize_gitee_remote_url(&remote_url);
+        let remote_url = sanitized_remote_url.trim();
+        if !remote_url.is_empty() {
+            if git_has_remote(&folder, "origin") {
+                run_git(&folder, &["remote", "set-url", "origin", remote_url])?;
+            } else {
+                run_git(&folder, &["remote", "add", "origin", remote_url])?;
+            }
+        }
+    }
+    Ok(GitSyncResult {
+        committed: false,
+        pushed: false,
+        message: "Git repository initialized".to_string(),
+    })
+}
+
+#[tauri::command]
+fn ppte_git_sync(folder_path: String, message: Option<String>) -> Result<GitSyncResult, String> {
+    let folder = PathBuf::from(folder_path);
+    if !folder.is_dir() {
+        return Err("PPTE folder does not exist".to_string());
+    }
+    ensure_ppte_gitignore(&folder)?;
+    if !folder.join(".git").exists() {
+        run_git(&folder, &["init"])?;
+    }
+    ensure_git_identity(&folder)?;
+    ensure_gitee_https_origin(&folder)?;
+
+    run_git(&folder, &["add", "-A"])?;
+    if !git_has_changes(&folder)? {
+        if git_has_remote(&folder, "origin") {
+            run_git_push(&folder, &["push", "-u", "origin", "HEAD"])?;
+            return Ok(GitSyncResult {
+                committed: false,
+                pushed: true,
+                message: "No local changes; pushed current branch".to_string(),
+            });
+        }
+        return Ok(GitSyncResult {
+            committed: false,
+            pushed: false,
+            message: "No local changes".to_string(),
+        });
+    }
+
+    let default_message = "Backup PPTE changes".to_string();
+    let commit_message = message
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty())
+        .unwrap_or(default_message);
+    run_git(&folder, &["commit", "-m", &commit_message])?;
+
+    let pushed = if git_has_remote(&folder, "origin") {
+        if git_has_commits(&folder) {
+            run_git_push(&folder, &["push", "-u", "origin", "HEAD"])?;
+        }
+        true
+    } else {
+        false
+    };
+
+    Ok(GitSyncResult {
+        committed: true,
+        pushed,
+        message: if pushed {
+            "Committed and pushed PPTE backup".to_string()
+        } else {
+            "Committed locally; no origin remote configured".to_string()
+        },
+    })
+}
+
+#[cfg(test)]
+mod ppte_save_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lecture-app-{}-{}", name, suffix))
+    }
+
+    #[test]
+    fn save_ppt_extra_rejects_conflict_without_partial_write() {
+        let dir = unique_temp_dir("save-conflict");
+        fs::create_dir_all(&dir).unwrap();
+
+        let manifest = r#"{"title":"Demo","slides":[{"file":"slide01.html","title":"One"}]}"#;
+        fs::write(dir.join("manifest.json"), manifest).unwrap();
+        fs::write(dir.join("slide01.html"), "original").unwrap();
+
+        let manifest_stat = file_stat_for_path(&dir.join("manifest.json"), "manifest.json".to_string());
+        let slide_stat = file_stat_for_path(&dir.join("slide01.html"), "slide01.html".to_string());
+
+        fs::write(dir.join("slide01.html"), "external").unwrap();
+
+        let result = save_ppt_extra(
+            dir.to_string_lossy().to_string(),
+            r#"{"title":"Changed","slides":[{"file":"slide01.html","title":"One"}]}"#.to_string(),
+            vec![("slide01.html".to_string(), "editor".to_string())],
+            Some(vec![
+                ExpectedFileStat {
+                    path: "manifest.json".to_string(),
+                    exists: Some(manifest_stat.exists),
+                    mtime_ms: manifest_stat.mtime_ms,
+                    size: manifest_stat.size,
+                    content_hash: manifest_stat.content_hash,
+                },
+                ExpectedFileStat {
+                    path: "slide01.html".to_string(),
+                    exists: Some(slide_stat.exists),
+                    mtime_ms: slide_stat.mtime_ms,
+                    size: slide_stat.size,
+                    content_hash: slide_stat.content_hash,
+                },
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(result.conflicts, vec!["slide01.html"]);
+        assert_eq!(fs::read_to_string(dir.join("slide01.html")).unwrap(), "external");
+        assert_eq!(fs::read_to_string(dir.join("manifest.json")).unwrap(), manifest);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn gitee_repo_name_is_filesystem_and_remote_safe() {
+        assert_eq!(sanitize_gitee_repo_name("  My PPTE: Demo/2026  "), "my-ppte-demo-2026");
+        assert!(sanitize_gitee_repo_name("...").starts_with("ppte-"));
+        assert!(sanitize_gitee_repo_name("中文课件").starts_with("ppte-"));
+        assert_ne!(sanitize_gitee_repo_name("中文课件"), sanitize_gitee_repo_name("另一个课件"));
+    }
+
+    #[test]
+    fn ppte_gitignore_is_created_and_preserves_existing_rules() {
+        let dir = unique_temp_dir("gitignore");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".gitignore"), "custom-secret.txt\n").unwrap();
+
+        ensure_ppte_gitignore(&dir).unwrap();
+        let content = fs::read_to_string(dir.join(".gitignore")).unwrap();
+
+        assert!(content.contains("custom-secret.txt"));
+        assert!(content.contains(".DS_Store"));
+        assert!(content.contains("__MACOSX/"));
+        assert!(content.contains("*.tmp"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn list_ppte_resources_skips_git_and_system_files() {
+        let dir = unique_temp_dir("resources");
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::create_dir_all(dir.join("images")).unwrap();
+        fs::write(dir.join("manifest.json"), "{}").unwrap();
+        fs::write(dir.join("slide01.html"), "<html></html>").unwrap();
+        fs::write(dir.join("slide01.note"), "").unwrap();
+        fs::write(dir.join("images").join("cover.png"), "png").unwrap();
+        fs::write(dir.join(".DS_Store"), "noise").unwrap();
+        fs::write(dir.join(".git").join("config"), "secret").unwrap();
+
+        let resources = list_ppte_resources(dir.to_string_lossy().to_string()).unwrap();
+        let paths: Vec<String> = resources.into_iter().map(|entry| entry.path).collect();
+
+        assert!(paths.contains(&"manifest.json".to_string()));
+        assert!(paths.contains(&"slide01.html".to_string()));
+        assert!(paths.contains(&"slide01.note".to_string()));
+        assert!(paths.contains(&"images/cover.png".to_string()));
+        assert!(!paths.iter().any(|path| path.contains(".git")));
+        assert!(!paths.contains(&".DS_Store".to_string()));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn import_ppte_resources_copies_into_resources_without_overwrite() {
+        let dir = unique_temp_dir("resource-import");
+        let source_dir = unique_temp_dir("resource-source");
+        fs::create_dir_all(dir.join("resources")).unwrap();
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(dir.join("resources").join("cover.png"), "existing").unwrap();
+        fs::write(source_dir.join("cover.png"), "new").unwrap();
+
+        let imported = import_ppte_resources(
+            dir.to_string_lossy().to_string(),
+            vec![source_dir.join("cover.png").to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].path, "resources/cover-1.png");
+        assert_eq!(fs::read_to_string(dir.join("resources").join("cover.png")).unwrap(), "existing");
+        assert_eq!(fs::read_to_string(dir.join("resources").join("cover-1.png")).unwrap(), "new");
+
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
+    fn ppte_git_init_strips_credential_remote_urls() {
+        let dir = unique_temp_dir("git-remote");
+        fs::create_dir_all(&dir).unwrap();
+
+        ppte_git_init(
+            dir.to_string_lossy().to_string(),
+            Some("https://oauth2:token@gitee.com/user/repo.git".to_string()),
+        )
+        .unwrap();
+
+        let remote = run_git(&dir, &["remote", "get-url", "origin"]).unwrap();
+        assert_eq!(remote, "https://gitee.com/user/repo.git");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ppte_git_init_converts_gitee_ssh_remote_to_https() {
+        let dir = unique_temp_dir("git-ssh-remote");
+        fs::create_dir_all(&dir).unwrap();
+
+        ppte_git_init(
+            dir.to_string_lossy().to_string(),
+            Some("git@gitee.com:user/repo.git".to_string()),
+        )
+        .unwrap();
+
+        let remote = run_git(&dir, &["remote", "get-url", "origin"]).unwrap();
+        assert_eq!(remote, "https://gitee.com/user/repo.git");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ppte_git_sync_converts_existing_gitee_ssh_origin_to_https() {
+        let dir = unique_temp_dir("git-existing-ssh-origin");
+        fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init"]).unwrap();
+        run_git(&dir, &["config", "user.name", "Test User"]).unwrap();
+        run_git(&dir, &["config", "user.email", "test@example.invalid"]).unwrap();
+        run_git(&dir, &["remote", "add", "origin", "git@gitee.com:user/repo.git"]).unwrap();
+
+        let result = ppte_git_sync(dir.to_string_lossy().to_string(), Some("backup".to_string()));
+        assert!(result.is_err());
+
+        let remote = run_git(&dir, &["remote", "get-url", "origin"]).unwrap();
+        assert_eq!(remote, "https://gitee.com/user/repo.git");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[tauri::command]
@@ -1882,6 +3120,7 @@ async fn emit_slide_change(app_handle: tauri::AppHandle, slide_url: String) -> R
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(PpteWatcherState::default())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -1956,7 +3195,19 @@ pub fn run() {
             detect_python,
             run_in_terminal,
             create_ppt_extra_folder,
+            stat_files,
+            list_ppte_resources,
+            import_ppte_resources,
+            watch_ppte_folder,
+            unwatch_ppte_folder,
             save_ppt_extra,
+            gitee_token_status,
+            gitee_token_set,
+            gitee_token_clear,
+            gitee_create_repo,
+            ppte_git_info,
+            ppte_git_init,
+            ppte_git_sync,
             call_ai,
             call_ai_stream,
             test_ai_config,

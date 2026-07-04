@@ -59,6 +59,12 @@ Navigation events flow from slide iframes via `postMessage({type:'slide-navigate
 
 `PpteAnnotator.create({container, ...})` mounts a transparent canvas + toolbar over a container without touching slide HTML or the platform-split loading. Annotations (pen/highlighter/text/eraser) are memory-only and per-page (`setPage`), discarded on `reset()`. Two instances exist: one over `#ppt-extra-container` (toggled by the header button or `P`), one in `audience.html` (corner floating button) — they are independent, with no cross-window sync by design. When inactive the canvas is `pointer-events:none` so click-to-advance still works.
 
+Annotator styles live in `css/ppte-annotator.css` and must be loaded via `<link>`, not runtime `<style>` injection: the production CSP blocks inline styles on pages that already have them. `npm run test:annotator` covers the overlay logic.
+
+### PPTX export (js/ppte-ppt-exporter.js)
+
+`PptePptExporter.export(viewer)` converts the loaded PPTE HTML slides into an editable `.pptx` via the `pptxgenjs` dependency (`LAYOUT_WIDE`, 13.33×7.5in / 1920×1080 render basis). It reads the live DOM of each slide iframe, so it depends on slides being loaded through `PptExtraViewer`. This is the only feature using `pptxgenjs`; there is no test script for it.
+
 ### Course data model
 
 A course is a folder with `course.json` (schema in `COURSE_FORMAT.md`): `weeks[]` → `resources` (slides/videos/readings/assignments/sourceCode/ppt-extra). A PPTE resource is a directory containing `manifest.json` (`{title, slides:[{file, title}]}`) plus one HTML file per slide. App config (imported course list, settings, API keys) is stored in the OS app-data directory.
