@@ -256,6 +256,32 @@ fn normalize_protocol_path(decoded: &str) -> String {
     }
 }
 
+// Navigation/focus bridge injected into HTML served via slide://.
+// Slide frames are cross-origin to the app window on macOS, so the frontend
+// cannot install keyboard forwarding into them; this script runs inside the
+// slide document instead and mirrors the same postMessage protocol.
+const PPTE_SLIDE_BRIDGE: &str = include_str!("ppte-slide-bridge.js");
+
+fn is_html_path(file_path: &str) -> bool {
+    PathBuf::from(file_path)
+        .extension()
+        .map(|ext| {
+            let ext = ext.to_string_lossy().to_lowercase();
+            ext == "html" || ext == "htm"
+        })
+        .unwrap_or(false)
+}
+
+fn inject_slide_bridge(file_path: &str, mut content: Vec<u8>) -> Vec<u8> {
+    if !is_html_path(file_path) {
+        return content;
+    }
+    content.extend_from_slice(b"\n<script>");
+    content.extend_from_slice(PPTE_SLIDE_BRIDGE.as_bytes());
+    content.extend_from_slice(b"</script>\n");
+    content
+}
+
 fn parse_range_header(range: &str, total_len: u64) -> Option<(u64, u64)> {
     let value = range.strip_prefix("bytes=")?;
     let (start_raw, end_raw) = value.split_once('-')?;
@@ -2348,6 +2374,39 @@ fn ppte_git_sync(folder_path: String, message: Option<String>) -> Result<GitSync
 }
 
 #[cfg(test)]
+mod slide_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn injects_bridge_into_html_files() {
+        let html = b"<!doctype html><html><body>Slide</body></html>".to_vec();
+        let out = inject_slide_bridge("/Users/demo/slide01.html", html);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("__ppteSlideBridgeInstalled"));
+        assert!(out.contains("slide-bridge-ready"));
+        assert!(out.ends_with("</script>\n"));
+    }
+
+    #[test]
+    fn skips_non_html_files() {
+        let png = vec![0x89, 0x50, 0x4E, 0x47];
+        let out = inject_slide_bridge("/Users/demo/图片.png", png.clone());
+        assert_eq!(out, png);
+
+        let css = b"body { color: red; }".to_vec();
+        let out = inject_slide_bridge("/Users/demo/style.css", css.clone());
+        assert_eq!(out, css);
+    }
+
+    #[test]
+    fn handles_htm_extension_case_insensitively() {
+        let html = b"<html></html>".to_vec();
+        let out = inject_slide_bridge("C:\\课件\\slide.HTM", html);
+        assert!(String::from_utf8(out).unwrap().contains("__ppteSlideBridgeInstalled"));
+    }
+}
+
+#[cfg(test)]
 mod ppte_save_tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3144,11 +3203,12 @@ pub fn run() {
                     let mime = mime_guess::from_path(&file_path)
                         .first_or_octet_stream()
                         .to_string();
+                    let body = inject_slide_bridge(&file_path, content);
                     http::Response::builder()
                         .status(200)
                         .header("Content-Type", &mime)
                         .header("Access-Control-Allow-Origin", "*")
-                        .body(content)
+                        .body(body)
                         .unwrap()
                 }
                 Err(e) => {

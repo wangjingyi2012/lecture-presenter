@@ -42,6 +42,7 @@
   <script>
     const { listen, emit } = window.__TAURI__.event;
     let currentSlideUrl = '';
+    let slideEditableFocus = false;
 
     // Transient annotation overlay (toggle with the corner button or the P key)
     const annotator = window.PpteAnnotator
@@ -54,7 +55,9 @@
       if (slideUrl) {
         currentSlideUrl = slideUrl;
         if (annotator) annotator.setPage(slideUrl);
-        document.getElementById('slide-frame').src = slideUrl;
+        const frame = document.getElementById('slide-frame');
+        frame.addEventListener('load', installSlideInteractionBridge, { once: true });
+        frame.src = slideUrl;
         document.getElementById('nav-layer').focus();
       }
     });
@@ -65,6 +68,21 @@
       if (event.source !== frame.contentWindow) return;
       if (data && data.type === 'slide-navigate') {
         await emit('audience-navigate', data.direction || data.action || 'next');
+        return;
+      }
+      if (data && data.type === 'slide-edit-focus') {
+        slideEditableFocus = !!data.active;
+        return;
+      }
+      if (data && data.type === 'slide-shortcut') {
+        // Only the annotator shortcut applies in the audience window; play,
+        // speaker, and escape are presenter-window concerns.
+        if (data.action === 'annotate' && annotator) annotator.toggle();
+        return;
+      }
+      if (data && data.type === 'slide-bridge-ready') {
+        // No config reply: the bridge's default (clickNavigate=false) keeps
+        // clicks passing through to the slide, matching the nav-layer design.
         return;
       }
       if (!data || (data.type !== 'open-file' && data.type !== 'open-resource')) return;
@@ -104,6 +122,43 @@
       return target.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
     }
 
+    function installSlideInteractionBridge() {
+      const frame = document.getElementById('slide-frame');
+      try {
+        const doc = frame.contentDocument || frame.contentWindow.document;
+        if (!doc || doc.__audienceInteractionBridgeInstalled) return;
+        doc.__audienceInteractionBridgeInstalled = true;
+        doc.addEventListener('keydown', (event) => {
+          if (isEditableTarget(event.target)) return;
+          if (handleNavigationKey(event)) return;
+        }, true);
+        doc.addEventListener('pointerdown', (event) => {
+          slideEditableFocus = isEditableTarget(event.target);
+        }, true);
+        doc.addEventListener('focusin', (event) => {
+          if (!isEditableTarget(event.target)) return;
+          slideEditableFocus = true;
+        }, true);
+        doc.addEventListener('focusout', (event) => {
+          if (!isEditableTarget(event.target)) return;
+          slideEditableFocus = false;
+        }, true);
+      } catch (error) {
+        console.warn('Unable to install audience slide interaction bridge:', error);
+      }
+    }
+
+    function hasEditableFocusInSlideFrame() {
+      const frame = document.getElementById('slide-frame');
+      try {
+        const doc = frame.contentDocument || frame.contentWindow.document;
+        if (!doc || !doc.hasFocus()) return false;
+        return isEditableTarget(doc.activeElement);
+      } catch (error) {
+        return false;
+      }
+    }
+
     function handleNavigationKey(event) {
       if (isEditableTarget(event.target)) return false;
       if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
@@ -121,17 +176,9 @@
 
     window.addEventListener('keydown', handleNavigationKey, true);
 
-    // Clicks pass through to the slide iframe (nav-layer is pointer-events:none),
-    // but clicking a cross-origin slide moves focus into the iframe, which would
-    // swallow subsequent arrow-key navigation. Pull focus back to this window.
-    window.addEventListener('blur', () => {
-      setTimeout(() => {
-        const activeEl = document.activeElement;
-        if (activeEl && activeEl.id === 'slide-frame') {
-          document.getElementById('nav-layer').focus();
-        }
-      }, 0);
-    });
+    // Do not pull focus back from the slide iframe. The frame-level keydown
+    // bridge above preserves keyboard navigation, while editable controls keep
+    // normal text input focus.
   </script>
 </body>
 </html>

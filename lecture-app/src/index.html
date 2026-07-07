@@ -561,7 +561,26 @@
         <ul id="ppt-extra-toc-list"></ul>
       </div>
       <div id="ppt-extra-container">
-        <iframe id="ppt-extra-iframe" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation" src="about:blank"></iframe>
+        <iframe id="ppt-extra-iframe" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-forms" src="about:blank"></iframe>
+        <div id="ppt-extra-focus-anchor" class="ppt-extra-focus-anchor" tabindex="0" aria-label="幻灯片键盘导航"></div>
+        <div id="ppt-play-controls" class="ppt-play-controls" aria-label="播放模式菜单">
+          <button id="ppt-play-menu-toggle" class="ppt-play-menu-toggle" title="播放菜单" aria-label="播放菜单" aria-expanded="false">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.08 1.65V21a2 2 0 1 1-4 0v-.08a1.8 1.8 0 0 0-1.08-1.65 1.8 1.8 0 0 0-2 .36l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.65-1.08H3a2 2 0 1 1 0-4h.08a1.8 1.8 0 0 0 1.65-1.08 1.8 1.8 0 0 0-.36-2l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05a1.8 1.8 0 0 0 2 .36A1.8 1.8 0 0 0 10.3 3V3a2 2 0 1 1 4 0v.08a1.8 1.8 0 0 0 1.08 1.65 1.8 1.8 0 0 0 2-.36l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05a1.8 1.8 0 0 0-.36 2 1.8 1.8 0 0 0 1.65 1.08H21a2 2 0 1 1 0 4h-.08A1.8 1.8 0 0 0 19.4 15z"/>
+            </svg>
+          </button>
+          <div id="ppt-play-menu" class="ppt-play-menu">
+            <button id="ppt-play-exit" class="ppt-play-menu-item">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+              <span>退出播放模式</span>
+            </button>
+            <button id="ppt-play-annotate" class="ppt-play-menu-item">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
+              <span>标注模式</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
     <!-- Speaker View (hidden by default) -->
@@ -577,11 +596,11 @@
         <div class="speaker-left">
           <div class="speaker-current-label">当前幻灯片</div>
           <div class="speaker-current-frame">
-            <iframe id="speaker-current-slide" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation" src="about:blank"></iframe>
+            <iframe id="speaker-current-slide" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-forms" src="about:blank"></iframe>
           </div>
           <div class="speaker-next-label">下一页预览</div>
           <div class="speaker-next-frame">
-            <iframe id="speaker-next-slide" sandbox="allow-same-origin allow-scripts allow-popups" src="about:blank"></iframe>
+            <iframe id="speaker-next-slide" sandbox="allow-same-origin allow-scripts allow-popups allow-forms" src="about:blank"></iframe>
           </div>
         </div>
         <div class="speaker-right">

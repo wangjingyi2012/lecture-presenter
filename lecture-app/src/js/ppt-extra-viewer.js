@@ -8,6 +8,8 @@ const PptExtraViewer = {
   manifest: null,
   currentIndex: 0,
   isPlaying: false,
+  isPlayMenuOpen: false,
+  _slideEditableFocus: false,
   _watchUnlisten: null,
   _reloadSeq: 0,
 
@@ -33,8 +35,24 @@ const PptExtraViewer = {
     document.getElementById('ppt-extra-play').addEventListener('click', () => this.togglePlayMode());
     document.getElementById('ppt-extra-speaker').addEventListener('click', () => this.toggleSpeakerMode());
     document.getElementById('ppt-extra-annotate').addEventListener('click', () => {
-      if (this.annotator) this.annotator.toggle();
+      this.toggleAnnotator();
     });
+    document.getElementById('ppt-play-menu-toggle').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setPlayMenuOpen(!this.isPlayMenuOpen);
+    });
+    document.getElementById('ppt-play-exit').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.isPlaying) this.togglePlayMode();
+    });
+    document.getElementById('ppt-play-annotate').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.toggleAnnotator();
+      this._restorePlayFocus();
+    });
+    // Keep keyboard navigation inside slide frames instead of stealing focus back
+    // after every click. Frame-level handlers below forward navigation keys to
+    // the parent, while editable controls keep normal text input focus.
 
     // Transient annotation overlay over the slide iframe (memory-only, discarded on close)
     if (window.PpteAnnotator) {
@@ -42,8 +60,7 @@ const PptExtraViewer = {
         container: document.getElementById('ppt-extra-container'),
         isAvailable: () => this.isOpen() && !this.isSpeakerMode,
         onActiveChange: (active) => {
-          const btn = document.getElementById('ppt-extra-annotate');
-          btn.classList.toggle('annotating', active);
+          this.updateAnnotatorButtons(active);
         }
       });
     }
@@ -65,7 +82,11 @@ const PptExtraViewer = {
     document.getElementById('speaker-next-fast').addEventListener('click', () => this.next());
     document.querySelector('.speaker-current-frame').addEventListener('click', (e) => {
       if (!this.isSpeakerMode || e.defaultPrevented || e.button !== 0) return;
-      this.next();
+      setTimeout(() => {
+        if (this._slideEditableFocus) return;
+        if (this._frameHasEditableFocus(document.getElementById('speaker-current-slide'))) return;
+        this.next();
+      }, 80);
     });
     document.getElementById('speaker-timer-toggle').addEventListener('click', () => this.toggleTimer());
     document.getElementById('speaker-toggle-audience').addEventListener('click', () => this.toggleAudienceFullscreen());
@@ -81,7 +102,11 @@ const PptExtraViewer = {
       const isEditing = e.target.isContentEditable || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA';
       if (e.key === 'Escape') {
         if (this.isSpeakerMode) this.exitSpeakerMode();
+        else if (this.isPlayMenuOpen) this.setPlayMenuOpen(false);
+        else if (this.isPlaying) this.togglePlayMode();
         else this.close();
+        e.preventDefault();
+        return;
       }
       if (isEditing) return;
       if (this._handleNavigationKey(e)) return;
@@ -103,9 +128,12 @@ const PptExtraViewer = {
     this.currentIndex = 0;
     this.isPlaying = false;
     this.isSpeakerMode = false;
+    this.isPlayMenuOpen = false;
+    this._slideEditableFocus = false;
     this._reloadSeq = 0;
     if (this.annotator) this.annotator.reset();
     this.modal.classList.remove('playing-mode', 'speaker-mode');
+    this.setPlayMenuOpen(false);
     document.getElementById('ppt-extra-speaker').style.display = '';
     document.getElementById('speaker-view').classList.add('hidden');
     document.getElementById('ppt-extra-toc').style.display = '';
@@ -483,6 +511,24 @@ const PptExtraViewer = {
       this._handleNavigationAction(data.direction || data.action);
       return;
     }
+    if (data.type === 'slide-shortcut') {
+      if (!this.isOpen() || !this._isSlideMessageSource(source)) return;
+      this._handleSlideShortcut(data.action);
+      return;
+    }
+    if (data.type === 'slide-bridge-ready') {
+      if (!this.isOpen() || !this._isSlideMessageSource(source)) return;
+      this._sendBridgeConfig(source);
+      return;
+    }
+    if (data.type === 'slide-edit-focus') {
+      if (!this.isOpen() || !this._isSlideMessageSource(source)) return;
+      this._slideEditableFocus = !!data.active;
+      if (!this._slideEditableFocus && this.isPlaying) {
+        setTimeout(() => this._restorePlayFocus(), 120);
+      }
+      return;
+    }
 
     if (data.type !== 'open-file' && data.type !== 'open-resource') return;
     if (!this.isOpen() || !this._isSlideMessageSource(source)) return;
@@ -519,6 +565,20 @@ const PptExtraViewer = {
     });
   },
 
+  _sendBridgeConfig(source) {
+    // Click-to-advance stays off in the next-slide preview so clicking it
+    // never navigates the presentation.
+    const clickNavigate = ['ppt-extra-iframe', 'speaker-current-slide'].some(id => {
+      const frame = document.getElementById(id);
+      return frame && frame.contentWindow === source;
+    });
+    try {
+      source.postMessage({ type: 'slide-bridge-config', clickNavigate }, '*');
+    } catch (e) {
+      console.warn('Failed to send slide bridge config:', e);
+    }
+  },
+
   async _openExternal(pathOrUrl) {
     if (window.__TAURI__ && window.__TAURI__.core) {
       try {
@@ -546,12 +606,58 @@ const PptExtraViewer = {
     return false;
   },
 
+  _handleSlideShortcut(action) {
+    if (action === 'play') {
+      this.togglePlayMode();
+      return;
+    }
+    if (action === 'annotate') {
+      this.toggleAnnotator();
+      this._restorePlayFocus();
+      return;
+    }
+    if (action === 'speaker') {
+      this.toggleSpeakerMode();
+      return;
+    }
+    if (action === 'escape') {
+      if (this.isPlayMenuOpen) this.setPlayMenuOpen(false);
+      else if (this.isPlaying) this.togglePlayMode();
+      else this.close();
+    }
+  },
+
   _handleNavigationAction(action) {
     if (action === 'prev' || action === 'previous' || action === 'back') {
       this.prev();
       return;
     }
     this.next();
+  },
+
+  _restorePlayFocus() {
+    if (!this.isOpen() || !this.isPlaying) return;
+    if (this._slideEditableFocus) return;
+    if (this._hasEditableFocusInSlideFrames()) return;
+    const anchor = document.getElementById('ppt-extra-focus-anchor');
+    if (anchor) anchor.focus({ preventScroll: true });
+  },
+
+  _hasEditableFocusInSlideFrames() {
+    return ['ppt-extra-iframe', 'speaker-current-slide', 'speaker-next-slide'].some(id => {
+      const frame = document.getElementById(id);
+      return this._frameHasEditableFocus(frame);
+    });
+  },
+
+  _frameHasEditableFocus(frame) {
+    try {
+      const doc = frame && (frame.contentDocument || frame.contentWindow?.document);
+      if (!doc || !doc.hasFocus()) return false;
+      return this._isEditableTarget(doc.activeElement);
+    } catch (e) {
+      return false;
+    }
   },
 
   _installFrameNavigation(frame) {
@@ -562,6 +668,12 @@ const PptExtraViewer = {
 
       doc.addEventListener('keydown', (e) => {
         if (this._isEditableTarget(e.target)) return;
+        const shortcut = this._slideShortcutFromKey(e);
+        if (shortcut) {
+          e.preventDefault();
+          frame.contentWindow.parent.postMessage({ type: 'slide-shortcut', action: shortcut }, '*');
+          return;
+        }
         const direction = this._navigationDirectionFromKey(e.key);
         if (!direction) return;
         e.preventDefault();
@@ -573,6 +685,23 @@ const PptExtraViewer = {
         if (this._isInteractiveClickTarget(e.target)) return;
         e.preventDefault();
         frame.contentWindow.parent.postMessage({ type: 'slide-navigate', direction: 'next' }, '*');
+      }, true);
+
+      doc.addEventListener('pointerdown', (e) => {
+        frame.contentWindow.parent.postMessage({
+          type: 'slide-edit-focus',
+          active: this._isEditableTarget(e.target)
+        }, '*');
+      }, true);
+
+      doc.addEventListener('focusin', (e) => {
+        if (!this._isEditableTarget(e.target)) return;
+        frame.contentWindow.parent.postMessage({ type: 'slide-edit-focus', active: true }, '*');
+      }, true);
+
+      doc.addEventListener('focusout', (e) => {
+        if (!this._isEditableTarget(e.target)) return;
+        frame.contentWindow.parent.postMessage({ type: 'slide-edit-focus', active: false }, '*');
       }, true);
     } catch (e) {
       console.warn('Unable to install slide frame navigation:', e);
@@ -588,6 +717,15 @@ const PptExtraViewer = {
   _navigationDirectionFromKey(key) {
     if (key === 'ArrowLeft' || key === 'PageUp') return 'prev';
     if (key === 'ArrowRight' || key === 'PageDown' || key === ' ' || key === 'Spacebar' || key === 'Enter') return 'next';
+    return '';
+  },
+
+  _slideShortcutFromKey(e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return '';
+    if (e.key === 'f' || e.key === 'F') return 'play';
+    if (e.key === 'p' || e.key === 'P') return 'annotate';
+    if (e.key === 's' || e.key === 'S') return 'speaker';
+    if (e.key === 'Escape') return 'escape';
     return '';
   },
 
@@ -642,9 +780,30 @@ const PptExtraViewer = {
     });
   },
 
+  toggleAnnotator() {
+    if (this.annotator) this.annotator.toggle();
+  },
+
+  updateAnnotatorButtons(active) {
+    const headerBtn = document.getElementById('ppt-extra-annotate');
+    const playBtn = document.getElementById('ppt-play-annotate');
+    if (headerBtn) headerBtn.classList.toggle('annotating', active);
+    if (playBtn) playBtn.classList.toggle('annotating', active);
+  },
+
+  setPlayMenuOpen(open) {
+    this.isPlayMenuOpen = !!(open && this.isPlaying);
+    const controls = document.getElementById('ppt-play-controls');
+    const toggle = document.getElementById('ppt-play-menu-toggle');
+    if (controls) controls.classList.toggle('menu-open', this.isPlayMenuOpen);
+    if (toggle) toggle.setAttribute('aria-expanded', this.isPlayMenuOpen ? 'true' : 'false');
+  },
+
   togglePlayMode() {
     this.isPlaying = !this.isPlaying;
     this.modal.classList.toggle('playing-mode', this.isPlaying);
+    this.setPlayMenuOpen(false);
+    if (this.isPlaying) setTimeout(() => this._restorePlayFocus(), 0);
     const playBtn = document.getElementById('ppt-extra-play');
     playBtn.innerHTML = this.isPlaying
       ? '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
@@ -701,6 +860,7 @@ const PptExtraViewer = {
 
   async enterSpeakerMode() {
     this.isSpeakerMode = true;
+    this.setPlayMenuOpen(false);
     if (this.annotator) this.annotator.setActive(false);
     document.getElementById('ppt-extra-speaker').style.display = 'none';
     document.getElementById('ppt-extra-toc').style.display = 'none';
@@ -831,6 +991,7 @@ const PptExtraViewer = {
     this._stopWatchingPpte();
     this.isPlaying = false;
     this.modal.classList.remove('playing-mode');
+    this.setPlayMenuOpen(false);
     document.getElementById('ppt-extra-play').innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
 
     if (this.isSpeakerMode) {

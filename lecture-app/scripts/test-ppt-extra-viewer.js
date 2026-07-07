@@ -88,4 +88,72 @@ const viewer = context.PptExtraViewer;
   assert.equal(output, 'http://slide.localhost/Users/jingyi/%E8%AF%BE%E4%BB%B6/slide06.html?t=8');
 }
 
+{
+  let anchorFocused = false;
+  const input = { tagName: 'INPUT', isContentEditable: false };
+  const frameDoc = {
+    hasFocus: () => true,
+    activeElement: input,
+  };
+  const originalGetElementById = context.document.getElementById;
+  context.document.getElementById = (id) => {
+    if (id === 'ppt-extra-iframe') {
+      return {
+        contentDocument: frameDoc,
+      };
+    }
+    if (id === 'speaker-current-slide' || id === 'speaker-next-slide') {
+      return null;
+    }
+    if (id === 'ppt-extra-focus-anchor') {
+      return {
+        focus: () => {
+          anchorFocused = true;
+        },
+      };
+    }
+    return null;
+  };
+  viewer.modal = { classList: { contains: () => false } };
+  viewer.isPlaying = true;
+  viewer._slideEditableFocus = false;
+
+  viewer._restorePlayFocus();
+
+  assert.equal(anchorFocused, false);
+  context.document.getElementById = originalGetElementById;
+}
+
+{
+  // slide-bridge-ready handshake: main slide and speaker current slide get
+  // clickNavigate=true, the next-slide preview gets clickNavigate=false.
+  const originalGetElementById = context.document.getElementById;
+  const makeWindow = () => {
+    const win = { messages: [] };
+    win.postMessage = (msg) => win.messages.push(msg);
+    return win;
+  };
+  const mainWindow = makeWindow();
+  const previewWindow = makeWindow();
+  context.document.getElementById = (id) => {
+    if (id === 'ppt-extra-iframe') return { contentWindow: mainWindow };
+    if (id === 'speaker-next-slide') return { contentWindow: previewWindow };
+    return null;
+  };
+  viewer.modal = { classList: { contains: () => false } };
+
+  viewer._handleSlideOpenMessage({ type: 'slide-bridge-ready' }, mainWindow);
+  assert.equal(JSON.stringify(mainWindow.messages), JSON.stringify([{ type: 'slide-bridge-config', clickNavigate: true }]));
+
+  viewer._handleSlideOpenMessage({ type: 'slide-bridge-ready' }, previewWindow);
+  assert.equal(JSON.stringify(previewWindow.messages), JSON.stringify([{ type: 'slide-bridge-config', clickNavigate: false }]));
+
+  // Unknown sources are ignored entirely.
+  const strangerWindow = makeWindow();
+  viewer._handleSlideOpenMessage({ type: 'slide-bridge-ready' }, strangerWindow);
+  assert.equal(strangerWindow.messages.length, 0);
+
+  context.document.getElementById = originalGetElementById;
+}
+
 console.log('ppt-extra-viewer tests passed');
