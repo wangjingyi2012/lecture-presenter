@@ -35,7 +35,7 @@ There is no bundler, framework, or lint step: the frontend is plain HTML/CSS/JS 
 
 Single ~2000-line file with all `#[tauri::command]` handlers: file I/O (`read_text_file`, `write_text_file`), course config management, file/folder pickers, PPTE folder creation, AI calls (DeepSeek/MiniMax/LectureAI), audience window management (`open_audience_window`, `emit_slide_change`), and two custom URI scheme protocols:
 
-- `slide://` — serves slide files preserving real path slashes (the built-in asset protocol encodes `/` as `%2F`, breaking relative URLs in slide HTML). HTML responses get `src-tauri/src/ppte-slide-bridge.js` appended: slide frames are cross-origin to the app window on macOS, so this in-frame script forwards navigation keys/shortcuts and editable-focus state to the parent via `postMessage` (`slide-navigate` / `slide-shortcut` / `slide-edit-focus`), with a `slide-bridge-ready` → `slide-bridge-config` handshake controlling click-to-advance per window.
+- `slide://` — serves slide files preserving real path slashes (the built-in asset protocol encodes `/` as `%2F`, breaking relative URLs in slide HTML). HTML responses get `src-tauri/src/ppte-slide-bridge.js` appended: slide frames are cross-origin to the app window on macOS, so this in-frame script forwards navigation keys/shortcuts and editable-focus state to the parent via `postMessage` (`slide-navigate` / `slide-shortcut` / `slide-edit-focus`). Clicks are never forwarded as navigation — slides own their click-driven animations; page navigation is keyboard-only.
 - `media://` — serves video with HTTP Range support.
 
 ### PPTE slide loading is platform-split (critical, easy to regress)

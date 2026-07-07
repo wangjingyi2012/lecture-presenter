@@ -5,25 +5,18 @@
 // forwards navigation keys, shortcuts, and editable-focus state to the parent
 // via postMessage — the same message types the app already handles for the
 // same-origin (Windows srcdoc) path.
+//
+// Clicks are deliberately NOT forwarded as navigation: slides handle their own
+// click-driven animations, and page navigation is keyboard-only.
 (function () {
   if (window.__ppteSlideBridgeInstalled) return;
   window.__ppteSlideBridgeInstalled = true;
   if (window.parent === window) return;
 
-  // Click-to-advance is enabled by the embedding window via handshake:
-  // the presenter window enables it, the audience window keeps clicks
-  // passing through to the slide only.
-  var clickNavigate = false;
-
   function isEditableTarget(target) {
     if (!target) return false;
     var tag = target.tagName;
     return target.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
-  }
-
-  function isInteractiveClickTarget(target) {
-    if (!target || !target.closest) return false;
-    return !!target.closest('a, button, input, textarea, select, label, [contenteditable="true"], [data-no-slide-nav]');
   }
 
   function navigationDirectionFromKey(key) {
@@ -63,14 +56,6 @@
     post({ type: 'slide-navigate', direction: direction });
   }, true);
 
-  document.addEventListener('click', function (e) {
-    if (!clickNavigate) return;
-    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-    if (isInteractiveClickTarget(e.target)) return;
-    e.preventDefault();
-    post({ type: 'slide-navigate', direction: 'next' });
-  }, true);
-
   // Report whether the user is interacting with an editable control so the
   // embedding window knows when to reclaim keyboard focus. Clicking a
   // non-editable area after typing sends active:false, which lets the parent
@@ -92,19 +77,11 @@
   // Relay messages from nested frames (e.g. embedded code-browser pages that
   // also load via slide:// and got this bridge injected) up to the app window.
   window.addEventListener('message', function (e) {
-    if (e.source === window.parent) {
-      var config = e.data;
-      if (config && config.type === 'slide-bridge-config') {
-        clickNavigate = !!config.clickNavigate;
-      }
-      return;
-    }
+    if (e.source === window.parent) return;
     var data = e.data;
     if (!data || typeof data !== 'object') return;
     if (data.type === 'slide-navigate' || data.type === 'slide-shortcut' || data.type === 'slide-edit-focus') {
       post(data);
     }
   });
-
-  post({ type: 'slide-bridge-ready' });
 })();

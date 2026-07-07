@@ -80,11 +80,6 @@
         if (data.action === 'annotate' && annotator) annotator.toggle();
         return;
       }
-      if (data && data.type === 'slide-bridge-ready') {
-        // No config reply: the bridge's default (clickNavigate=false) keeps
-        // clicks passing through to the slide, matching the nav-layer design.
-        return;
-      }
       if (!data || (data.type !== 'open-file' && data.type !== 'open-resource')) return;
 
       if (data.url) {

@@ -2383,7 +2383,7 @@ mod slide_bridge_tests {
         let out = inject_slide_bridge("/Users/demo/slide01.html", html);
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("__ppteSlideBridgeInstalled"));
-        assert!(out.contains("slide-bridge-ready"));
+        assert!(out.contains("slide-edit-focus"));
         assert!(out.ends_with("</script>\n"));
     }
 

@@ -516,11 +516,6 @@ const PptExtraViewer = {
       this._handleSlideShortcut(data.action);
       return;
     }
-    if (data.type === 'slide-bridge-ready') {
-      if (!this.isOpen() || !this._isSlideMessageSource(source)) return;
-      this._sendBridgeConfig(source);
-      return;
-    }
     if (data.type === 'slide-edit-focus') {
       if (!this.isOpen() || !this._isSlideMessageSource(source)) return;
       this._slideEditableFocus = !!data.active;
@@ -563,20 +558,6 @@ const PptExtraViewer = {
       const frame = document.getElementById(id);
       return frame && frame.contentWindow === source;
     });
-  },
-
-  _sendBridgeConfig(source) {
-    // Click-to-advance stays off in the next-slide preview so clicking it
-    // never navigates the presentation.
-    const clickNavigate = ['ppt-extra-iframe', 'speaker-current-slide'].some(id => {
-      const frame = document.getElementById(id);
-      return frame && frame.contentWindow === source;
-    });
-    try {
-      source.postMessage({ type: 'slide-bridge-config', clickNavigate }, '*');
-    } catch (e) {
-      console.warn('Failed to send slide bridge config:', e);
-    }
   },
 
   async _openExternal(pathOrUrl) {
