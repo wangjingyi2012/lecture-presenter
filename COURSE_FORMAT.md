@@ -182,13 +182,31 @@ MyCourse/
 
 ```json
 {
+  "schemaVersion": 2,
+  "deckId": "deck_唯一标识",
   "title": "演示标题",
   "slides": [
-    { "file": "slide01.html", "title": "第一页" },
-    { "file": "slide02.html", "title": "第二页" }
-  ]
+    { "id": "slide_第一页", "file": "slide01.html", "title": "第一页" },
+    { "id": "slide_第二页", "file": "slide02.html", "title": "第二页" }
+  ],
+  "sharedGroups": [],
+  "linkedGroups": []
 }
 ```
+
+`schemaVersion`、`deckId`、页面 `id`、`sharedGroups` 和 `linkedGroups` 由演讲宝在需要共享页面时自动维护。旧版只包含 `title` 和 `slides` 的 manifest 仍然兼容，不需要手工迁移。
+
+### 共享页面组
+
+编辑器支持把一张或连续多张页面设为共享真源，再插入其他 PPTE：
+
+- 目标 PPTE 保存完整本地快照，源课件不可用时仍可播放和导出。
+- 源内容变化后只显示更新提示，不会自动覆盖目标课件。
+- 页面身份使用稳定 `id`，排序和文件改名不会改变引用关系。
+- 快照保存在 `.ppte-links/<groupId>/snapshots/<contentHash>/`，该目录属于 PPTE 内容，移动或备份课件时必须一并保留。
+- 链接页面默认只读。如需单独修改，应先在“共享页面”中断开引用。
+
+不要手工修改 `.ppte-links` 中的文件。演讲宝会通过内容哈希识别本地改动或损坏。
 
 ### HTML 页面约束
 

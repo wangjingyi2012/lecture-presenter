@@ -28,6 +28,7 @@ const PptExtraViewer = {
   init() {
     this.modal = document.getElementById('ppt-extra-modal');
     if (!this.modal) return;
+    window.LiveCaption?.initMain?.();
 
     document.getElementById('ppt-extra-close').addEventListener('click', () => this.close());
     document.getElementById('ppt-extra-refresh').addEventListener('click', () => this.refreshCurrentSlide());
@@ -112,6 +113,10 @@ const PptExtraViewer = {
       if (this._handleNavigationKey(e)) return;
       if (e.key === 'f' || e.key === 'F') this.togglePlayMode();
       if (e.key === 's' || e.key === 'S') this.toggleSpeakerMode();
+      if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+        e.preventDefault();
+        window.LiveCaption?.toggle?.();
+      }
     });
   },
 
@@ -121,6 +126,7 @@ const PptExtraViewer = {
 
   async open(title, baseUrl, basePath) {
     await this._stopWatchingPpte();
+    await window.LiveCaption?.stop?.();
     this.title = title;
     this.baseUrl = baseUrl;
     this.basePath = basePath || '';
@@ -601,6 +607,10 @@ const PptExtraViewer = {
       this.toggleSpeakerMode();
       return;
     }
+    if (action === 'caption') {
+      window.LiveCaption?.toggle?.();
+      return;
+    }
     if (action === 'escape') {
       if (this.isPlayMenuOpen) this.setPlayMenuOpen(false);
       else if (this.isPlaying) this.togglePlayMode();
@@ -706,6 +716,7 @@ const PptExtraViewer = {
     if (e.key === 'f' || e.key === 'F') return 'play';
     if (e.key === 'p' || e.key === 'P') return 'annotate';
     if (e.key === 's' || e.key === 'S') return 'speaker';
+    if (e.key === 'c' || e.key === 'C') return 'caption';
     if (e.key === 'Escape') return 'escape';
     return '';
   },
@@ -789,6 +800,7 @@ const PptExtraViewer = {
     playBtn.innerHTML = this.isPlaying
       ? '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
       : '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+    if (!this.isPlaying) window.LiveCaption?.stop?.();
   },
 
   _notesEditing: false,
@@ -862,6 +874,7 @@ const PptExtraViewer = {
   exitSpeakerMode() {
     this.isSpeakerMode = false;
     this.stopTimer();
+    window.LiveCaption?.stop?.();
     document.getElementById('ppt-extra-speaker').style.display = '';
     document.getElementById('ppt-extra-toc').style.display = '';
     document.getElementById('ppt-extra-container').style.display = '';
@@ -970,6 +983,7 @@ const PptExtraViewer = {
 
   close() {
     this._stopWatchingPpte();
+    window.LiveCaption?.stop?.();
     this.isPlaying = false;
     this.modal.classList.remove('playing-mode');
     this.setPlayMenuOpen(false);

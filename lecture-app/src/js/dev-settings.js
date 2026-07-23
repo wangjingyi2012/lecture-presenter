@@ -185,6 +185,7 @@ my-ppt-course/           # 文件夹名称（可自定义）
 
     this.initAiSettings(appConfig);
     this.initGiteeSettings();
+    this.initCaptionSettings(appConfig);
 
     // Update Server Configuration
     const updateServerInput = document.getElementById('setting-update-server');

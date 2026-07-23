@@ -108,6 +108,7 @@ window.PpteEditor = {
     const content = await window.__TAURI__.core.invoke('read_text_file', { filePath: manifestPath });
     const manifest = JSON.parse(content);
     manifest.slides = this._normalizeManifestSlides(manifest.slides);
+    const manifestUpgraded = this._ensurePpteStableIds?.(manifest) || false;
     for (const slide of manifest.slides) {
       try {
         slide.html = await window.__TAURI__.core.invoke('read_text_file', {
@@ -121,10 +122,13 @@ window.PpteEditor = {
     }
     pb.manifest = manifest;
     pb.slides = manifest.slides;
+    pb.sharedSelection = new Set();
+    pb.linkedGroupStatuses = {};
     pb.currentSlideIndex = Math.min(pb.currentSlideIndex || 0, Math.max(0, pb.slides.length - 1));
     pb.fileStats = await this._loadPptFileStats(pb.folderPath, manifest);
-    pb.manifestDirty = false;
+    pb.manifestDirty = manifestUpgraded;
     this._renderPptBuilderInContent();
+    setTimeout(() => this._checkLinkedGroups?.({ silent: true }), 0);
   },
 
   async _handlePptSaveConflicts(pb, conflicts, retrySave) {
@@ -282,6 +286,7 @@ window.PpteEditor = {
 
   _openPptBuilder(folderPath, manifest, templateFiles = null) {
     manifest.slides = this._normalizeManifestSlides(manifest.slides);
+    const manifestUpgraded = this._ensurePpteStableIds?.(manifest) || false;
 
     // Use main content area instead of modal
     this._pptBuilder = {
@@ -290,8 +295,10 @@ window.PpteEditor = {
       slides: manifest.slides || [],
       templateFiles,
       fileStats: manifest._fileStats || {},
-      manifestDirty: false,
+      manifestDirty: manifestUpgraded,
       templateFilesDirty: !!templateFiles,
+      sharedSelection: new Set(),
+      linkedGroupStatuses: {},
     };
     delete manifest._fileStats;
 
@@ -301,6 +308,7 @@ window.PpteEditor = {
     // Render the editor in main content
     this._renderPptBuilderInContent();
     this._startPptEditorWatch(this._pptBuilder);
+    setTimeout(() => this._checkLinkedGroups?.({ silent: true }), 0);
 
     // Add save button handler
     setTimeout(() => {
@@ -322,6 +330,11 @@ window.PpteEditor = {
       const giteeBackupBtn = document.getElementById('ppt-gitee-backup-btn');
       if (giteeBackupBtn) {
         giteeBackupBtn.onclick = () => this._backupPptToGitee(giteeBackupBtn);
+      }
+
+      const sharedManageBtn = document.getElementById('ppt-shared-manage-btn');
+      if (sharedManageBtn) {
+        sharedManageBtn.onclick = () => this._showSharedGroupsManager?.();
       }
 
       // Add Cmd+S keyboard shortcut
@@ -377,13 +390,22 @@ window.PpteEditor = {
 
   _renderPageListHtml() {
     const pb = this._pptBuilder;
-    return pb.slides.map((slide, idx) => `
-      <li data-index="${idx}" class="${idx === pb.currentSlideIndex ? 'active' : ''}" style="padding:12px 16px;cursor:pointer;display:flex;align-items:center;gap:8px;">
-        <span class="drag-handle" style="cursor:grab;color:var(--text-muted);font-size:14px;user-select:none;flex-shrink:0;">⠿</span>
+    const sharedSlideIds = new Set((pb.manifest.sharedGroups || []).flatMap(group => group.slideIds || []));
+    return pb.slides.map((slide, idx) => {
+      const linked = slide.linkedFrom;
+      const status = linked ? pb.linkedGroupStatuses?.[linked.groupId] : null;
+      const statusLabel = this._sharedGroupStatusLabel?.(status?.state) || '';
+      return `
+      <li data-index="${idx}" data-slide-id="${this._escapeAttr(slide.id || '')}" class="${idx === pb.currentSlideIndex ? 'active' : ''} ${linked ? 'ppte-linked-slide' : ''}" style="padding:12px 16px;cursor:pointer;display:flex;align-items:center;gap:8px;">
+        <input class="ppte-share-select" data-share-select="${this._escapeAttr(slide.id || '')}" type="checkbox" ${pb.sharedSelection?.has(slide.id) ? 'checked' : ''} ${linked ? 'disabled' : ''} title="选择为共享页面组">
+        <span class="drag-handle" style="cursor:${linked ? 'not-allowed' : 'grab'};color:var(--text-muted);font-size:14px;user-select:none;flex-shrink:0;">⠿</span>
         <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${this._escapeHtml(slide.title)}</span>
+        ${sharedSlideIds.has(slide.id) ? '<span class="ppte-shared-badge ppte-shared-source">源</span>' : ''}
+        ${linked ? `<span class="ppte-shared-badge ${status?.state === 'update_available' ? 'ppte-shared-update' : ''}">${this._escapeHtml(statusLabel || '共享')}</span>` : ''}
         <span style="font-size:11px;color:var(--text-muted);flex-shrink:0;">${this._escapeHtml(slide.file || '')}</span>
       </li>
-    `).join('');
+    `;
+    }).join('');
   },
 
   _bindPptEditorEvents() {
@@ -393,12 +415,20 @@ window.PpteEditor = {
     if (pageItems) {
       // Use onclick assignment to avoid stacking listeners (no cloneNode needed)
       pageItems.onclick = (e) => {
+        if (e.target.closest('[data-share-select]')) return;
         const li = e.target.closest('li');
         if (li) {
           const idx = parseInt(li.dataset.index);
           pb.currentSlideIndex = idx;
           this._renderPptBuilderInContent();
         }
+      };
+      pageItems.onchange = (e) => {
+        const checkbox = e.target.closest('[data-share-select]');
+        if (!checkbox) return;
+        if (!pb.sharedSelection) pb.sharedSelection = new Set();
+        if (checkbox.checked) pb.sharedSelection.add(checkbox.dataset.shareSelect);
+        else pb.sharedSelection.delete(checkbox.dataset.shareSelect);
       };
     }
 
@@ -407,8 +437,19 @@ window.PpteEditor = {
       addBtn.onclick = () => this._addPptSlide();
     }
 
+    const createSharedBtn = document.getElementById('ppte-create-shared-group');
+    if (createSharedBtn) {
+      createSharedBtn.onclick = () => this._createSharedGroupFromSelection?.();
+    }
+
+    const insertSharedBtn = document.getElementById('ppte-insert-shared-group');
+    if (insertSharedBtn) {
+      insertSharedBtn.onclick = () => this._showInsertSharedGroupModal?.();
+    }
+
     const titleInput = document.getElementById('ppt-current-title');
     if (titleInput) {
+      titleInput.disabled = !!pb.slides[pb.currentSlideIndex]?.linkedFrom;
       titleInput.oninput = (e) => {
         const cur = this._pptBuilder;
         if (!cur) return;
@@ -421,6 +462,8 @@ window.PpteEditor = {
 
     const htmlTextarea = document.getElementById('ppt-current-html');
     if (htmlTextarea) {
+      htmlTextarea.disabled = !!pb.slides[pb.currentSlideIndex]?.linkedFrom;
+      htmlTextarea.title = htmlTextarea.disabled ? '共享页面请在源 PPTE 中编辑，或先断开引用' : '';
       htmlTextarea.oninput = (e) => {
         const cur = this._pptBuilder;
         if (!cur) return;
@@ -439,6 +482,16 @@ window.PpteEditor = {
       deleteBtn.onclick = () => {
         const cur = this._pptBuilder;
         if (!cur) return;
+        if (cur.slides[cur.currentSlideIndex]?.linkedFrom) {
+          this._showToast('共享页面不能单独删除，请先断开引用', true);
+          return;
+        }
+        const sourceGroups = (cur.manifest.sharedGroups || [])
+          .filter(group => (group.slideIds || []).includes(cur.slides[cur.currentSlideIndex]?.id));
+        if (sourceGroups.length) {
+          this._showToast('此页面是共享真源，请先在“共享页面”中取消共享', true);
+          return;
+        }
         if (cur.slides.length <= 1) {
           alert('至少需要保留一个页面');
           return;
@@ -462,11 +515,6 @@ window.PpteEditor = {
           deleteBtn.style.background = '#e74c3c';
           cur.slides.splice(cur.currentSlideIndex, 1);
           cur.manifestDirty = true;
-          // Renumber slide files
-          cur.slides.forEach((slide, i) => {
-            slide.file = `slide${String(i + 1).padStart(2, '0')}.html`;
-            slide.dirty = true;
-          });
           if (cur.currentSlideIndex >= cur.slides.length) {
             cur.currentSlideIndex = cur.slides.length - 1;
           }
@@ -477,6 +525,7 @@ window.PpteEditor = {
 
     const aiChatBtn = document.getElementById('ppt-ai-chat-btn');
     if (aiChatBtn) {
+      aiChatBtn.disabled = !!pb.slides[pb.currentSlideIndex]?.linkedFrom;
       aiChatBtn.onclick = () => this._showAiChat();
     }
 
@@ -487,6 +536,7 @@ window.PpteEditor = {
 
     const visualBtn = document.getElementById('ppt-visual-edit-btn');
     if (visualBtn) {
+      visualBtn.disabled = !!pb.slides[pb.currentSlideIndex]?.linkedFrom;
       visualBtn.onclick = () => this._openPptVisualEditor();
     }
 
@@ -1289,6 +1339,7 @@ window.PpteEditor = {
     // Title and type change
     const titleInput = modal.querySelector('#ppt-current-title');
     if (titleInput) {
+      titleInput.disabled = !!pb.slides[pb.currentSlideIndex]?.linkedFrom;
       titleInput.addEventListener('input', (e) => {
         pb.slides[pb.currentSlideIndex].title = e.target.value;
         pb.manifestDirty = true;
@@ -1299,6 +1350,7 @@ window.PpteEditor = {
     // HTML content change
     const htmlTextarea = modal.querySelector('#ppt-current-html');
     if (htmlTextarea) {
+      htmlTextarea.disabled = !!pb.slides[pb.currentSlideIndex]?.linkedFrom;
       htmlTextarea.addEventListener('input', (e) => {
         pb.slides[pb.currentSlideIndex].html = e.target.value;
         pb.slides[pb.currentSlideIndex].dirty = true;
@@ -1311,6 +1363,15 @@ window.PpteEditor = {
       let confirmPending = false;
       let confirmTimer = null;
       deleteBtn.addEventListener('click', () => {
+        const currentSlide = pb.slides[pb.currentSlideIndex];
+        if (currentSlide?.linkedFrom) {
+          this._showToast('共享页面不能单独删除，请先断开引用', true);
+          return;
+        }
+        if ((pb.manifest.sharedGroups || []).some(group => (group.slideIds || []).includes(currentSlide?.id))) {
+          this._showToast('此页面是共享真源，请先取消共享', true);
+          return;
+        }
         if (pb.slides.length <= 1) {
           alert('至少需要保留一个页面');
           return;
@@ -1332,10 +1393,6 @@ window.PpteEditor = {
           deleteBtn.style.background = '#e74c3c';
           pb.slides.splice(pb.currentSlideIndex, 1);
           pb.manifestDirty = true;
-          pb.slides.forEach((slide, i) => {
-            slide.file = `slide${String(i + 1).padStart(2, '0')}.html`;
-            slide.dirty = true;
-          });
           if (pb.currentSlideIndex >= pb.slides.length) {
             pb.currentSlideIndex = pb.slides.length - 1;
           }
@@ -1543,7 +1600,8 @@ window.PpteEditor = {
           finish: '结束'
         };
         const newSlide = {
-          file: `slide${String(pb.slides.length + 1).padStart(2, '0')}.html`,
+          id: self._newPpteId?.('slide'),
+          file: self._nextPpteSlideFile(pb),
           title: `${typeLabels[slideType]} ${pb.slides.length + 1}`,
           slide_type: slideType,
           html: self._generateSlideHtml(`${typeLabels[slideType]} ${pb.slides.length + 1}`, slideType),
@@ -1569,14 +1627,19 @@ window.PpteEditor = {
   },
 
   _deletePptSlide(index) {
-    if (!confirm('确定删除此页面？')) return;
     const pb = this._pptBuilder;
+    const slide = pb?.slides?.[index];
+    if (slide?.linkedFrom) {
+      this._showToast('共享页面不能单独删除，请先断开引用', true);
+      return;
+    }
+    if ((pb?.manifest?.sharedGroups || []).some(group => (group.slideIds || []).includes(slide?.id))) {
+      this._showToast('此页面是共享真源，请先取消共享', true);
+      return;
+    }
+    if (!confirm('确定删除此页面？')) return;
     pb.slides.splice(index, 1);
     pb.manifestDirty = true;
-    pb.slides.forEach((slide, i) => {
-      slide.file = `slide${String(i + 1).padStart(2, '0')}.html`;
-      slide.dirty = true;
-    });
     if (pb.currentSlideIndex >= pb.slides.length) {
       pb.currentSlideIndex = pb.slides.length - 1;
     }
@@ -1610,6 +1673,12 @@ window.PpteEditor = {
     items.forEach(item => {
       item.addEventListener('dragstart', (e) => {
         dragSrc = parseInt(item.dataset.index);
+        if (this._pptBuilder?.slides?.[dragSrc]?.linkedFrom) {
+          e.preventDefault();
+          dragSrc = null;
+          this._showToast('共享页面组请在“共享页面”中整组移动', true);
+          return;
+        }
         item.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', dragSrc.toString());
@@ -1638,11 +1707,13 @@ window.PpteEditor = {
         const destIndex = parseInt(item.dataset.index);
         if (dragSrc !== null && dragSrc !== destIndex) {
           const pb = this._pptBuilder;
+          if (pb.slides[destIndex]?.linkedFrom) {
+            this._showToast('共享页面组请在“共享页面”中整组移动', true);
+            dragSrc = null;
+            return;
+          }
           const [moved] = pb.slides.splice(dragSrc, 1);
           pb.slides.splice(destIndex, 0, moved);
-          pb.slides.forEach((slide, i) => {
-            slide.file = `slide${String(i + 1).padStart(2, '0')}.html`;
-          });
           this._refreshPptBuilder();
         }
         dragSrc = null;
@@ -1695,15 +1766,20 @@ window.PpteEditor = {
 
   /** Return a clean manifest object (no runtime `html` field) for serialization */
   _cleanManifestObject(manifest) {
-    const clean = {
-      title: manifest.title,
-      slides: (manifest.slides || []).map(({ file, title, slide_type }) => ({
-        file, title, slide_type
-      }))
-    };
-    if (manifest.gitee) {
-      clean.gitee = manifest.gitee;
+    const clean = {};
+    for (const [key, value] of Object.entries(manifest || {})) {
+      if (key.startsWith('_')) continue;
+      if (key === 'slides') continue;
+      clean[key] = value;
     }
+    clean.slides = (manifest.slides || []).map(slide => {
+      const result = {};
+      for (const [key, value] of Object.entries(slide || {})) {
+        if (['html', 'dirty', 'created'].includes(key) || key.startsWith('_')) continue;
+        result[key] = value;
+      }
+      return result;
+    });
     return clean;
   },
 
@@ -2151,6 +2227,10 @@ ${currentHtml}
     container.querySelectorAll('.btn-up').forEach(btn => {
       btn.onclick = () => {
         const idx = parseInt(btn.dataset.index);
+        if (pb.slides[idx]?.linkedFrom || pb.slides[idx - 1]?.linkedFrom) {
+          this._showToast('共享页面组请在“共享页面”中整组移动', true);
+          return;
+        }
         if (idx > 0) {
           [pb.slides[idx - 1], pb.slides[idx]] = [pb.slides[idx], pb.slides[idx - 1]];
           this._renderReorderList();
@@ -2161,6 +2241,10 @@ ${currentHtml}
     container.querySelectorAll('.btn-down').forEach(btn => {
       btn.onclick = () => {
         const idx = parseInt(btn.dataset.index);
+        if (pb.slides[idx]?.linkedFrom || pb.slides[idx + 1]?.linkedFrom) {
+          this._showToast('共享页面组请在“共享页面”中整组移动', true);
+          return;
+        }
         if (idx < pb.slides.length - 1) {
           [pb.slides[idx], pb.slides[idx + 1]] = [pb.slides[idx + 1], pb.slides[idx]];
           this._renderReorderList();
@@ -2301,13 +2385,14 @@ ${currentHtml}
         else if (target.above && destIndex > srcIndex) destIndex--;
 
         const pb = this._pptBuilder;
+        if (pb.slides[srcIndex]?.linkedFrom || pb.slides[target.index]?.linkedFrom) {
+          this._showToast('共享页面组请在“共享页面”中整组移动', true);
+          dragState = null;
+          return;
+        }
         const [moved] = pb.slides.splice(srcIndex, 1);
         pb.slides.splice(destIndex, 0, moved);
         pb.manifestDirty = true;
-        pb.slides.forEach((slide, i) => {
-          slide.file = `slide${String(i + 1).padStart(2, '0')}.html`;
-          slide.dirty = true;
-        });
         pb.currentSlideIndex = destIndex;
         this._renderPptBuilderInContent();
       }
@@ -2323,6 +2408,10 @@ ${currentHtml}
 
       e.preventDefault();
       const srcIndex = parseInt(li.dataset.index);
+      if (this._pptBuilder?.slides?.[srcIndex]?.linkedFrom) {
+        this._showToast('共享页面组请在“共享页面”中整组移动', true);
+        return;
+      }
       const rect = li.getBoundingClientRect();
 
       // Create ghost element
@@ -2375,6 +2464,7 @@ ${currentHtml}
     return rawSlides.map((slide, index) => {
       if (typeof slide === 'string') {
         return {
+          id: this._newPpteId?.('slide') || `slide_${Date.now()}_${index}`,
           file: slide,
           title: `页面 ${index + 1}`,
           slide_type: 'content',
@@ -2382,6 +2472,8 @@ ${currentHtml}
         };
       }
       return {
+        ...slide,
+        id: slide?.id || this._newPpteId?.('slide') || `slide_${Date.now()}_${index}`,
         file: slide?.file || `slide${String(index + 1).padStart(2, '0')}.html`,
         title: slide?.title || `页面 ${index + 1}`,
         slide_type: slide?.slide_type || 'content',

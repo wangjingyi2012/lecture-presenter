@@ -6,9 +6,11 @@
   <title>Lecture Presenter</title>
   <link rel="stylesheet" href="css/theme.css">
   <link rel="stylesheet" href="css/main.css">
-  <link rel="stylesheet" href="css/auth.css">
+  <link rel="stylesheet" href="css/auth.css?v=2">
   <link rel="stylesheet" href="css/course-creator.css">
   <link rel="stylesheet" href="css/ppte-annotator.css">
+  <link rel="stylesheet" href="css/live-caption.css">
+  <link rel="stylesheet" href="css/ppte-shared-groups.css">
   <link rel="stylesheet" href="vendor/highlight-github-dark.min.css" id="hljs-theme">
 </head>
 <body data-theme="dark">
@@ -136,6 +138,15 @@
                   <span>选择包含 manifest.json 的课件文件夹。</span>
                 </span>
               </button>
+              <button id="ppte-cloud-btn" class="ppte-workbench-action">
+                <span class="ppte-action-icon">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 16l-4-4-4 4"/><path d="M12 12v9"/><path d="M20.4 17.5A5 5 0 0 0 18 8.2 7 7 0 0 0 4.3 10.6 4.5 4.5 0 0 0 5.5 19H8"/></svg>
+                </span>
+                <span class="ppte-action-copy">
+                  <strong>在线一键制作</strong>
+                  <span>使用官方模板和云端 AI 生成完整 PPTE。</span>
+                </span>
+              </button>
             </section>
 
             <section id="ppte-recent-list" class="ppte-workbench-recent">
@@ -181,6 +192,7 @@
             </div>
           </div>
           <div class="ppte-editor-primary-actions">
+            <button id="ppt-shared-manage-btn" class="ppte-editor-button">共享页面</button>
             <button id="ppt-play-btn2" class="ppte-editor-button">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
               播放
@@ -197,7 +209,11 @@
           <div id="ppte-page-list">
             <div class="ppte-page-list-header">
               <span>页面目录</span>
-              <button id="ppte-add-page" class="ppte-editor-button ppte-editor-button-compact">+ 添加</button>
+              <div class="ppte-page-list-actions">
+                <button id="ppte-create-shared-group" class="ppte-editor-button ppte-editor-button-compact" title="将勾选的连续页面设为唯一真源">共享所选</button>
+                <button id="ppte-insert-shared-group" class="ppte-editor-button ppte-editor-button-compact">插入共享</button>
+                <button id="ppte-add-page" class="ppte-editor-button ppte-editor-button-compact">+ 添加</button>
+              </div>
             </div>
             <ul id="ppte-page-items"></ul>
           </div>
@@ -245,22 +261,10 @@
             <label for="auth-login-password">密码</label>
             <input type="password" id="auth-login-password" placeholder="请输入密码" autocomplete="current-password">
           </div>
-          <div class="auth-captcha" id="auth-captcha">
-            <div class="captcha-track" id="captcha-track">
-              <div class="captcha-fill" id="captcha-fill"></div>
-              <div class="captcha-thumb" id="captcha-thumb">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M8 5v14l11-7z"/>
-                </svg>
-              </div>
-              <span class="captcha-text" id="captcha-text">请向右滑动验证</span>
-            </div>
-            <div class="captcha-success" id="captcha-success" style="display:none;">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="#52c41a">
-                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-              </svg>
-              <span>验证通过</span>
-            </div>
+          <div class="auth-server-captcha" id="auth-captcha">
+            <img id="auth-captcha-image" alt="验证码" draggable="false">
+            <input type="text" id="auth-login-captcha" placeholder="输入验证码" maxlength="8" autocomplete="off">
+            <button type="button" id="auth-captcha-refresh" title="刷新验证码">换一张</button>
           </div>
           <button class="auth-submit-btn" id="auth-login-btn">登录</button>
         </div>
@@ -272,7 +276,7 @@
           </div>
           <div class="auth-field">
             <label for="auth-register-password">密码</label>
-            <input type="password" id="auth-register-password" placeholder="请输入密码 (至少6位)" autocomplete="new-password">
+            <input type="password" id="auth-register-password" placeholder="请输入密码 (至少8位)" autocomplete="new-password">
           </div>
           <div class="auth-field">
             <label for="auth-register-confirm">确认密码</label>
@@ -281,23 +285,6 @@
           <div class="auth-field">
             <label for="auth-register-email">邮箱 <span class="auth-field-required">*</span></label>
             <input type="email" id="auth-register-email" placeholder="请输入邮箱" autocomplete="email">
-          </div>
-          <div class="auth-captcha" id="auth-register-captcha">
-            <div class="captcha-track" id="register-captcha-track">
-              <div class="captcha-fill" id="register-captcha-fill"></div>
-              <div class="captcha-thumb" id="register-captcha-thumb">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M8 5v14l11-7z"/>
-                </svg>
-              </div>
-              <span class="captcha-text">请向右滑动验证</span>
-            </div>
-            <div class="captcha-success" id="register-captcha-success" style="display:none;">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="#52c41a">
-                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-              </svg>
-              <span>验证通过</span>
-            </div>
           </div>
           <button class="auth-submit-btn" id="auth-register-btn">注册</button>
         </div>
@@ -464,6 +451,25 @@
             </div>
             <div class="dev-field-hint" id="setting-gitee-hint">用于创建私有仓库；Token 只保存到系统钥匙串，不写入配置文件</div>
           </div>
+          <div class="dev-field">
+            <label>实时字幕 · 阿里云百炼</label>
+            <div class="dev-field-row">
+              <input type="password" id="setting-caption-token" placeholder="百炼 API Key（sk-...）" autocomplete="off">
+              <button id="setting-caption-save-test" class="btn-detect" title="保存到系统钥匙串并测试当前字幕模型">保存并测试</button>
+              <button id="setting-caption-clear" class="btn-detect" title="清除已保存的字幕 API Key">清除</button>
+            </div>
+            <div class="dev-field-row" style="margin-top:8px;">
+              <select id="setting-caption-display-mode" title="选择观众看到的字幕更新方式">
+                <option value="realtime">实时修订（边说边更新）</option>
+                <option value="stable">句末稳定（整句一次出现）</option>
+              </select>
+              <select id="setting-caption-model" title="选择百炼实时语音识别模型">
+                <option value="fun-asr-realtime">Fun-ASR（当前效果）</option>
+                <option value="paraformer-realtime-v2">Paraformer（过滤语气词）</option>
+              </select>
+            </div>
+            <div class="dev-field-hint" id="setting-caption-hint">API Key 只保存到系统钥匙串；切换后重新开启字幕生效</div>
+          </div>
           <div class="dev-field" style="display:none">
             <label>更新服务器</label>
             <div class="dev-field-row">
@@ -547,6 +553,7 @@
     <div class="ppt-extra-header">
       <span id="ppt-extra-title"></span>
       <div class="ppt-extra-actions">
+        <button id="ppt-extra-caption" class="caption-toggle" title="开启实时字幕 (C)" aria-pressed="false"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8"/></svg></button>
         <button id="ppt-extra-annotate" title="标注模式 (P)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg></button>
         <button id="ppt-extra-refresh" title="刷新当前页"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
         <button id="ppt-extra-export" title="导出为 PowerPoint"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>
@@ -563,6 +570,9 @@
       <div id="ppt-extra-container">
         <iframe id="ppt-extra-iframe" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-forms" src="about:blank"></iframe>
         <div id="ppt-extra-focus-anchor" class="ppt-extra-focus-anchor" tabindex="0" aria-label="幻灯片键盘导航"></div>
+        <div id="live-caption-overlay" class="live-caption-overlay" role="status" aria-live="polite" aria-atomic="true">
+          <div class="live-caption-text"></div>
+        </div>
         <div id="ppt-play-controls" class="ppt-play-controls" aria-label="播放模式菜单">
           <button id="ppt-play-menu-toggle" class="ppt-play-menu-toggle" title="播放菜单" aria-label="播放菜单" aria-expanded="false">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -578,6 +588,10 @@
             <button id="ppt-play-annotate" class="ppt-play-menu-item">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
               <span>标注模式</span>
+            </button>
+            <button id="ppt-play-caption" class="ppt-play-menu-item caption-toggle" aria-pressed="false">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8"/></svg>
+              <span>开启实时字幕 (C)</span>
             </button>
           </div>
         </div>
@@ -620,7 +634,12 @@
           <button id="speaker-next-fast" title="下一页">▶</button>
           <button id="speaker-next" title="下一页 (→)">⏭</button>
         </div>
+        <div id="speaker-caption-preview" class="speaker-caption-preview" role="status" aria-live="polite" aria-atomic="true">
+          <span class="speaker-caption-state">字幕未开启</span>
+          <span class="speaker-caption-text"></span>
+        </div>
         <div class="speaker-actions">
+          <button id="speaker-caption" class="caption-toggle" title="开启实时字幕 (C)" aria-pressed="false"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8"/></svg><span>字幕</span></button>
           <button id="speaker-toggle-audience" title="观众窗口全屏">🔲 全屏</button>
           <button id="speaker-exit" title="退出演讲者模式">✕ 退出</button>
         </div>
@@ -709,6 +728,7 @@
   <script src="js/html-viewer.js"></script>
   <script src="js/ppte-ppt-exporter.js"></script>
   <script src="js/ppte-annotator.js"></script>
+  <script src="js/live-caption.js"></script>
   <script src="js/ppt-extra-viewer.js"></script>
   <script src="js/code-viewer.js"></script>
   <script src="js/content.js"></script>
@@ -717,10 +737,13 @@
   <script src="js/settings.js"></script>
   <script src="js/ai-settings.js"></script>
   <script src="js/gitee-settings.js"></script>
+  <script src="js/caption-settings.js"></script>
   <script src="js/dev-settings.js"></script>
   <script src="js/ppte-recent.js"></script>
   <script src="js/ppte-editor.js"></script>
+  <script src="js/ppte-shared-groups.js"></script>
   <script src="js/ppte-create.js"></script>
+  <script src="js/local-ppte-agent.js"></script>
   <script src="js/drag.js"></script>
   <script src="js/updater.js"></script>
   <script src="js/notification-center.js"></script>

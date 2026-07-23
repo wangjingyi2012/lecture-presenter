@@ -44,6 +44,19 @@ vm.runInContext(`${source}\nglobalThis.PptExtraViewer = PptExtraViewer;`, contex
 const viewer = context.PptExtraViewer;
 
 {
+  assert.equal(viewer._slideShortcutFromKey({ key: 'c', metaKey: false, ctrlKey: false, altKey: false }), 'caption');
+  assert.equal(viewer._slideShortcutFromKey({ key: 'C', metaKey: false, ctrlKey: false, altKey: false }), 'caption');
+  assert.equal(viewer._slideShortcutFromKey({ key: 'c', metaKey: true, ctrlKey: false, altKey: false }), '');
+  let toggled = 0;
+  context.window.LiveCaption = { toggle: () => { toggled += 1; } };
+  viewer._handleSlideShortcut('caption');
+  assert.equal(toggled, 1);
+
+  const bridge = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'ppte-slide-bridge.js'), 'utf8');
+  assert.match(bridge, /return 'caption'/);
+}
+
+{
   const html = '<!doctype html><html><head><base href="slide://localhost/old/"><script src="vendor/gsap.min.js"></script></head></html>';
   const output = viewer._injectBaseHref(html, 'slide://localhost/Users/course/');
 
@@ -75,6 +88,13 @@ const viewer = context.PptExtraViewer;
 }
 
 {
+  viewer.slides = [{ file: '.ppte-links/group_01/snapshots/hash_01/slide06.html' }];
+  const output = viewer.getSlideUrl(0);
+
+  assert.equal(output, 'slide://localhost/Users/jingyi/%E8%AF%BE%E4%BB%B6/.ppte-links/group_01/snapshots/hash_01/slide06.html');
+}
+
+{
   context.navigator.platform = 'Win32';
   context.navigator.userAgent = 'Windows';
   const output = viewer._assetUrl('C:/Users/jingyi/课件/slide06.html');
@@ -83,9 +103,10 @@ const viewer = context.PptExtraViewer;
 }
 
 {
+  viewer.slides = [{ file: '.ppte-links/group_01/snapshots/hash_01/slide06.html' }];
   const output = viewer.getSlideUrl(0, { bustCache: true, token: '8' });
 
-  assert.equal(output, 'http://slide.localhost/Users/jingyi/%E8%AF%BE%E4%BB%B6/slide06.html?t=8');
+  assert.equal(output, 'http://slide.localhost/Users/jingyi/%E8%AF%BE%E4%BB%B6/.ppte-links/group_01/snapshots/hash_01/slide06.html?t=8');
 }
 
 {

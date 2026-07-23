@@ -1,0 +1,125 @@
+.ppte-page-list-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.ppte-editor-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ppte-share-select {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.ppte-linked-slide {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.ppte-shared-badge {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.ppte-shared-source {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.ppte-shared-update {
+  color: #d98c10;
+  border-color: rgba(217, 140, 16, 0.5);
+}
+
+.ppte-shared-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 3400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.68);
+}
+
+.ppte-shared-dialog {
+  width: min(760px, 92vw);
+  max-height: 84vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 18px 55px rgba(0, 0, 0, 0.4);
+}
+
+.ppte-shared-dialog-header,
+.ppte-shared-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ppte-shared-dialog-footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+}
+
+.ppte-shared-dialog-body {
+  padding: 16px 18px;
+  overflow: auto;
+}
+
+.ppte-shared-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ppte-shared-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.ppte-shared-card-title {
+  font-weight: 600;
+}
+
+.ppte-shared-card-meta {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ppte-shared-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ppte-shared-empty {
+  padding: 28px 12px;
+  color: var(--text-muted);
+  text-align: center;
+}

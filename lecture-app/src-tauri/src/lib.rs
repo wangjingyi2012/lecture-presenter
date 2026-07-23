@@ -5,14 +5,93 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Manager, Emitter};
 use reqwest;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::path::{Component, Path};
+use std::sync::Arc;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 const GITEE_KEYRING_SERVICE: &str = "Lecture Presenter";
 const GITEE_KEYRING_USER: &str = "gitee-access-token";
+const CAPTION_KEYRING_SERVICE: &str = "Lecture Presenter";
+const CAPTION_KEYRING_USER: &str = "aliyun-bailian-caption-api-key";
+const CAPTION_WS_URL: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
+
+#[derive(Clone, Default)]
+struct LiveCaptionState {
+    active: Arc<tokio::sync::Mutex<Option<ActiveCaptionSession>>>,
+}
+
+#[derive(Clone)]
+struct ActiveCaptionSession {
+    id: String,
+    sender: mpsc::Sender<CaptionCommand>,
+}
+
+enum CaptionCommand {
+    Audio(Vec<u8>),
+    Stop,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptionStatusPayload {
+    state: String,
+    message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptionResultPayload {
+    text: String,
+    is_final: bool,
+    sentence_id: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptionModel {
+    FunAsr,
+    Paraformer,
+}
+
+impl CaptionModel {
+    fn from_setting(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("fun-asr-realtime") {
+            "fun-asr-realtime" => Ok(Self::FunAsr),
+            "paraformer-realtime-v2" => Ok(Self::Paraformer),
+            _ => Err("不支持的实时字幕识别模型".to_string()),
+        }
+    }
+
+    fn model_id(self) -> &'static str {
+        match self {
+            Self::FunAsr => "fun-asr-realtime",
+            Self::Paraformer => "paraformer-realtime-v2",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::FunAsr => "Fun-ASR",
+            Self::Paraformer => "Paraformer（去语气词）",
+        }
+    }
+}
+
+fn caption_final_only(value: Option<&str>) -> Result<bool, String> {
+    match value.unwrap_or("realtime") {
+        "realtime" => Ok(false),
+        "stable" => Ok(true),
+        _ => Err("不支持的字幕显示方式".to_string()),
+    }
+}
 
 #[derive(Default)]
 struct PpteWatcherState {
@@ -94,6 +173,49 @@ pub struct AppConfig {
     pub analytics_endpoint: Option<String>,
     #[serde(default, rename = "autoCheckUpdate", skip_serializing_if = "Option::is_none")]
     pub auto_check_update: Option<bool>,
+    #[serde(default, rename = "localPpteAgentEnabled", skip_serializing_if = "Option::is_none")]
+    pub local_ppte_agent_enabled: Option<bool>,
+    #[serde(default, rename = "localPpteAgentPath", skip_serializing_if = "Option::is_none")]
+    pub local_ppte_agent_path: Option<String>,
+    #[serde(default, rename = "captionModel", skip_serializing_if = "Option::is_none")]
+    pub caption_model: Option<String>,
+    #[serde(default, rename = "captionDisplayMode", skip_serializing_if = "Option::is_none")]
+    pub caption_display_mode: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LocalPpteAgentStatus {
+    enabled: bool,
+    configured: bool,
+    agent_path: Option<String>,
+    node_path: Option<String>,
+    ready: bool,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct LocalPpteAgentLaunch {
+    job_dir: String,
+    output_dir: String,
+    pid: u32,
+    log_file: String,
+}
+
+#[derive(Serialize)]
+struct AuthApiResponse {
+    ok: bool,
+    status: u16,
+    data: serde_json::Value,
+}
+
+fn auth_api_spec(action: &str) -> Result<(reqwest::Method, &'static str), String> {
+    match action {
+        "captcha" => Ok((reqwest::Method::GET, "/api/web/auth/captcha")),
+        "login" => Ok((reqwest::Method::POST, "/api/web/auth/login")),
+        "register" => Ok((reqwest::Method::POST, "/api/web/auth/register")),
+        "me" => Ok((reqwest::Method::GET, "/api/web/auth/me")),
+        _ => Err("不支持的认证操作".to_string()),
+    }
 }
 
 fn get_config_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -147,6 +269,74 @@ fn read_app_config(app_handle: tauri::AppHandle) -> Result<AppConfig, String> {
     }
 
     Err("app-config.json not found".to_string())
+}
+
+#[tauri::command]
+async fn auth_api_request(
+    app_handle: tauri::AppHandle,
+    action: String,
+    payload: Option<serde_json::Value>,
+    token: Option<String>,
+) -> Result<AuthApiResponse, String> {
+    let config = read_app_config(app_handle)?;
+    let server = config
+        .auth_server
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("https://design.hz-study-system.com")
+        .trim_end_matches('/');
+    let (method, path) = auth_api_spec(&action)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("无法创建认证请求：{}", e))?;
+    let mut request = client.request(method, format!("{}{}", server, path));
+
+    if let Some(value) = payload {
+        request = request.json(&value);
+    }
+    if let Some(value) = token.filter(|value| !value.trim().is_empty()) {
+        request = request.bearer_auth(value);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("认证服务连接失败：{}", e))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("认证服务响应读取失败：{}", e))?;
+    let data = serde_json::from_str(&text).unwrap_or_else(|_| {
+        serde_json::json!({
+            "detail": if text.trim().is_empty() { "认证服务返回了空响应" } else { text.trim() }
+        })
+    });
+
+    Ok(AuthApiResponse {
+        ok: status.is_success(),
+        status: status.as_u16(),
+        data,
+    })
+}
+
+#[cfg(test)]
+mod auth_api_tests {
+    use super::*;
+
+    #[test]
+    fn auth_actions_are_restricted_to_known_web_routes() {
+        assert_eq!(
+            auth_api_spec("login").unwrap(),
+            (reqwest::Method::POST, "/api/web/auth/login")
+        );
+        assert_eq!(
+            auth_api_spec("captcha").unwrap(),
+            (reqwest::Method::GET, "/api/web/auth/captcha")
+        );
+        assert!(auth_api_spec("https://example.com").is_err());
+    }
 }
 
 /// Auto-inject the built-in tutorial course if it exists in resources and isn't already in config.
@@ -626,6 +816,52 @@ async fn pick_files(app_handle: tauri::AppHandle) -> Result<Vec<String>, String>
         .map(|p| p.to_string_lossy().to_string())
         .collect();
     Ok(paths)
+}
+
+#[tauri::command]
+async fn pick_reference_file(app_handle: tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app_handle
+        .dialog()
+        .file()
+        .add_filter("课程大纲", &["md", "txt", "docx", "pdf"])
+        .pick_file(move |file| {
+            let _ = tx.send(file);
+        });
+
+    let file = rx.recv().map_err(|e| e.to_string())?.ok_or("cancelled")?;
+    file.into_path()
+        .map_err(|e| e.to_string())
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn pick_reference_files(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app_handle
+        .dialog()
+        .file()
+        .add_filter(
+            "Agent 参考资料",
+            &[
+                "md", "txt", "docx", "pdf", "html", "htm", "json", "jsonl", "yaml", "yml", "csv", "tsv",
+                "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "py", "js", "mjs", "ts", "tsx", "css", "sql",
+            ],
+        )
+        .pick_files(move |files| {
+            let _ = tx.send(files);
+        });
+
+    let files = rx.recv().map_err(|e| e.to_string())?.ok_or("cancelled")?;
+    Ok(files
+        .iter()
+        .filter_map(|file| file.clone().into_path().ok())
+        .map(|path| path.to_string_lossy().to_string())
+        .collect())
 }
 
 #[tauri::command]
@@ -1401,6 +1637,472 @@ fn import_ppte_resources(folder_path: String, source_paths: Vec<String>) -> Resu
     Ok(imported)
 }
 
+#[derive(Clone)]
+struct PpteSharedSourceSlide {
+    id: String,
+    file: String,
+    title: String,
+    slide_type: String,
+}
+
+#[derive(Serialize)]
+struct PpteSharedSlideInfo {
+    #[serde(rename = "sourceSlideId")]
+    source_slide_id: String,
+    file: String,
+    title: String,
+    #[serde(rename = "slideType")]
+    slide_type: String,
+}
+
+#[derive(Serialize)]
+struct PpteSharedSnapshotSlide {
+    #[serde(rename = "sourceSlideId")]
+    source_slide_id: String,
+    #[serde(rename = "targetFile")]
+    target_file: String,
+    title: String,
+    #[serde(rename = "slideType")]
+    slide_type: String,
+}
+
+#[derive(Serialize)]
+struct PpteSharedGroupInfo {
+    #[serde(rename = "sourceDeckId")]
+    source_deck_id: String,
+    #[serde(rename = "groupId")]
+    group_id: String,
+    name: String,
+    #[serde(rename = "contentHash")]
+    content_hash: String,
+    slides: Vec<PpteSharedSlideInfo>,
+}
+
+#[derive(Serialize)]
+struct PpteSharedSnapshotResult {
+    #[serde(rename = "sourceDeckId")]
+    source_deck_id: String,
+    #[serde(rename = "groupId")]
+    group_id: String,
+    name: String,
+    #[serde(rename = "contentHash")]
+    content_hash: String,
+    #[serde(rename = "snapshotHash")]
+    snapshot_hash: String,
+    #[serde(rename = "snapshotRoot")]
+    snapshot_root: String,
+    slides: Vec<PpteSharedSnapshotSlide>,
+}
+
+struct PpteSharedSourceData {
+    root: PathBuf,
+    source_deck_id: String,
+    group_id: String,
+    name: String,
+    slides: Vec<PpteSharedSourceSlide>,
+    files: Vec<PathBuf>,
+    content_hash: String,
+}
+
+fn ppte_safe_relative_path(value: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value);
+    if value.trim().is_empty() || path.is_absolute() {
+        return Err(format!("Unsafe PPTE relative path: {}", value));
+    }
+    for component in path.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(format!("Unsafe PPTE relative path: {}", value));
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn ppte_safe_destination(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(format!("Unsafe PPTE destination: {}", relative.display()));
+        };
+        current.push(part);
+        if current.exists() {
+            let metadata = fs::symlink_metadata(&current)
+                .map_err(|e| format!("Failed to inspect PPTE destination {}: {}", current.display(), e))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!("PPTE destination contains a symbolic link: {}", current.display()));
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn canonical_ppte_root(folder_path: &str) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(folder_path)
+        .map_err(|e| format!("PPTE folder does not exist: {} ({})", folder_path, e))?;
+    if !root.is_dir() || !root.join("manifest.json").is_file() {
+        return Err(format!("PPTE folder is missing manifest.json: {}", folder_path));
+    }
+    Ok(root)
+}
+
+fn ppte_note_path_for_slide(slide: &serde_json::Value, file: &str) -> Result<PathBuf, String> {
+    let explicit = ["note", "notes", "speakerNote", "speakerNotes"]
+        .iter()
+        .find_map(|key| slide.get(*key).and_then(|value| value.as_str()));
+    if let Some(value) = explicit {
+        return ppte_safe_relative_path(value);
+    }
+    let path = ppte_safe_relative_path(file)?;
+    let mut note = path.clone();
+    note.set_extension("note");
+    Ok(note)
+}
+
+fn ppte_is_excluded_snapshot_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == ".ds_store"
+        || lower.starts_with("._")
+        || lower == ".gitignore"
+        || lower == ".gitattributes"
+        || lower == ".env"
+        || lower.starts_with(".env.")
+        || lower == "credentials.json"
+        || lower == "app-config.json"
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+}
+
+fn collect_ppte_snapshot_files(root: &Path, current: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
+    let mut entries = fs::read_dir(current)
+        .map_err(|e| format!("Failed to read PPTE snapshot resources: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read PPTE snapshot entry: {}", e))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let relative = path.strip_prefix(root)
+            .map_err(|e| format!("Failed to resolve PPTE snapshot path: {}", e))?
+            .to_path_buf();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|e| format!("Failed to inspect PPTE snapshot path {}: {}", path.display(), e))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("Symbolic links are not allowed in shared PPTE snapshots: {}", relative.display()));
+        }
+        if metadata.is_dir() {
+            if name == ".git" || name == ".ppte-links" {
+                continue;
+            }
+            collect_ppte_snapshot_files(root, &path, output)?;
+        } else if metadata.is_file() && !ppte_is_excluded_snapshot_name(&name) {
+            output.push(relative);
+        }
+    }
+    Ok(())
+}
+
+fn update_sha256_with_file(hasher: &mut Sha256, root: &Path, relative: &Path) -> Result<(), String> {
+    let safe_relative = ppte_safe_relative_path(&relative.to_string_lossy().replace('\\', "/"))?;
+    let path = root.join(&safe_relative);
+    let canonical = fs::canonicalize(&path)
+        .map_err(|e| format!("Shared PPTE file is missing {}: {}", safe_relative.display(), e))?;
+    if !canonical.starts_with(root) {
+        return Err(format!("Shared PPTE file escapes its root: {}", safe_relative.display()));
+    }
+    let bytes = fs::read(&canonical)
+        .map_err(|e| format!("Failed to read shared PPTE file {}: {}", safe_relative.display(), e))?;
+    hasher.update(safe_relative.to_string_lossy().replace('\\', "/").as_bytes());
+    hasher.update([0]);
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(&bytes);
+    hasher.update([0xff]);
+    Ok(())
+}
+
+fn ppte_hash_file_tree(root: &Path, files: &[PathBuf]) -> Result<String, String> {
+    let mut sorted = files.to_vec();
+    sorted.sort_by_key(|path| path.to_string_lossy().replace('\\', "/"));
+    let mut hasher = Sha256::new();
+    for relative in sorted {
+        update_sha256_with_file(&mut hasher, root, &relative)?;
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn load_ppte_shared_source(source_path: &str, group_id: &str) -> Result<PpteSharedSourceData, String> {
+    let root = canonical_ppte_root(source_path)?;
+    let manifest_content = fs::read_to_string(root.join("manifest.json"))
+        .map_err(|e| format!("Failed to read source PPTE manifest: {}", e))?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_content)
+        .map_err(|e| format!("Failed to parse source PPTE manifest: {}", e))?;
+    let source_deck_id = manifest.get("deckId").and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "SOURCE_NEEDS_STABLE_IDS: source PPTE has no deckId".to_string())?
+        .to_string();
+    let groups = manifest.get("sharedGroups").and_then(|value| value.as_array())
+        .ok_or_else(|| "GROUP_NOT_FOUND: source PPTE has no shared groups".to_string())?;
+    let group = groups.iter()
+        .find(|group| group.get("id").and_then(|value| value.as_str()) == Some(group_id))
+        .ok_or_else(|| format!("GROUP_NOT_FOUND: {}", group_id))?;
+    let name = group.get("name").and_then(|value| value.as_str()).unwrap_or("未命名页面组").to_string();
+    let slide_ids = group.get("slideIds").and_then(|value| value.as_array())
+        .ok_or_else(|| format!("GROUP_INVALID: {} has no slideIds", group_id))?;
+    if slide_ids.is_empty() {
+        return Err(format!("GROUP_INVALID: {} has no pages", group_id));
+    }
+    let manifest_slides = manifest.get("slides").and_then(|value| value.as_array())
+        .ok_or_else(|| "SOURCE_INVALID: source PPTE has no slides".to_string())?;
+
+    let mut slides = Vec::new();
+    let mut selected_files = HashSet::new();
+    let mut selected_notes = HashSet::new();
+    for slide_id_value in slide_ids {
+        let slide_id = slide_id_value.as_str()
+            .ok_or_else(|| format!("GROUP_INVALID: {} contains a non-string slideId", group_id))?;
+        let slide = manifest_slides.iter()
+            .find(|slide| slide.get("id").and_then(|value| value.as_str()) == Some(slide_id))
+            .ok_or_else(|| format!("GROUP_INVALID: source slide is missing: {}", slide_id))?;
+        let file = slide.get("file").and_then(|value| value.as_str())
+            .ok_or_else(|| format!("SOURCE_INVALID: slide {} has no file", slide_id))?;
+        let safe_file = ppte_safe_relative_path(file)?;
+        if safe_file.starts_with(".ppte-links") {
+            return Err(format!("GROUP_INVALID: linked snapshot page cannot become a source: {}", file));
+        }
+        if !root.join(&safe_file).is_file() {
+            return Err(format!("SOURCE_INVALID: slide file is missing: {}", file));
+        }
+        selected_files.insert(safe_file.clone());
+        let note = ppte_note_path_for_slide(slide, file)?;
+        if root.join(&note).is_file() {
+            selected_notes.insert(note);
+        }
+        slides.push(PpteSharedSourceSlide {
+            id: slide_id.to_string(),
+            file: safe_file.to_string_lossy().replace('\\', "/"),
+            title: slide.get("title").and_then(|value| value.as_str()).unwrap_or("未命名").to_string(),
+            slide_type: slide.get("slide_type").and_then(|value| value.as_str()).unwrap_or("content").to_string(),
+        });
+    }
+
+    let mut all_slide_files = HashSet::new();
+    let mut all_note_files = HashSet::new();
+    for slide in manifest_slides {
+        let Some(file) = slide.get("file").and_then(|value| value.as_str()) else { continue; };
+        let safe_file = ppte_safe_relative_path(file)?;
+        all_slide_files.insert(safe_file);
+        all_note_files.insert(ppte_note_path_for_slide(slide, file)?);
+    }
+
+    let mut discovered = Vec::new();
+    collect_ppte_snapshot_files(&root, &root, &mut discovered)?;
+    let manifest_path = PathBuf::from("manifest.json");
+    let mut files: Vec<PathBuf> = discovered.into_iter()
+        .filter(|relative| relative != &manifest_path)
+        .filter(|relative| {
+            !all_slide_files.contains(relative) || selected_files.contains(relative)
+        })
+        .filter(|relative| {
+            !all_note_files.contains(relative) || selected_notes.contains(relative)
+        })
+        .collect();
+    files.sort_by_key(|path| path.to_string_lossy().replace('\\', "/"));
+    files.dedup();
+
+    let mut hasher = Sha256::new();
+    hasher.update(group_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(name.as_bytes());
+    hasher.update([0]);
+    for slide in &slides {
+        hasher.update(slide.id.as_bytes());
+        hasher.update([0]);
+        hasher.update(slide.file.as_bytes());
+        hasher.update([0]);
+        hasher.update(slide.title.as_bytes());
+        hasher.update([0]);
+        hasher.update(slide.slide_type.as_bytes());
+        hasher.update([0xff]);
+    }
+    for relative in &files {
+        update_sha256_with_file(&mut hasher, &root, relative)?;
+    }
+    let content_hash = format!("{:x}", hasher.finalize());
+
+    Ok(PpteSharedSourceData {
+        root,
+        source_deck_id,
+        group_id: group_id.to_string(),
+        name,
+        slides,
+        files,
+        content_hash,
+    })
+}
+
+fn ppte_validate_group_id(group_id: &str) -> Result<(), String> {
+    if group_id.is_empty() || !group_id.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-')) {
+        return Err(format!("Unsafe shared PPTE group id: {}", group_id));
+    }
+    Ok(())
+}
+
+fn ppte_shared_group_inspect_impl(source_path: String, group_id: String) -> Result<PpteSharedGroupInfo, String> {
+    ppte_validate_group_id(&group_id)?;
+    let source = load_ppte_shared_source(&source_path, &group_id)?;
+    Ok(PpteSharedGroupInfo {
+        source_deck_id: source.source_deck_id,
+        group_id: source.group_id,
+        name: source.name,
+        content_hash: source.content_hash,
+        slides: source.slides.into_iter().map(|slide| PpteSharedSlideInfo {
+            source_slide_id: slide.id,
+            file: slide.file,
+            title: slide.title,
+            slide_type: slide.slide_type,
+        }).collect(),
+    })
+}
+
+#[tauri::command]
+async fn ppte_shared_group_inspect(source_path: String, group_id: String) -> Result<PpteSharedGroupInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || ppte_shared_group_inspect_impl(source_path, group_id))
+        .await
+        .map_err(|e| format!("Shared PPTE inspection task failed: {}", e))?
+}
+
+fn ppte_shared_group_snapshot_impl(
+    source_path: String,
+    target_path: String,
+    group_id: String,
+) -> Result<PpteSharedSnapshotResult, String> {
+    ppte_validate_group_id(&group_id)?;
+    let source = load_ppte_shared_source(&source_path, &group_id)?;
+    let target_root = canonical_ppte_root(&target_path)?;
+    if source.root == target_root {
+        return Err("A PPTE cannot link a shared group from itself".to_string());
+    }
+
+    let expected_snapshot_hash = ppte_hash_file_tree(&source.root, &source.files)?;
+    let mut snapshot_root = PathBuf::from(".ppte-links")
+        .join(&group_id)
+        .join("snapshots")
+        .join(&source.content_hash);
+    let mut final_dir = target_root.join(&snapshot_root);
+    if final_dir.is_dir() {
+        let mut existing_files = Vec::new();
+        collect_ppte_snapshot_files(&final_dir, &final_dir, &mut existing_files)?;
+        let existing_hash = ppte_hash_file_tree(&final_dir, &existing_files)?;
+        if existing_hash != expected_snapshot_hash {
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
+                .unwrap_or_default().as_nanos();
+            snapshot_root = PathBuf::from(".ppte-links")
+                .join(&group_id)
+                .join("snapshots")
+                .join(format!("{}-restored-{}", source.content_hash, timestamp));
+            final_dir = target_root.join(&snapshot_root);
+        }
+    }
+    if !final_dir.is_dir() {
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
+            .unwrap_or_default().as_nanos();
+        let temp_dir = target_root.join(".ppte-links")
+            .join(&group_id)
+            .join("snapshots")
+            .join(format!(".tmp-{}-{}", std::process::id(), timestamp));
+        fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create shared PPTE snapshot: {}", e))?;
+        let copy_result = (|| -> Result<(), String> {
+            for relative in &source.files {
+                let source_file = source.root.join(relative);
+                let destination = temp_dir.join(relative);
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("Failed to create snapshot folder {}: {}", parent.display(), e))?;
+                }
+                fs::copy(&source_file, &destination)
+                    .map_err(|e| format!("Failed to copy shared PPTE file {}: {}", relative.display(), e))?;
+            }
+            let copied_hash = ppte_hash_file_tree(&temp_dir, &source.files)?;
+            if copied_hash.is_empty() {
+                return Err("Shared PPTE snapshot hash is empty".to_string());
+            }
+            if let Some(parent) = final_dir.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create snapshot parent {}: {}", parent.display(), e))?;
+            }
+            fs::rename(&temp_dir, &final_dir)
+                .map_err(|e| format!("Failed to publish shared PPTE snapshot: {}", e))?;
+            Ok(())
+        })();
+        if copy_result.is_err() {
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+        copy_result?;
+    }
+
+    let mut snapshot_files = Vec::new();
+    collect_ppte_snapshot_files(&final_dir, &final_dir, &mut snapshot_files)?;
+    let snapshot_hash = ppte_hash_file_tree(&final_dir, &snapshot_files)?;
+    if snapshot_hash != expected_snapshot_hash {
+        return Err("Shared PPTE snapshot verification failed after copy".to_string());
+    }
+    let snapshot_root_string = snapshot_root.to_string_lossy().replace('\\', "/");
+    let slides = source.slides.into_iter().map(|slide| PpteSharedSnapshotSlide {
+        source_slide_id: slide.id,
+        target_file: format!("{}/{}", snapshot_root_string, slide.file),
+        title: slide.title,
+        slide_type: slide.slide_type,
+    }).collect();
+
+    Ok(PpteSharedSnapshotResult {
+        source_deck_id: source.source_deck_id,
+        group_id: source.group_id,
+        name: source.name,
+        content_hash: source.content_hash,
+        snapshot_hash,
+        snapshot_root: snapshot_root_string,
+        slides,
+    })
+}
+
+#[tauri::command]
+async fn ppte_shared_group_snapshot(
+    source_path: String,
+    target_path: String,
+    group_id: String,
+) -> Result<PpteSharedSnapshotResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ppte_shared_group_snapshot_impl(source_path, target_path, group_id)
+    })
+    .await
+    .map_err(|e| format!("Shared PPTE snapshot task failed: {}", e))?
+}
+
+fn ppte_shared_snapshot_hash_impl(target_path: String, snapshot_root: String) -> Result<String, String> {
+    let target_root = canonical_ppte_root(&target_path)?;
+    let safe_relative = ppte_safe_relative_path(&snapshot_root)?;
+    if !safe_relative.starts_with(".ppte-links") {
+        return Err("Shared PPTE snapshot must be inside .ppte-links".to_string());
+    }
+    let snapshot_dir = fs::canonicalize(target_root.join(&safe_relative))
+        .map_err(|e| format!("Shared PPTE snapshot is missing: {}", e))?;
+    if !snapshot_dir.starts_with(&target_root) || !snapshot_dir.is_dir() {
+        return Err("Shared PPTE snapshot escapes the target PPTE".to_string());
+    }
+    let mut files = Vec::new();
+    collect_ppte_snapshot_files(&snapshot_dir, &snapshot_dir, &mut files)?;
+    ppte_hash_file_tree(&snapshot_dir, &files)
+}
+
+#[tauri::command]
+async fn ppte_shared_snapshot_hash(target_path: String, snapshot_root: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ppte_shared_snapshot_hash_impl(target_path, snapshot_root)
+    })
+    .await
+    .map_err(|e| format!("Shared PPTE snapshot hash task failed: {}", e))?
+}
+
 #[tauri::command]
 fn watch_ppte_folder(
     app_handle: tauri::AppHandle,
@@ -1713,15 +2415,15 @@ fn save_ppt_extra(
     slide_files: Vec<(String, String)>,
     expected_mtimes: Option<Vec<ExpectedFileStat>>,
 ) -> Result<SaveResult, String> {
-    let base_dir = PathBuf::from(&folder_path);
+    let base_dir = canonical_ppte_root(&folder_path)?;
     let mut saved = Vec::new();
 
     if let Some(expected_files) = expected_mtimes {
         let mut conflicts = Vec::new();
 
         for expected in expected_files {
-            let relative_path = expected.path.trim_start_matches('/').trim_start_matches('\\');
-            let file_path = base_dir.join(relative_path);
+            let relative_path = ppte_safe_relative_path(&expected.path)?;
+            let file_path = ppte_safe_destination(&base_dir, &relative_path)?;
             let current = file_stat_for_path(&file_path, expected.path.clone());
             let expected_exists = expected.exists.unwrap_or(expected.mtime_ms.is_some() || expected.size.is_some());
             let changed = if expected_exists != current.exists {
@@ -1753,7 +2455,12 @@ fn save_ppt_extra(
 
     // Save each slide file
     for (filename, content) in slide_files {
-        let file_path = base_dir.join(&filename);
+        let relative = ppte_safe_relative_path(&filename)?;
+        let file_path = ppte_safe_destination(&base_dir, &relative)?;
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create folder for {}: {}", filename, e))?;
+        }
         let file_ext = file_path.extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
@@ -1915,6 +2622,135 @@ fn clear_gitee_token() {
         let _ = entry.delete_credential();
     }
     let _ = clear_gitee_token_macos_security();
+}
+
+fn caption_keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(CAPTION_KEYRING_SERVICE, CAPTION_KEYRING_USER)
+        .map_err(|e| format!("无法打开系统钥匙串：{}", e))
+}
+
+#[cfg(target_os = "macos")]
+fn read_caption_token_macos_security() -> Result<String, String> {
+    let output = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            CAPTION_KEYRING_SERVICE,
+            "-a",
+            CAPTION_KEYRING_USER,
+            "-w",
+        ])
+        .output()
+        .map_err(|e| format!("无法读取 macOS 钥匙串：{}", e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_caption_token_macos_security() -> Result<String, String> {
+    Err("当前平台不支持 macOS 钥匙串回退".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn store_caption_token_macos_security(token: &str) -> Result<(), String> {
+    let output = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-s",
+            CAPTION_KEYRING_SERVICE,
+            "-a",
+            CAPTION_KEYRING_USER,
+            "-w",
+            token,
+        ])
+        .output()
+        .map_err(|e| format!("无法写入 macOS 钥匙串：{}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn store_caption_token_macos_security(_token: &str) -> Result<(), String> {
+    Err("当前平台不支持 macOS 钥匙串回退".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn clear_caption_token_macos_security() -> Result<(), String> {
+    let output = Command::new("security")
+        .args([
+            "delete-generic-password",
+            "-s",
+            CAPTION_KEYRING_SERVICE,
+            "-a",
+            CAPTION_KEYRING_USER,
+        ])
+        .output()
+        .map_err(|e| format!("无法清除 macOS 钥匙串：{}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clear_caption_token_macos_security() -> Result<(), String> {
+    Err("当前平台不支持 macOS 钥匙串回退".to_string())
+}
+
+fn read_caption_token() -> Result<String, String> {
+    if let Ok(entry) = caption_keyring_entry() {
+        if let Ok(token) = entry.get_password() {
+            if !token.trim().is_empty() {
+                return Ok(token);
+            }
+        }
+    }
+    let token = read_caption_token_macos_security()
+        .map_err(|_| "尚未配置阿里云百炼字幕 API Key".to_string())?;
+    if token.trim().is_empty() {
+        Err("尚未配置阿里云百炼字幕 API Key".to_string())
+    } else {
+        Ok(token)
+    }
+}
+
+fn store_caption_token(token: &str) -> Result<(), String> {
+    let keyring_result = caption_keyring_entry().and_then(|entry| {
+        entry
+            .set_password(token)
+            .map_err(|e| format!("无法保存字幕 API Key：{}", e))
+    });
+    if caption_keyring_entry()
+        .and_then(|entry| entry.get_password().map_err(|e| e.to_string()))
+        .map(|stored| stored.trim() == token)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    store_caption_token_macos_security(token).map_err(|fallback_error| {
+        if let Err(keyring_error) = keyring_result {
+            format!("{}；macOS 钥匙串回退也失败：{}", keyring_error, fallback_error)
+        } else {
+            format!("字幕 API Key 校验失败；macOS 钥匙串回退也失败：{}", fallback_error)
+        }
+    })?;
+    Ok(())
+}
+
+fn clear_caption_token() {
+    if let Ok(entry) = caption_keyring_entry() {
+        let _ = entry.delete_credential();
+    }
+    let _ = clear_caption_token_macos_security();
 }
 
 fn sanitize_gitee_repo_name(name: &str) -> String {
@@ -2464,6 +3300,124 @@ mod ppte_save_tests {
     }
 
     #[test]
+    fn save_ppt_extra_supports_safe_nested_slide_paths() {
+        let dir = unique_temp_dir("save-nested");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("manifest.json"), r#"{"title":"Demo","slides":[]}"#).unwrap();
+
+        save_ppt_extra(
+            dir.to_string_lossy().to_string(),
+            r#"{"title":"Demo","slides":[{"file":"nested/slide.html","title":"One"}]}"#.to_string(),
+            vec![("nested/slide.html".to_string(), "<html>nested</html>".to_string())],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("nested").join("slide.html")).unwrap(), "<html>nested</html>");
+        assert!(save_ppt_extra(
+            dir.to_string_lossy().to_string(),
+            r#"{"title":"Demo","slides":[]}"#.to_string(),
+            vec![("../escape.html".to_string(), "bad".to_string())],
+            None,
+        ).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shared_group_snapshot_is_versioned_and_detects_changes() {
+        let source = unique_temp_dir("shared-source");
+        let target = unique_temp_dir("shared-target");
+        fs::create_dir_all(source.join("images")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let source_manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "deckId": "deck_source",
+            "title": "Source",
+            "slides": [
+                {"id":"slide_a","file":"slide01.html","title":"A","slide_type":"content"},
+                {"id":"slide_b","file":"slide02.html","title":"B","slide_type":"content"}
+            ],
+            "sharedGroups": [
+                {"id":"group_demo","name":"Reusable","slideIds":["slide_a"]}
+            ],
+            "linkedGroups": []
+        });
+        fs::write(source.join("manifest.json"), serde_json::to_string_pretty(&source_manifest).unwrap()).unwrap();
+        fs::write(source.join("slide01.html"), "<html><link href=\"style.css\">A</html>").unwrap();
+        fs::write(source.join("slide01.note"), "note A").unwrap();
+        fs::write(source.join("slide02.html"), "<html>B</html>").unwrap();
+        fs::write(source.join("slide02.note"), "note B").unwrap();
+        fs::write(source.join("style.css"), "body { color: red; }").unwrap();
+        fs::write(source.join("images").join("cover.png"), "image").unwrap();
+        fs::write(target.join("manifest.json"), r#"{"schemaVersion":2,"deckId":"deck_target","title":"Target","slides":[]}"#).unwrap();
+
+        let first = ppte_shared_group_snapshot_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            "group_demo".to_string(),
+        ).unwrap();
+        assert_eq!(first.source_deck_id, "deck_source");
+        assert_eq!(first.slides.len(), 1);
+        assert!(target.join(&first.snapshot_root).join("slide01.html").is_file());
+        assert!(target.join(&first.snapshot_root).join("slide01.note").is_file());
+        assert!(target.join(&first.snapshot_root).join("style.css").is_file());
+        assert!(target.join(&first.snapshot_root).join("images").join("cover.png").is_file());
+        assert!(!target.join(&first.snapshot_root).join("slide02.html").exists());
+        assert!(!target.join(&first.snapshot_root).join("slide02.note").exists());
+        assert_eq!(
+            ppte_shared_snapshot_hash_impl(
+                target.to_string_lossy().to_string(),
+                first.snapshot_root.clone(),
+            ).unwrap(),
+            first.snapshot_hash,
+        );
+
+        fs::write(source.join("slide01.html"), "<html><link href=\"style.css\">A updated</html>").unwrap();
+        let inspected = ppte_shared_group_inspect_impl(
+            source.to_string_lossy().to_string(),
+            "group_demo".to_string(),
+        ).unwrap();
+        assert_ne!(inspected.content_hash, first.content_hash);
+        let second = ppte_shared_group_snapshot_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            "group_demo".to_string(),
+        ).unwrap();
+        assert_ne!(second.snapshot_root, first.snapshot_root);
+        assert!(target.join(&first.snapshot_root).is_dir());
+        assert!(target.join(&second.snapshot_root).is_dir());
+
+        fs::write(target.join(&second.snapshot_root).join("slide01.html"), "locally changed").unwrap();
+        let changed_hash = ppte_shared_snapshot_hash_impl(
+            target.to_string_lossy().to_string(),
+            second.snapshot_root.clone(),
+        ).unwrap();
+        assert_ne!(changed_hash, second.snapshot_hash);
+
+        let restored = ppte_shared_group_snapshot_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            "group_demo".to_string(),
+        ).unwrap();
+        assert_ne!(restored.snapshot_root, second.snapshot_root);
+        assert!(restored.snapshot_root.contains("-restored-"));
+        assert_eq!(
+            fs::read_to_string(target.join(&restored.snapshot_root).join("slide01.html")).unwrap(),
+            "<html><link href=\"style.css\">A updated</html>",
+        );
+        assert_eq!(
+            ppte_shared_snapshot_hash_impl(
+                target.to_string_lossy().to_string(),
+                restored.snapshot_root.clone(),
+            ).unwrap(),
+            restored.snapshot_hash,
+        );
+
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
     fn gitee_repo_name_is_filesystem_and_remote_safe() {
         assert_eq!(sanitize_gitee_repo_name("  My PPTE: Demo/2026  "), "my-ppte-demo-2026");
         assert!(sanitize_gitee_repo_name("...").starts_with("ppte-"));
@@ -2588,6 +3542,259 @@ mod ppte_save_tests {
 
         fs::remove_dir_all(dir).unwrap();
     }
+}
+
+fn local_ppte_agent_node_path() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from("/opt/homebrew/bin/node"),
+        PathBuf::from("/usr/local/bin/node"),
+        PathBuf::from("/usr/bin/node"),
+    ];
+    if let Some(path) = candidates.into_iter().find(|path| path.is_file() && local_ppte_agent_node_supported(path)) {
+        return Some(path);
+    }
+    let path = PathBuf::from("node");
+    local_ppte_agent_node_supported(&path).then_some(path)
+}
+
+fn local_ppte_agent_node_supported(path: &std::path::Path) -> bool {
+    Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|version| version.trim().trim_start_matches('v').split('.').next()?.parse::<u32>().ok())
+        .map(|major| major >= 20)
+        .unwrap_or(false)
+}
+
+fn configured_local_ppte_agent(app_handle: &tauri::AppHandle) -> Result<(AppConfig, PathBuf, PathBuf), String> {
+    let config = read_app_config(app_handle.clone())?;
+    if config.local_ppte_agent_enabled != Some(true) {
+        return Err("本地 Agent 实验功能尚未启用".to_string());
+    }
+    let root = config
+        .local_ppte_agent_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "请先配置本地 Agent 路径".to_string())?;
+    let cli = root.join("src").join("cli.mjs");
+    if !root.is_dir() || !cli.is_file() {
+        return Err(format!("本地 Agent 目录无效：{}", root.display()));
+    }
+    let node = local_ppte_agent_node_path().ok_or_else(|| "未找到 Node.js 20+，请先安装或配置 PATH".to_string())?;
+    Ok((config, root, node))
+}
+
+async fn verify_local_agent_admin(config: &AppConfig, auth_token: &str) -> Result<(), String> {
+    if auth_token.trim().is_empty() {
+        return Err("请先登录管理员账号".to_string());
+    }
+    let server = config
+        .auth_server
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("https://design.hz-study-system.com")
+        .trim_end_matches('/');
+    let response = reqwest::Client::new()
+        .get(format!("{}/api/web/auth/me", server))
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .map_err(|e| format!("无法验证管理员身份：{}", e))?;
+    if !response.status().is_success() {
+        return Err("管理员登录已失效，请重新登录".to_string());
+    }
+    let user: serde_json::Value = response.json().await.map_err(|e| format!("管理员身份响应无效：{}", e))?;
+    if user.get("role").and_then(|value| value.as_str()) != Some("admin") {
+        return Err("本地 Agent 实验室仅对管理员开放".to_string());
+    }
+    Ok(())
+}
+
+fn local_agent_job_dir(output_dir: &str) -> PathBuf {
+    PathBuf::from(format!("{}.agent-job", output_dir.trim_end_matches(std::path::MAIN_SEPARATOR)))
+}
+
+fn local_agent_log_files(job_dir: &std::path::Path) -> Result<(fs::File, fs::File, PathBuf), String> {
+    fs::create_dir_all(job_dir).map_err(|e| format!("无法创建任务目录：{}", e))?;
+    let log_path = job_dir.join("desktop-agent.log");
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("无法创建 Agent 日志：{}", e))?;
+    let stderr = stdout.try_clone().map_err(|e| format!("无法打开 Agent 日志：{}", e))?;
+    Ok((stdout, stderr, log_path))
+}
+
+fn spawn_local_agent(
+    node: &std::path::Path,
+    agent_root: &std::path::Path,
+    args: &[String],
+    job_dir: &std::path::Path,
+) -> Result<(u32, PathBuf), String> {
+    let (stdout, stderr, log_path) = local_agent_log_files(job_dir)?;
+    let child = Command::new(node)
+        .current_dir(agent_root)
+        .arg("src/cli.mjs")
+        .args(args)
+        .env("PPTE_AGENT_DESKTOP", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|e| format!("无法启动本地 Agent：{}", e))?;
+    Ok((child.id(), log_path))
+}
+
+#[tauri::command]
+fn local_ppte_agent_status(app_handle: tauri::AppHandle) -> Result<LocalPpteAgentStatus, String> {
+    let config = read_app_config(app_handle)?;
+    let enabled = config.local_ppte_agent_enabled == Some(true);
+    let agent_path = config.local_ppte_agent_path.clone();
+    let configured = agent_path
+        .as_deref()
+        .map(|value| PathBuf::from(value).join("src").join("cli.mjs").is_file())
+        .unwrap_or(false);
+    let node_path = local_ppte_agent_node_path().map(|path| path.to_string_lossy().to_string());
+    let ready = enabled && configured && node_path.is_some();
+    let message = if ready {
+        "本地 Agent 已就绪".to_string()
+    } else if !enabled {
+        "本地 Agent 实验功能未启用".to_string()
+    } else if !configured {
+        "本地 Agent 路径无效".to_string()
+    } else {
+        "未找到 Node.js 20+".to_string()
+    };
+    Ok(LocalPpteAgentStatus { enabled, configured, agent_path, node_path, ready, message })
+}
+
+#[tauri::command]
+async fn local_ppte_agent_start(
+    app_handle: tauri::AppHandle,
+    brief: serde_json::Value,
+    auth_token: String,
+) -> Result<LocalPpteAgentLaunch, String> {
+    let title = brief.get("title").and_then(|value| value.as_str()).unwrap_or_default().trim();
+    let output_dir = brief.get("outputDir").and_then(|value| value.as_str()).unwrap_or_default().trim();
+    let mode = brief.get("mode").and_then(|value| value.as_str()).unwrap_or("autopilot");
+    let target_slide_count = brief.get("targetSlideCount").and_then(|value| value.as_u64()).unwrap_or(0);
+    if title.is_empty() || output_dir.is_empty() {
+        return Err("标题和输出目录不能为空".to_string());
+    }
+    let outline_source = brief.get("outlineSource").and_then(|value| value.as_object()).ok_or_else(|| "缺少页面大纲来源".to_string())?;
+    let outline_kind = outline_source.get("kind").and_then(|value| value.as_str()).unwrap_or_default();
+    let outline_ready = match outline_kind {
+        "text" => outline_source.get("text").and_then(|value| value.as_str()).map(|value| !value.trim().is_empty()).unwrap_or(false),
+        "file" => outline_source
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(|value| PathBuf::from(value).is_file())
+            .unwrap_or(false),
+        _ => false,
+    };
+    if !outline_ready {
+        return Err("页面大纲为空，或选择的大纲文件不存在".to_string());
+    }
+    if !(3..=60).contains(&target_slide_count) {
+        return Err("目标页数必须是 3～60，并包含封面和总结".to_string());
+    }
+    if mode != "autopilot" && mode != "guided" {
+        return Err("制作模式无效".to_string());
+    }
+    let references = brief.get("references").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    if references.len() > 20 {
+        return Err("参考资料最多添加 20 项".to_string());
+    }
+    for reference in &references {
+        let kind = reference.get("kind").and_then(|value| value.as_str()).unwrap_or_default();
+        if kind == "text" {
+            if reference.get("text").and_then(|value| value.as_str()).map(|value| value.trim().is_empty()).unwrap_or(true) {
+                return Err("存在空的粘贴参考资料".to_string());
+            }
+            continue;
+        }
+        let source_path = reference.get("path").and_then(|value| value.as_str()).unwrap_or_default();
+        let valid = match kind {
+            "file" => PathBuf::from(source_path).is_file(),
+            "folder" => PathBuf::from(source_path).is_dir(),
+            "ppte-local" => PathBuf::from(source_path).join("manifest.json").is_file(),
+            _ => false,
+        };
+        if !valid {
+            return Err(format!("参考资料无效或已移动：{}", source_path));
+        }
+    }
+    let (config, agent_root, node) = configured_local_ppte_agent(&app_handle)?;
+    verify_local_agent_admin(&config, &auth_token).await?;
+
+    let output = PathBuf::from(output_dir);
+    if output.exists() && fs::read_dir(&output).map(|mut entries| entries.next().is_some()).unwrap_or(true) {
+        return Err("输出目录已存在且非空，请选择新的课件目录".to_string());
+    }
+    let job_dir = local_agent_job_dir(output_dir);
+    if job_dir.join("job.json").exists() {
+        return Err("该输出位置已经存在 Agent 任务，请使用恢复功能".to_string());
+    }
+    fs::create_dir_all(&job_dir).map_err(|e| e.to_string())?;
+    let brief_file = job_dir.join("desktop-brief.json");
+    let brief_json = serde_json::to_string_pretty(&brief).map_err(|e| format!("无法序列化任务资料：{}", e))?;
+    fs::write(&brief_file, format!("{}\n", brief_json)).map_err(|e| format!("无法保存任务资料：{}", e))?;
+
+    let args = vec![
+        "create".to_string(),
+        "--brief".to_string(), brief_file.to_string_lossy().to_string(),
+        "--use-app-config".to_string(),
+    ];
+    let (pid, log_path) = spawn_local_agent(&node, &agent_root, &args, &job_dir)?;
+    Ok(LocalPpteAgentLaunch {
+        job_dir: job_dir.to_string_lossy().to_string(),
+        output_dir: output.to_string_lossy().to_string(),
+        pid,
+        log_file: log_path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+async fn local_ppte_agent_action(
+    app_handle: tauri::AppHandle,
+    job_dir: String,
+    action: String,
+    auth_token: String,
+) -> Result<LocalPpteAgentLaunch, String> {
+    let allowed = ["resume", "approve-plan", "approve-style"];
+    if !allowed.contains(&action.as_str()) {
+        return Err("不支持的 Agent 操作".to_string());
+    }
+    let (config, agent_root, node) = configured_local_ppte_agent(&app_handle)?;
+    verify_local_agent_admin(&config, &auth_token).await?;
+    let job = PathBuf::from(&job_dir);
+    let job_json = job.join("job.json");
+    if !job_json.is_file() {
+        return Err("Agent 任务不存在".to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&job_json).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("任务状态损坏：{}", e))?;
+    let output_dir = value.get("outputDir").and_then(|item| item.as_str()).unwrap_or_default().to_string();
+    let args = vec![action, "--job".to_string(), job.to_string_lossy().to_string(), "--use-app-config".to_string()];
+    let (pid, log_path) = spawn_local_agent(&node, &agent_root, &args, &job)?;
+    Ok(LocalPpteAgentLaunch {
+        job_dir: job.to_string_lossy().to_string(),
+        output_dir,
+        pid,
+        log_file: log_path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn local_ppte_agent_read_job(job_dir: String) -> Result<serde_json::Value, String> {
+    let path = PathBuf::from(job_dir).join("job.json");
+    let content = fs::read_to_string(&path).map_err(|e| format!("任务状态尚未生成：{}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("任务状态无效：{}", e))
 }
 
 #[tauri::command]
@@ -3127,6 +4334,604 @@ async fn fetch_notifications(current_version: String, server_url: String) -> Res
     Ok(notifications)
 }
 
+// === Live Caption Commands ===
+
+type CaptionSocket = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+enum CaptionServerEvent {
+    Result(CaptionResultPayload),
+    Finished,
+    Failed(String),
+    Ignore,
+}
+
+fn caption_run_task_message(task_id: &str, model: CaptionModel) -> String {
+    let parameters = match model {
+        CaptionModel::FunAsr => serde_json::json!({
+            "format": "pcm",
+            "sample_rate": 16000,
+            "language_hints": ["zh"],
+            "max_sentence_silence": 800,
+            "heartbeat": true
+        }),
+        CaptionModel::Paraformer => serde_json::json!({
+            "format": "pcm",
+            "sample_rate": 16000,
+            "language_hints": ["zh"],
+            "disfluency_removal_enabled": true,
+            "semantic_punctuation_enabled": false,
+            "max_sentence_silence": 800,
+            "heartbeat": true
+        }),
+    };
+    serde_json::json!({
+        "header": {
+            "action": "run-task",
+            "task_id": task_id,
+            "streaming": "duplex"
+        },
+        "payload": {
+            "task_group": "audio",
+            "task": "asr",
+            "function": "recognition",
+            "model": model.model_id(),
+            "parameters": parameters,
+            "input": {}
+        }
+    })
+    .to_string()
+}
+
+fn caption_finish_task_message(task_id: &str) -> String {
+    serde_json::json!({
+        "header": {
+            "action": "finish-task",
+            "task_id": task_id,
+            "streaming": "duplex"
+        },
+        "payload": { "input": {} }
+    })
+    .to_string()
+}
+
+fn parse_caption_server_event(text: &str) -> Result<CaptionServerEvent, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("字幕服务返回了无效数据：{}", e))?;
+    let event = value["header"]["event"].as_str().unwrap_or_default();
+    match event {
+        "result-generated" => {
+            let sentence = &value["payload"]["output"]["sentence"];
+            if sentence["heartbeat"].as_bool().unwrap_or(false) {
+                return Ok(CaptionServerEvent::Ignore);
+            }
+            let text = sentence["text"].as_str().unwrap_or_default().trim();
+            if text.is_empty() {
+                return Ok(CaptionServerEvent::Ignore);
+            }
+            Ok(CaptionServerEvent::Result(CaptionResultPayload {
+                text: text.to_string(),
+                is_final: sentence["sentence_end"].as_bool().unwrap_or(false),
+                sentence_id: sentence["sentence_id"].as_i64().unwrap_or_default(),
+            }))
+        }
+        "task-finished" => Ok(CaptionServerEvent::Finished),
+        "task-failed" => {
+            let code = value["header"]["error_code"].as_str().unwrap_or("UNKNOWN");
+            let message = value["header"]["error_message"]
+                .as_str()
+                .unwrap_or("字幕识别任务失败");
+            Ok(CaptionServerEvent::Failed(format!("{}：{}", code, message)))
+        }
+        _ => Ok(CaptionServerEvent::Ignore),
+    }
+}
+
+fn caption_event_is_empty_audio(event: &CaptionServerEvent) -> bool {
+    matches!(event, CaptionServerEvent::Failed(message)
+        if message.starts_with("EmptyAudio")
+            || message.starts_with("SUCCESS_WITH_NO_VALID_FRAGMENT")
+            || message.starts_with("ASR_RESPONSE_HAVE_NO_WORDS"))
+}
+
+fn caption_result_should_emit(result: &CaptionResultPayload, final_only: bool) -> bool {
+    !final_only || result.is_final
+}
+
+fn emit_caption_status(app_handle: &tauri::AppHandle, state: &str, message: &str) {
+    let _ = app_handle.emit(
+        "caption-status",
+        CaptionStatusPayload {
+            state: state.to_string(),
+            message: message.to_string(),
+        },
+    );
+}
+
+fn emit_caption_server_event(
+    app_handle: &tauri::AppHandle,
+    event: CaptionServerEvent,
+    final_only: bool,
+) -> Result<bool, String> {
+    match event {
+        CaptionServerEvent::Result(result) => {
+            if !caption_result_should_emit(&result, final_only) {
+                return Ok(false);
+            }
+            app_handle
+                .emit("caption-result", result)
+                .map_err(|e| format!("无法广播字幕结果：{}", e))?;
+            Ok(false)
+        }
+        CaptionServerEvent::Finished => Ok(true),
+        CaptionServerEvent::Failed(message) => Err(message),
+        CaptionServerEvent::Ignore => Ok(false),
+    }
+}
+
+async fn connect_caption_socket(
+    api_key: &str,
+    model: CaptionModel,
+) -> Result<(CaptionSocket, String), String> {
+    let mut request = CAPTION_WS_URL
+        .into_client_request()
+        .map_err(|e| format!("无法创建字幕连接：{}", e))?;
+    let authorization = format!("Bearer {}", api_key.trim())
+        .parse()
+        .map_err(|e| format!("字幕 API Key 格式无效：{}", e))?;
+    request.headers_mut().insert("Authorization", authorization);
+    request.headers_mut().insert(
+        "user-agent",
+        "lecture-presenter-live-caption/1.0"
+            .parse()
+            .map_err(|e| format!("无法设置字幕客户端标识：{}", e))?,
+    );
+
+    let (mut socket, _) = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| "连接阿里云字幕服务超时".to_string())?
+    .map_err(|e| format!("无法连接阿里云字幕服务：{}", e))?;
+
+    let task_id = uuid::Uuid::new_v4().to_string();
+    socket
+        .send(Message::Text(caption_run_task_message(&task_id, model).into()))
+        .await
+        .map_err(|e| format!("无法启动字幕任务：{}", e))?;
+
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(20), socket.next())
+            .await
+            .map_err(|_| "等待字幕服务启动超时".to_string())?
+            .ok_or_else(|| "字幕服务在启动前关闭了连接".to_string())?
+            .map_err(|e| format!("字幕服务连接失败：{}", e))?;
+        match message {
+            Message::Text(text) => {
+                let value: serde_json::Value = serde_json::from_str(text.as_str())
+                    .map_err(|e| format!("字幕服务返回了无效数据：{}", e))?;
+                match value["header"]["event"].as_str().unwrap_or_default() {
+                    "task-started" => return Ok((socket, task_id)),
+                    "task-failed" => {
+                        let code = value["header"]["error_code"].as_str().unwrap_or("UNKNOWN");
+                        let message = value["header"]["error_message"]
+                            .as_str()
+                            .unwrap_or("字幕识别任务启动失败");
+                        return Err(format!("{}：{}", code, message));
+                    }
+                    _ => {}
+                }
+            }
+            Message::Ping(data) => {
+                socket
+                    .send(Message::Pong(data))
+                    .await
+                    .map_err(|e| format!("字幕连接心跳失败：{}", e))?;
+            }
+            Message::Close(_) => return Err("字幕服务在启动前关闭了连接".to_string()),
+            _ => {}
+        }
+    }
+}
+
+async fn finish_caption_socket(
+    socket: &mut CaptionSocket,
+    task_id: &str,
+    app_handle: Option<&tauri::AppHandle>,
+    final_only: bool,
+) -> Result<(), String> {
+    socket
+        .send(Message::Text(caption_finish_task_message(task_id).into()))
+        .await
+        .map_err(|e| format!("无法结束字幕任务：{}", e))?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .map_err(|_| "等待字幕任务结束超时".to_string())?
+            .ok_or_else(|| "字幕连接提前关闭".to_string())?
+            .map_err(|e| format!("字幕连接关闭失败：{}", e))?;
+        match message {
+            Message::Text(text) => {
+                let event = parse_caption_server_event(text.as_str())?;
+                // Starting and stopping before the presenter speaks is a normal user action.
+                // ASR models may report an empty session as a service error instead of task-finished.
+                if caption_event_is_empty_audio(&event) {
+                    return Ok(());
+                }
+                if let Some(handle) = app_handle {
+                    if emit_caption_server_event(handle, event, final_only)? {
+                        return Ok(());
+                    }
+                } else {
+                    match event {
+                        CaptionServerEvent::Finished => return Ok(()),
+                        CaptionServerEvent::Failed(message) => return Err(message),
+                        _ => {}
+                    }
+                }
+            }
+            Message::Ping(data) => {
+                socket
+                    .send(Message::Pong(data))
+                    .await
+                    .map_err(|e| format!("字幕连接心跳失败：{}", e))?;
+            }
+            Message::Close(_) => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
+#[tauri::command]
+fn caption_token_status() -> Result<TokenStatus, String> {
+    let configured = read_caption_token()
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+    Ok(TokenStatus { configured })
+}
+
+#[tauri::command]
+fn caption_token_set(token: String) -> Result<TokenStatus, String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("字幕 API Key 不能为空".to_string());
+    }
+    store_caption_token(token)?;
+    Ok(TokenStatus { configured: true })
+}
+
+#[tauri::command]
+fn caption_token_clear() -> Result<TokenStatus, String> {
+    clear_caption_token();
+    Ok(TokenStatus { configured: false })
+}
+
+#[tauri::command]
+async fn caption_test(model: Option<String>) -> Result<String, String> {
+    let model = CaptionModel::from_setting(model.as_deref())?;
+    let api_key = read_caption_token()?;
+    let (mut socket, task_id) = connect_caption_socket(&api_key, model).await?;
+    socket
+        .send(Message::Binary(vec![0_u8; 3200].into()))
+        .await
+        .map_err(|e| format!("无法发送字幕测试音频：{}", e))?;
+    finish_caption_socket(&mut socket, &task_id, None, false).await?;
+    let _ = socket.close(None).await;
+    Ok(format!("阿里云 {} 实时字幕连接正常", model.display_name()))
+}
+
+#[tauri::command]
+async fn caption_start(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, LiveCaptionState>,
+    model: Option<String>,
+    display_mode: Option<String>,
+) -> Result<(), String> {
+    let model = CaptionModel::from_setting(model.as_deref())?;
+    let final_only = caption_final_only(display_mode.as_deref())?;
+    emit_caption_status(&app_handle, "starting", "正在连接实时字幕…");
+
+    if let Some(previous) = state.active.lock().await.take() {
+        let _ = previous.sender.send(CaptionCommand::Stop).await;
+    }
+
+    let api_key = read_caption_token()?;
+    let (mut socket, task_id) = connect_caption_socket(&api_key, model).await.map_err(|error| {
+        emit_caption_status(&app_handle, "error", &error);
+        error
+    })?;
+    let (sender, mut receiver) = mpsc::channel::<CaptionCommand>(64);
+    let session = ActiveCaptionSession {
+        id: task_id.clone(),
+        sender: sender.clone(),
+    };
+    *state.active.lock().await = Some(session);
+
+    let active_state = state.active.clone();
+    let session_id = task_id.clone();
+    let task_app = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut failed = None::<String>;
+        emit_caption_status(&task_app, "listening", "字幕已开启");
+
+        'session: loop {
+            tokio::select! {
+                command = receiver.recv() => {
+                    match command {
+                        Some(CaptionCommand::Audio(bytes)) => {
+                            if let Err(error) = socket.send(Message::Binary(bytes.into())).await {
+                                failed = Some(format!("发送麦克风音频失败：{}", error));
+                                break 'session;
+                            }
+                        }
+                        Some(CaptionCommand::Stop) | None => {
+                            if let Err(error) = finish_caption_socket(&mut socket, &task_id, Some(&task_app), final_only).await {
+                                failed = Some(error);
+                            }
+                            break 'session;
+                        }
+                    }
+                }
+                incoming = socket.next() => {
+                    match incoming {
+                        Some(Ok(Message::Text(text))) => {
+                            match parse_caption_server_event(text.as_str())
+                                .and_then(|event| emit_caption_server_event(&task_app, event, final_only)) {
+                                Ok(true) => break 'session,
+                                Ok(false) => {}
+                                Err(error) => {
+                                    failed = Some(error);
+                                    break 'session;
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Ping(data))) => {
+                            if let Err(error) = socket.send(Message::Pong(data)).await {
+                                failed = Some(format!("字幕连接心跳失败：{}", error));
+                                break 'session;
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => {
+                            failed = Some("字幕服务连接已断开".to_string());
+                            break 'session;
+                        }
+                        Some(Err(error)) => {
+                            failed = Some(format!("字幕服务连接异常：{}", error));
+                            break 'session;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let _ = socket.close(None).await;
+        let mut active = active_state.lock().await;
+        let was_current = active.as_ref().map(|item| item.id.as_str()) == Some(session_id.as_str());
+        if was_current {
+            *active = None;
+        }
+        drop(active);
+
+        if was_current {
+            if let Some(error) = failed {
+                emit_caption_status(&task_app, "error", &error);
+            } else {
+                emit_caption_status(&task_app, "stopped", "字幕已关闭");
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn caption_audio_chunk(
+    state: tauri::State<'_, LiveCaptionState>,
+    audio_base64: String,
+) -> Result<(), String> {
+    if audio_base64.len() > 350_000 {
+        return Err("字幕音频分片过大".to_string());
+    }
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        audio_base64,
+    )
+    .map_err(|e| format!("字幕音频编码无效：{}", e))?;
+    let sender = state
+        .active
+        .lock()
+        .await
+        .as_ref()
+        .map(|session| session.sender.clone());
+    if let Some(sender) = sender {
+        sender
+            .send(CaptionCommand::Audio(bytes))
+            .await
+            .map_err(|_| "字幕会话已经结束".to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn caption_stop(state: tauri::State<'_, LiveCaptionState>) -> Result<(), String> {
+    let session = state.active.lock().await.as_ref().cloned();
+    if let Some(session) = session {
+        let _ = session.sender.send(CaptionCommand::Stop).await;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod live_caption_tests {
+    use super::*;
+
+    #[test]
+    fn run_task_uses_fun_asr_realtime_pcm16() {
+        let value: serde_json::Value =
+            serde_json::from_str(&caption_run_task_message("test-task", CaptionModel::FunAsr)).unwrap();
+        assert_eq!(value["header"]["action"], "run-task");
+        assert_eq!(value["payload"]["model"], "fun-asr-realtime");
+        assert_eq!(value["payload"]["parameters"]["format"], "pcm");
+        assert_eq!(value["payload"]["parameters"]["sample_rate"], 16000);
+        assert_eq!(value["payload"]["parameters"]["language_hints"][0], "zh");
+        assert!(value["payload"]["parameters"].get("disfluency_removal_enabled").is_none());
+    }
+
+    #[test]
+    fn run_task_supports_paraformer_disfluency_removal() {
+        let value: serde_json::Value = serde_json::from_str(&caption_run_task_message(
+            "test-task",
+            CaptionModel::Paraformer,
+        ))
+        .unwrap();
+        assert_eq!(value["payload"]["model"], "paraformer-realtime-v2");
+        assert_eq!(value["payload"]["parameters"]["format"], "pcm");
+        assert_eq!(value["payload"]["parameters"]["sample_rate"], 16000);
+        assert_eq!(
+            value["payload"]["parameters"]["disfluency_removal_enabled"],
+            true
+        );
+        assert_eq!(value["payload"]["parameters"]["max_sentence_silence"], 800);
+        assert_eq!(value["payload"]["parameters"]["heartbeat"], true);
+    }
+
+    #[test]
+    fn validates_caption_preferences() {
+        assert_eq!(
+            CaptionModel::from_setting(Some("paraformer-realtime-v2")).unwrap(),
+            CaptionModel::Paraformer
+        );
+        assert!(CaptionModel::from_setting(Some("unknown")).is_err());
+        assert!(caption_final_only(Some("stable")).unwrap());
+        assert!(!caption_final_only(Some("realtime")).unwrap());
+        assert!(caption_final_only(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn stable_display_hides_interim_results() {
+        let interim = CaptionResultPayload {
+            text: "正在修改".to_string(),
+            is_final: false,
+            sentence_id: 1,
+        };
+        let final_result = CaptionResultPayload {
+            text: "最终字幕。".to_string(),
+            is_final: true,
+            sentence_id: 1,
+        };
+        assert!(caption_result_should_emit(&interim, false));
+        assert!(!caption_result_should_emit(&interim, true));
+        assert!(caption_result_should_emit(&final_result, true));
+    }
+
+    #[test]
+    fn macos_bundle_grants_microphone_audio_input() {
+        let entitlements = include_str!("../Entitlements.plist");
+        assert!(entitlements.contains("com.apple.security.device.audio-input"));
+        assert!(entitlements.contains("<true/>"));
+
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(
+            config["bundle"]["macOS"]["entitlements"],
+            "./Entitlements.plist"
+        );
+    }
+
+    #[test]
+    fn parses_incremental_and_final_results() {
+        let partial = r#"{
+          "header":{"event":"result-generated"},
+          "payload":{"output":{"sentence":{"text":"演讲","sentence_end":false,"sentence_id":7,"heartbeat":false}}}
+        }"#;
+        match parse_caption_server_event(partial).unwrap() {
+            CaptionServerEvent::Result(result) => {
+                assert_eq!(result.text, "演讲");
+                assert!(!result.is_final);
+                assert_eq!(result.sentence_id, 7);
+            }
+            _ => panic!("expected a partial caption result"),
+        }
+
+        let final_result = r#"{
+          "header":{"event":"result-generated"},
+          "payload":{"output":{"sentence":{"text":"演讲宝。","sentence_end":true,"sentence_id":7,"heartbeat":false}}}
+        }"#;
+        match parse_caption_server_event(final_result).unwrap() {
+            CaptionServerEvent::Result(result) => {
+                assert_eq!(result.text, "演讲宝。");
+                assert!(result.is_final);
+            }
+            _ => panic!("expected a final caption result"),
+        }
+    }
+
+    #[test]
+    fn ignores_heartbeat_and_surfaces_service_failures() {
+        let heartbeat = r#"{
+          "header":{"event":"result-generated"},
+          "payload":{"output":{"sentence":{"text":"","sentence_end":false,"sentence_id":0,"heartbeat":true}}}
+        }"#;
+        assert!(matches!(
+            parse_caption_server_event(heartbeat).unwrap(),
+            CaptionServerEvent::Ignore
+        ));
+
+        let failure = r#"{
+          "header":{"event":"task-failed","error_code":"INVALID_API_KEY","error_message":"denied"},
+          "payload":{}
+        }"#;
+        match parse_caption_server_event(failure).unwrap() {
+            CaptionServerEvent::Failed(message) => {
+                assert!(message.contains("INVALID_API_KEY"));
+                assert!(message.contains("denied"));
+            }
+            _ => panic!("expected a caption service failure"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DASHSCOPE_API_KEY and network access"]
+    async fn live_fun_asr_connection_starts_and_finishes() {
+        let api_key = std::env::var("DASHSCOPE_API_KEY")
+            .expect("DASHSCOPE_API_KEY must be set for this ignored integration test");
+        let (mut socket, task_id) = connect_caption_socket(&api_key, CaptionModel::FunAsr)
+            .await
+            .unwrap();
+        socket
+            .send(Message::Binary(vec![0_u8; 3200].into()))
+            .await
+            .unwrap();
+        finish_caption_socket(&mut socket, &task_id, None, false)
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DASHSCOPE_API_KEY and network access"]
+    async fn live_paraformer_connection_starts_and_finishes() {
+        let api_key = std::env::var("DASHSCOPE_API_KEY")
+            .expect("DASHSCOPE_API_KEY must be set for this ignored integration test");
+        let (mut socket, task_id) = connect_caption_socket(&api_key, CaptionModel::Paraformer)
+            .await
+            .unwrap();
+        socket
+            .send(Message::Binary(vec![0_u8; 3200].into()))
+            .await
+            .unwrap();
+        finish_caption_socket(&mut socket, &task_id, None, false)
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    }
+}
+
 // === Speaker Mode Commands ===
 
 #[tauri::command]
@@ -3180,6 +4985,7 @@ async fn emit_slide_change(app_handle: tauri::AppHandle, slide_url: String) -> R
 pub fn run() {
     tauri::Builder::default()
         .manage(PpteWatcherState::default())
+        .manage(LiveCaptionState::default())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -3235,6 +5041,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_app_config,
+            auth_api_request,
             read_course_config,
             resolve_asset_path,
             read_file_bytes,
@@ -3247,6 +5054,8 @@ pub fn run() {
             save_course_config,
             get_app_data_dir,
             pick_files,
+            pick_reference_file,
+            pick_reference_files,
             pick_folder,
             import_course,
             export_template,
@@ -3258,6 +5067,9 @@ pub fn run() {
             stat_files,
             list_ppte_resources,
             import_ppte_resources,
+            ppte_shared_group_inspect,
+            ppte_shared_group_snapshot,
+            ppte_shared_snapshot_hash,
             watch_ppte_folder,
             unwatch_ppte_folder,
             save_ppt_extra,
@@ -3271,8 +5083,19 @@ pub fn run() {
             call_ai,
             call_ai_stream,
             test_ai_config,
+            local_ppte_agent_status,
+            local_ppte_agent_start,
+            local_ppte_agent_action,
+            local_ppte_agent_read_job,
             check_update,
             fetch_notifications,
+            caption_token_status,
+            caption_token_set,
+            caption_token_clear,
+            caption_test,
+            caption_start,
+            caption_audio_chunk,
+            caption_stop,
             open_audience_window,
             close_audience_window,
             emit_slide_change,

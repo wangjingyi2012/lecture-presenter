@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>观众窗口</title>
   <link rel="stylesheet" href="css/ppte-annotator.css">
+  <link rel="stylesheet" href="css/live-caption.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
@@ -38,7 +39,11 @@
 <body>
   <iframe id="slide-frame" sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-forms"></iframe>
   <div id="nav-layer" tabindex="0" aria-label="幻灯片导航层"></div>
+  <div id="audience-live-caption" class="live-caption-overlay" role="status" aria-live="polite" aria-atomic="true">
+    <div class="live-caption-text"></div>
+  </div>
   <script src="js/ppte-annotator.js"></script>
+  <script src="js/live-caption.js"></script>
   <script>
     const { listen, emit } = window.__TAURI__.event;
     let currentSlideUrl = '';
@@ -48,6 +53,7 @@
     const annotator = window.PpteAnnotator
       ? window.PpteAnnotator.create({ container: document.body, floatingToggle: true })
       : null;
+    window.LiveCaption?.initAudience?.();
 
     // Listen for slide-change events from the presenter window
     listen('slide-change', (event) => {

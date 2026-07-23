@@ -7,7 +7,9 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "test:ppte": "node scripts/test-ppt-extra-viewer.js",
+    "test:ppte-shared": "node scripts/test-ppte-shared-groups.js",
     "test:annotator": "node scripts/test-ppte-annotator.js",
+    "test:captions": "node scripts/test-live-caption.js",
     "build:release": "node scripts/build-obfuscated.js"
   },
   "devDependencies": {

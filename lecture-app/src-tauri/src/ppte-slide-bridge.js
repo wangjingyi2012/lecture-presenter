@@ -30,6 +30,7 @@
     if (e.key === 'f' || e.key === 'F') return 'play';
     if (e.key === 'p' || e.key === 'P') return 'annotate';
     if (e.key === 's' || e.key === 'S') return 'speaker';
+    if (e.key === 'c' || e.key === 'C') return 'caption';
     if (e.key === 'Escape') return 'escape';
     return '';
   }

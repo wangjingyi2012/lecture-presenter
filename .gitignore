@@ -42,3 +42,4 @@ sync-to-server.sh
 *.db
 *.sqlite
 *.sqlite3
+.gstack/

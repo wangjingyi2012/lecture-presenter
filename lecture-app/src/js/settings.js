@@ -6,6 +6,7 @@ window.Settings = {
     this.initCourseSelect(appConfig);
     this.initControls(appConfig);
     this.initDevSettings(appConfig);
+    window.LocalPpteAgent?.init(appConfig);
     this.initKeyboardShortcuts();
   },
 
@@ -138,6 +139,26 @@ window.Settings = {
     if (ppteOpenBtn) {
       ppteOpenBtn.onclick = () => {
         this.openPptExtra();
+      };
+    }
+
+    const ppteCloudBtn = document.getElementById('ppte-cloud-btn');
+    if (ppteCloudBtn) {
+      ppteCloudBtn.onclick = () => {
+        if (!window.Auth?.isLoggedIn?.()) {
+          window.Auth?.showLoginModal?.();
+          return;
+        }
+        if (!window.Auth?.isAdmin?.() && (window.Auth?.getMembership?.() || 1) < 2) {
+          const membershipUrl = window.Auth?.membershipUrl || 'https://design.hz-study-system.com/membership';
+          if (window.__TAURI__?.shell?.open) window.__TAURI__.shell.open(membershipUrl);
+          else window.open(membershipUrl, '_blank', 'noopener');
+          return;
+        }
+        const server = (appConfig.updateServer || 'https://design.hz-study-system.com').replace(/\/$/, '');
+        const url = `${server}/app/`;
+        if (window.__TAURI__?.shell?.open) window.__TAURI__.shell.open(url);
+        else window.open(url, '_blank', 'noopener');
       };
     }
 

@@ -4,8 +4,7 @@ window.Auth = {
   membershipUrl: 'https://design.hz-study-system.com/membership',
   _token: null,
   _user: null,
-  _captchaVerified: false,
-  _registerCaptchaVerified: false,
+  _captchaId: null,
   _benefits: null,
 
   log(msg) {
@@ -31,7 +30,6 @@ window.Auth = {
       }
 
       this._bindEvents();
-      this._initCaptcha();
       this._renderTitlebarButton();
 
       // Validate stored token with server (non-blocking)
@@ -91,17 +89,63 @@ window.Auth = {
     </svg>`;
   },
 
-  async login(username, password) {
-    try {
-      const resp = await fetch(`${this.serverUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
-      });
-      const data = await resp.json();
+  async _apiRequest(action, payload = null, token = null) {
+    if (window.__TAURI__?.core?.invoke) {
+      return window.__TAURI__.core.invoke('auth_api_request', { action, payload, token });
+    }
 
-      if (!resp.ok || !data.success) {
-        return { success: false, detail: data.detail || '登录失败' };
+    const routes = {
+      captcha: { method: 'GET', path: '/api/web/auth/captcha' },
+      login: { method: 'POST', path: '/api/web/auth/login' },
+      register: { method: 'POST', path: '/api/web/auth/register' },
+      me: { method: 'GET', path: '/api/web/auth/me' },
+    };
+    const route = routes[action];
+    if (!route) throw new Error('不支持的认证操作');
+
+    const headers = {};
+    const options = { method: route.method, headers };
+    if (payload !== null) {
+      headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(payload);
+    }
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const response = await fetch(`${this.serverUrl}${route.path}`, options);
+    const text = await response.text();
+    let data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (_) {
+        data = { detail: text };
+      }
+    }
+    return { ok: response.ok, status: response.status, data };
+  },
+
+  _errorDetail(data, fallback) {
+    if (typeof data?.detail === 'string') return data.detail;
+    if (Array.isArray(data?.detail)) {
+      const messages = data.detail.map(item => item?.msg).filter(Boolean);
+      if (messages.length) return messages.join('；');
+    }
+    if (typeof data?.message === 'string') return data.message;
+    return fallback;
+  },
+
+  async login(username, password, captchaCode) {
+    try {
+      const response = await this._apiRequest('login', {
+        username,
+        password,
+        captcha_id: this._captchaId,
+        captcha_code: captchaCode,
+      });
+      const data = response.data || {};
+
+      if (!response.ok || !data.token || !data.user) {
+        return { success: false, detail: this._errorDetail(data, '登录失败') };
       }
 
       this._setAuth(data.token, data.user);
@@ -116,17 +160,11 @@ window.Auth = {
 
   async register(username, password, email) {
     try {
-      const body = { username, password, email };
+      const response = await this._apiRequest('register', { username, password, email });
+      const data = response.data || {};
 
-      const resp = await fetch(`${this.serverUrl}/api/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      const data = await resp.json();
-
-      if (!resp.ok || !data.success) {
-        return { success: false, detail: data.detail || '注册失败' };
+      if (!response.ok || !data.token || !data.user) {
+        return { success: false, detail: this._errorDetail(data, '注册失败') };
       }
 
       this._setAuth(data.token, data.user);
@@ -155,6 +193,7 @@ window.Auth = {
     modal.classList.remove('hidden');
     this._switchTab('login');
     this._clearForm();
+    this._loadCaptcha();
   },
 
   hideLoginModal() {
@@ -177,17 +216,18 @@ window.Auth = {
   async _validateToken() {
     if (!this.serverUrl) return;
     try {
-      const resp = await fetch(`${this.serverUrl}/api/auth/me`, {
-        headers: { 'Authorization': `Bearer ${this._token}` }
-      });
+      const response = await this._apiRequest('me', null, this._token);
 
-      if (!resp.ok) {
-        this.log('Token validation failed, clearing auth');
-        this.logout();
-        return;
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          this.log('Token validation failed, clearing auth');
+          this.logout();
+          return;
+        }
+        throw new Error(this._errorDetail(response.data, `HTTP ${response.status}`));
       }
 
-      const user = await resp.json();
+      const user = response.data;
       this._user = user;
       localStorage.setItem('auth_user', JSON.stringify(user));
       this._renderTitlebarButton();
@@ -213,7 +253,10 @@ window.Auth = {
     // Tab switching
     const loginTab = document.getElementById('auth-tab-login');
     const registerTab = document.getElementById('auth-tab-register');
-    if (loginTab) loginTab.addEventListener('click', () => this._switchTab('login'));
+    if (loginTab) loginTab.addEventListener('click', () => {
+      this._switchTab('login');
+      this._loadCaptcha();
+    });
     if (registerTab) registerTab.addEventListener('click', () => this._switchTab('register'));
 
     // Login form submit
@@ -223,6 +266,9 @@ window.Auth = {
     // Register form submit
     const registerBtn = document.getElementById('auth-register-btn');
     if (registerBtn) registerBtn.addEventListener('click', () => this._handleRegister());
+
+    const captchaRefresh = document.getElementById('auth-captcha-refresh');
+    if (captchaRefresh) captchaRefresh.addEventListener('click', () => this._loadCaptcha());
 
     // Enter key support
     const loginForm = document.getElementById('auth-login-form');
@@ -271,7 +317,7 @@ window.Auth = {
 
   _clearForm() {
     const fields = [
-      'auth-login-username', 'auth-login-password',
+      'auth-login-username', 'auth-login-password', 'auth-login-captcha',
       'auth-register-username', 'auth-register-password',
       'auth-register-confirm', 'auth-register-email'
     ];
@@ -280,133 +326,38 @@ window.Auth = {
       if (el) el.value = '';
     });
     this._clearError();
-    this._resetCaptcha();
+    this._captchaId = null;
+    const image = document.getElementById('auth-captcha-image');
+    if (image) image.src = '';
   },
 
-  _initCaptcha() {
-    const track = document.getElementById('captcha-track');
-    const thumb = document.getElementById('captcha-thumb');
-    const fill = document.getElementById('captcha-fill');
-    if (!track || !thumb || !fill) return;
+  async _loadCaptcha({ showError = true } = {}) {
+    const image = document.getElementById('auth-captcha-image');
+    const input = document.getElementById('auth-login-captcha');
+    const refresh = document.getElementById('auth-captcha-refresh');
+    this._captchaId = null;
+    if (input) input.value = '';
+    if (refresh) refresh.disabled = true;
+    if (image) image.classList.add('loading');
 
-    let dragging = false;
-    let startX = 0;
-    let thumbLeft = 0;
-    const maxLeft = () => track.offsetWidth - thumb.offsetWidth;
-
-    thumb.addEventListener('mousedown', (e) => {
-      if (this._captchaVerified) return;
-      dragging = true;
-      startX = e.clientX;
-      thumbLeft = parseInt(thumb.style.left || '0');
-      e.preventDefault();
-    });
-
-    document.addEventListener('mousemove', (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - startX;
-      let newLeft = Math.max(0, Math.min(maxLeft(), thumbLeft + dx));
-      thumb.style.left = newLeft + 'px';
-      fill.style.width = (newLeft + thumb.offsetWidth) + 'px';
-    });
-
-    document.addEventListener('mouseup', () => {
-      if (!dragging) return;
-      dragging = false;
-      const currentLeft = parseInt(thumb.style.left || '0');
-      const max = maxLeft();
-      // If dragged to >= 90% of track, verify success
-      if (currentLeft >= max * 0.9) {
-        thumb.style.left = max + 'px';
-        fill.style.width = '100%';
-        this._captchaVerified = true;
-        // Show success state
-        document.getElementById('captcha-track').style.display = 'none';
-        document.getElementById('captcha-success').style.display = 'flex';
-      } else {
-        // Reset - spring back
-        thumb.style.transition = 'left 0.3s';
-        fill.style.transition = 'width 0.3s';
-        thumb.style.left = '0px';
-        fill.style.width = '0px';
-        setTimeout(() => {
-          thumb.style.transition = 'none';
-          fill.style.transition = 'none';
-        }, 300);
+    try {
+      const response = await this._apiRequest('captcha');
+      const data = response.data || {};
+      if (!response.ok || !data.captcha_id || !data.image_base64) {
+        throw new Error(this._errorDetail(data, '验证码加载失败'));
       }
-    });
-
-    // Register captcha
-    const regTrack = document.getElementById('register-captcha-track');
-    const regThumb = document.getElementById('register-captcha-thumb');
-    const regFill = document.getElementById('register-captcha-fill');
-    if (regTrack && regThumb && regFill) {
-      let regDragging = false;
-      let regStartX = 0;
-      let regThumbLeft = 0;
-      const regMaxLeft = () => regTrack.offsetWidth - regThumb.offsetWidth;
-
-      regThumb.addEventListener('mousedown', (e) => {
-        if (this._registerCaptchaVerified) return;
-        regDragging = true;
-        regStartX = e.clientX;
-        regThumbLeft = parseInt(regThumb.style.left || '0');
-        e.preventDefault();
-      });
-
-      document.addEventListener('mousemove', (e) => {
-        if (!regDragging) return;
-        const dx = e.clientX - regStartX;
-        let newLeft = Math.max(0, Math.min(regMaxLeft(), regThumbLeft + dx));
-        regThumb.style.left = newLeft + 'px';
-        regFill.style.width = (newLeft + regThumb.offsetWidth) + 'px';
-      });
-
-      document.addEventListener('mouseup', () => {
-        if (!regDragging) return;
-        regDragging = false;
-        const currentLeft = parseInt(regThumb.style.left || '0');
-        const max = regMaxLeft();
-        if (currentLeft >= max * 0.9) {
-          regThumb.style.left = max + 'px';
-          regFill.style.width = '100%';
-          this._registerCaptchaVerified = true;
-          document.getElementById('register-captcha-track').style.display = 'none';
-          document.getElementById('register-captcha-success').style.display = 'flex';
-        } else {
-          regThumb.style.transition = 'left 0.3s';
-          regFill.style.transition = 'width 0.3s';
-          regThumb.style.left = '0px';
-          regFill.style.width = '0px';
-          setTimeout(() => {
-            regThumb.style.transition = 'none';
-            regFill.style.transition = 'none';
-          }, 300);
-        }
-      });
+      this._captchaId = data.captcha_id;
+      if (image) image.src = data.image_base64;
+      return true;
+    } catch (err) {
+      this.log('Captcha error: ' + err);
+      if (image) image.src = '';
+      if (showError) this._showError('验证码加载失败，请点击刷新后重试');
+      return false;
+    } finally {
+      if (refresh) refresh.disabled = false;
+      if (image) image.classList.remove('loading');
     }
-  },
-
-  _resetCaptcha() {
-    this._captchaVerified = false;
-    const track = document.getElementById('captcha-track');
-    const success = document.getElementById('captcha-success');
-    const thumb = document.getElementById('captcha-thumb');
-    const fill = document.getElementById('captcha-fill');
-    if (track) track.style.display = '';
-    if (success) success.style.display = 'none';
-    if (thumb) { thumb.style.left = '0px'; thumb.style.transition = 'none'; }
-    if (fill) { fill.style.width = '0px'; fill.style.transition = 'none'; }
-
-    this._registerCaptchaVerified = false;
-    const regTrack = document.getElementById('register-captcha-track');
-    const regSuccess = document.getElementById('register-captcha-success');
-    const regThumb = document.getElementById('register-captcha-thumb');
-    const regFill = document.getElementById('register-captcha-fill');
-    if (regTrack) regTrack.style.display = '';
-    if (regSuccess) regSuccess.style.display = 'none';
-    if (regThumb) { regThumb.style.left = '0px'; regThumb.style.transition = 'none'; }
-    if (regFill) { regFill.style.width = '0px'; regFill.style.transition = 'none'; }
   },
 
   _showError(msg) {
@@ -435,6 +386,7 @@ window.Auth = {
   async _handleLogin() {
     const username = (document.getElementById('auth-login-username')?.value || '').trim();
     const password = document.getElementById('auth-login-password')?.value || '';
+    const captchaCode = (document.getElementById('auth-login-captcha')?.value || '').trim();
 
     if (!username) {
       this._showError('请输入用户名');
@@ -444,15 +396,19 @@ window.Auth = {
       this._showError('请输入密码');
       return;
     }
-    if (!this._captchaVerified) {
-      this._showError('请先完成滑动验证');
+    if (!this._captchaId) {
+      this._showError('验证码尚未加载，请点击刷新后重试');
+      return;
+    }
+    if (captchaCode.length < 4) {
+      this._showError('请输入图中的验证码');
       return;
     }
 
     this._clearError();
     this._setLoading('auth-login-btn', true);
 
-    const result = await this.login(username, password);
+    const result = await this.login(username, password, captchaCode);
 
     this._setLoading('auth-login-btn', false);
 
@@ -460,6 +416,7 @@ window.Auth = {
       this.hideLoginModal();
     } else {
       this._showError(result.detail);
+      await this._loadCaptcha({ showError: false });
     }
   },
 
@@ -477,8 +434,8 @@ window.Auth = {
       this._showError('请输入密码');
       return;
     }
-    if (password.length < 6) {
-      this._showError('密码至少6位');
+    if (password.length < 8) {
+      this._showError('密码至少8位');
       return;
     }
     if (password !== confirm) {
@@ -493,11 +450,6 @@ window.Auth = {
       this._showError('请输入有效的邮箱地址');
       return;
     }
-    if (!this._registerCaptchaVerified) {
-      this._showError('请先完成滑动验证');
-      return;
-    }
-
     this._clearError();
     this._setLoading('auth-register-btn', true);
 
@@ -623,6 +575,7 @@ window.Auth = {
 
       document.removeEventListener('click', this._closeDropdownHandler);
     }
+    window.LocalPpteAgent?.refreshAccess?.();
   },
 
   _closeDropdownHandler(e) {

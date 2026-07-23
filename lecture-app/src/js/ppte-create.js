@@ -268,41 +268,49 @@ window.PpteCreate = {
       const folderPath = await window.__TAURI__.core.invoke('pick_folder');
       if (!folderPath) return; // User cancelled
 
-      // Check if manifest.json exists
-      const manifestPath = folderPath + '/manifest.json';
-      let content;
-      try {
-        content = await window.__TAURI__.core.invoke('read_text_file', { filePath: manifestPath });
-      } catch (e) {
-        alert('选择的文件夹不是有效的 PPTE（缺少 manifest.json）');
-        return;
-      }
-
-      const manifest = JSON.parse(content);
-      manifest.slides = this._normalizeManifestSlides(manifest.slides);
-
-      // Load HTML content for each slide
-      const slides = manifest.slides || [];
-      for (let i = 0; i < slides.length; i++) {
-        const slide = slides[i];
-        try {
-          const htmlPath = folderPath + '/' + slide.file;
-          const htmlContent = await window.__TAURI__.core.invoke('read_text_file', { filePath: htmlPath });
-          slide.html = htmlContent;
-        } catch (e) {
-          console.warn('Failed to load HTML for slide:', slide.file, e);
-          slide.html = '';
-        }
-      }
-
-      await this._addRecentPpte(folderPath, manifest.title || '未命名');
-      manifest._fileStats = await this._loadPptFileStats(folderPath, manifest);
-      this._openPptBuilder(folderPath, manifest);
+      await this.openPptExtraPath(folderPath);
     } catch (e) {
       if (e !== 'cancelled') {
         alert('打开失败: ' + e);
       }
     }
+  },
+
+  async openPptExtraPath(folderPath) {
+    if (!window.__TAURI__) {
+      throw new Error('此功能需要在桌面应用中运行');
+    }
+
+    // Check if manifest.json exists
+    const manifestPath = folderPath + '/manifest.json';
+    let content;
+    try {
+      content = await window.__TAURI__.core.invoke('read_text_file', { filePath: manifestPath });
+    } catch (e) {
+      alert('选择的文件夹不是有效的 PPTE（缺少 manifest.json）');
+      return;
+    }
+
+    const manifest = JSON.parse(content);
+    manifest.slides = this._normalizeManifestSlides(manifest.slides);
+
+    // Load HTML content for each slide
+    const slides = manifest.slides || [];
+    for (let i = 0; i < slides.length; i++) {
+      const slide = slides[i];
+      try {
+        const htmlPath = folderPath + '/' + slide.file;
+        const htmlContent = await window.__TAURI__.core.invoke('read_text_file', { filePath: htmlPath });
+        slide.html = htmlContent;
+      } catch (e) {
+        console.warn('Failed to load HTML for slide:', slide.file, e);
+        slide.html = '';
+      }
+    }
+
+    await this._addRecentPpte(folderPath, manifest.title || '未命名');
+    manifest._fileStats = await this._loadPptFileStats(folderPath, manifest);
+    this._openPptBuilder(folderPath, manifest);
   },
 
 };

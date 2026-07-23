@@ -348,85 +348,78 @@
   color: var(--text-muted);
 }
 
-/* ===== Slide Captcha ===== */
-.auth-captcha {
+/* ===== Server Captcha ===== */
+.auth-server-captcha {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr) auto;
+  grid-template-rows: 54px;
+  align-items: center;
+  gap: 8px;
   margin-top: 2px;
 }
 
-.captcha-track {
-  position: relative;
-  height: 38px;
+.auth-server-captcha img {
+  grid-column: 1;
+  grid-row: 1;
+  width: 160px;
+  height: 54px;
+  object-fit: cover;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  transition: opacity 0.15s;
+}
+
+.auth-server-captcha img.loading {
+  opacity: 0.45;
+}
+
+.auth-server-captcha input {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+  padding: 8px 10px;
+  font-size: 14px;
+  text-transform: uppercase;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+.auth-server-captcha input:focus {
+  border-color: var(--accent);
+}
+
+.auth-server-captcha button {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: center;
+  box-sizing: border-box;
+  height: 36px;
+  padding: 8px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-secondary);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: 6px;
-  overflow: hidden;
-  user-select: none;
+  cursor: pointer;
 }
 
-.captcha-fill {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 0;
-  background: rgba(82, 196, 26, 0.15);
-  border-radius: 6px 0 0 6px;
-  transition: none;
-}
-
-.captcha-thumb {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  cursor: grab;
-  color: var(--text-muted);
-  transition: none;
-  z-index: 2;
-}
-
-.captcha-thumb:hover {
+.auth-server-captcha button:hover {
+  color: var(--text-primary);
   border-color: var(--accent);
-  color: var(--accent);
 }
 
-.captcha-thumb:active {
-  cursor: grabbing;
-}
-
-.captcha-text {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  color: var(--text-muted);
-  pointer-events: none;
-  z-index: 1;
-}
-
-.captcha-success {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 38px;
-  background: rgba(82, 196, 26, 0.1);
-  border: 1px solid rgba(82, 196, 26, 0.3);
-  border-radius: 6px;
-  font-size: 13px;
-  color: #52c41a;
+.auth-server-captcha button:disabled {
+  opacity: 0.5;
+  cursor: wait;
 }
 
 /* ===== Profile Modal ===== */
