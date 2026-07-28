@@ -129,6 +129,17 @@ pub struct CourseEntry {
     pub label: String,
     #[serde(default, rename = "createdByApp", skip_serializing_if = "Option::is_none")]
     pub created_by_app: Option<bool>,
+    // Optional id of the group this course belongs to (None = ungrouped)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CourseGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collapsed: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -181,6 +192,8 @@ pub struct AppConfig {
     pub caption_model: Option<String>,
     #[serde(default, rename = "captionDisplayMode", skip_serializing_if = "Option::is_none")]
     pub caption_display_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<CourseGroup>>,
 }
 
 #[derive(Serialize)]
@@ -358,6 +371,7 @@ fn inject_builtin_course(app_handle: &tauri::AppHandle, config: &mut AppConfig) 
                     path: path_str,
                     label: "演讲宝使用指南 — Lecture Presenter".to_string(),
                     created_by_app: None,
+                    group: None,
                 });
             }
             // Set as default if no course is open
@@ -385,6 +399,7 @@ fn inject_builtin_course(app_handle: &tauri::AppHandle, config: &mut AppConfig) 
                     path: path_str,
                     label: "演讲宝使用指南 — Lecture Presenter".to_string(),
                     created_by_app: None,
+                    group: None,
                 });
                 if config.last_opened_course.is_empty() {
                     config.last_opened_course = guide_id.to_string();
@@ -1175,7 +1190,7 @@ async fn import_course(app_handle: tauri::AppHandle) -> Result<CourseEntry, Stri
         return Err(format!("课程 ID '{}' 已存在", id));
     }
 
-    let entry = CourseEntry { id: id.clone(), path: course_path, label, created_by_app: None };
+    let entry = CourseEntry { id: id.clone(), path: course_path, label, created_by_app: None, group: None };
     config.courses.push(entry.clone());
     config.last_opened_course = id;
 
@@ -1694,6 +1709,23 @@ struct PpteSharedSnapshotResult {
     slides: Vec<PpteSharedSnapshotSlide>,
 }
 
+#[derive(Serialize)]
+struct PpteCopiedSlide {
+    #[serde(rename = "sourceFile")]
+    source_file: String,
+    #[serde(rename = "targetFile")]
+    target_file: String,
+}
+
+#[derive(Serialize)]
+struct PpteCopySlidesResult {
+    #[serde(rename = "copyId")]
+    copy_id: String,
+    #[serde(rename = "copyRoot")]
+    copy_root: String,
+    slides: Vec<PpteCopiedSlide>,
+}
+
 struct PpteSharedSourceData {
     root: PathBuf,
     source_deck_id: String,
@@ -1772,6 +1804,15 @@ fn ppte_is_excluded_snapshot_name(name: &str) -> bool {
 }
 
 fn collect_ppte_snapshot_files(root: &Path, current: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
+    collect_ppte_files_excluding(root, current, output, &[])
+}
+
+fn collect_ppte_files_excluding(
+    root: &Path,
+    current: &Path,
+    output: &mut Vec<PathBuf>,
+    extra_excluded_dirs: &[&str],
+) -> Result<(), String> {
     let mut entries = fs::read_dir(current)
         .map_err(|e| format!("Failed to read PPTE snapshot resources: {}", e))?
         .collect::<Result<Vec<_>, _>>()
@@ -1790,10 +1831,10 @@ fn collect_ppte_snapshot_files(root: &Path, current: &Path, output: &mut Vec<Pat
             return Err(format!("Symbolic links are not allowed in shared PPTE snapshots: {}", relative.display()));
         }
         if metadata.is_dir() {
-            if name == ".git" || name == ".ppte-links" {
+            if name == ".git" || name == ".ppte-links" || extra_excluded_dirs.contains(&name.as_str()) {
                 continue;
             }
-            collect_ppte_snapshot_files(root, &path, output)?;
+            collect_ppte_files_excluding(root, &path, output, extra_excluded_dirs)?;
         } else if metadata.is_file() && !ppte_is_excluded_snapshot_name(&name) {
             output.push(relative);
         }
@@ -1827,6 +1868,28 @@ fn ppte_hash_file_tree(root: &Path, files: &[PathBuf]) -> Result<String, String>
         update_sha256_with_file(&mut hasher, root, &relative)?;
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn ppte_filter_selected_files(
+    discovered: Vec<PathBuf>,
+    selected_files: &HashSet<PathBuf>,
+    selected_notes: &HashSet<PathBuf>,
+    all_slide_files: &HashSet<PathBuf>,
+    all_note_files: &HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let manifest_path = PathBuf::from("manifest.json");
+    let mut files: Vec<PathBuf> = discovered.into_iter()
+        .filter(|relative| relative != &manifest_path)
+        .filter(|relative| {
+            !all_slide_files.contains(relative) || selected_files.contains(relative)
+        })
+        .filter(|relative| {
+            !all_note_files.contains(relative) || selected_notes.contains(relative)
+        })
+        .collect();
+    files.sort_by_key(|path| path.to_string_lossy().replace('\\', "/"));
+    files.dedup();
+    files
 }
 
 fn load_ppte_shared_source(source_path: &str, group_id: &str) -> Result<PpteSharedSourceData, String> {
@@ -1895,18 +1958,13 @@ fn load_ppte_shared_source(source_path: &str, group_id: &str) -> Result<PpteShar
 
     let mut discovered = Vec::new();
     collect_ppte_snapshot_files(&root, &root, &mut discovered)?;
-    let manifest_path = PathBuf::from("manifest.json");
-    let mut files: Vec<PathBuf> = discovered.into_iter()
-        .filter(|relative| relative != &manifest_path)
-        .filter(|relative| {
-            !all_slide_files.contains(relative) || selected_files.contains(relative)
-        })
-        .filter(|relative| {
-            !all_note_files.contains(relative) || selected_notes.contains(relative)
-        })
-        .collect();
-    files.sort_by_key(|path| path.to_string_lossy().replace('\\', "/"));
-    files.dedup();
+    let files = ppte_filter_selected_files(
+        discovered,
+        &selected_files,
+        &selected_notes,
+        &all_slide_files,
+        &all_note_files,
+    );
 
     let mut hasher = Sha256::new();
     hasher.update(group_id.as_bytes());
@@ -1970,6 +2028,24 @@ async fn ppte_shared_group_inspect(source_path: String, group_id: String) -> Res
         .map_err(|e| format!("Shared PPTE inspection task failed: {}", e))?
 }
 
+fn ppte_copy_files_preserving_layout(
+    source_root: &Path,
+    files: &[PathBuf],
+    dest_dir: &Path,
+) -> Result<(), String> {
+    for relative in files {
+        let source_file = source_root.join(relative);
+        let destination = dest_dir.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create snapshot folder {}: {}", parent.display(), e))?;
+        }
+        fs::copy(&source_file, &destination)
+            .map_err(|e| format!("Failed to copy shared PPTE file {}: {}", relative.display(), e))?;
+    }
+    Ok(())
+}
+
 fn ppte_shared_group_snapshot_impl(
     source_path: String,
     target_path: String,
@@ -2012,16 +2088,7 @@ fn ppte_shared_group_snapshot_impl(
         fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create shared PPTE snapshot: {}", e))?;
         let copy_result = (|| -> Result<(), String> {
-            for relative in &source.files {
-                let source_file = source.root.join(relative);
-                let destination = temp_dir.join(relative);
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|e| format!("Failed to create snapshot folder {}: {}", parent.display(), e))?;
-                }
-                fs::copy(&source_file, &destination)
-                    .map_err(|e| format!("Failed to copy shared PPTE file {}: {}", relative.display(), e))?;
-            }
+            ppte_copy_files_preserving_layout(&source.root, &source.files, &temp_dir)?;
             let copied_hash = ppte_hash_file_tree(&temp_dir, &source.files)?;
             if copied_hash.is_empty() {
                 return Err("Shared PPTE snapshot hash is empty".to_string());
@@ -2076,6 +2143,155 @@ async fn ppte_shared_group_snapshot(
     })
     .await
     .map_err(|e| format!("Shared PPTE snapshot task failed: {}", e))?
+}
+
+// Formats a UTC timestamp like 20260724-153045 without pulling in a date crate.
+fn ppte_copy_timestamp(now: SystemTime) -> String {
+    let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let days = (secs / 86_400) as i64;
+    let secs_of_day = secs % 86_400;
+    // Days since epoch to a civil date (Howard Hinnant's algorithm).
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_param = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_param + 2) / 5 + 1;
+    let month = if month_param < 10 { month_param + 3 } else { month_param - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        year,
+        month,
+        day,
+        secs_of_day / 3_600,
+        (secs_of_day / 60) % 60,
+        secs_of_day % 60,
+    )
+}
+
+fn ppte_copy_slides_impl(
+    source_path: String,
+    target_path: String,
+    slide_files: Vec<String>,
+) -> Result<PpteCopySlidesResult, String> {
+    if slide_files.is_empty() {
+        return Err("PPTE copy requires at least one slide file".to_string());
+    }
+    let source_root = canonical_ppte_root(&source_path)?;
+    let target_root = canonical_ppte_root(&target_path)?;
+    if source_root == target_root {
+        return Err("A PPTE cannot copy slides into itself".to_string());
+    }
+
+    // Validate the requested slides and remember their same-named .note companions.
+    let mut selected_files = HashSet::new();
+    let mut selected_notes = HashSet::new();
+    let mut ordered_slides: Vec<PathBuf> = Vec::new();
+    for file in &slide_files {
+        let safe_file = ppte_safe_relative_path(file)?;
+        if safe_file.starts_with(".ppte-links") || safe_file.starts_with(".ppte-copies") {
+            return Err(format!("PPTE copy source cannot be a linked or copied page: {}", file));
+        }
+        let absolute = source_root.join(&safe_file);
+        if !absolute.is_file() {
+            return Err(format!("PPTE copy slide file is missing: {}", file));
+        }
+        let canonical = fs::canonicalize(&absolute)
+            .map_err(|e| format!("Failed to inspect PPTE copy slide {}: {}", file, e))?;
+        if !canonical.starts_with(&source_root) {
+            return Err(format!("PPTE copy slide escapes the source PPTE: {}", file));
+        }
+        if selected_files.insert(safe_file.clone()) {
+            let mut note = safe_file.clone();
+            note.set_extension("note");
+            if source_root.join(&note).is_file() {
+                selected_notes.insert(note);
+            }
+            ordered_slides.push(safe_file);
+        }
+    }
+
+    // Read the manifest so unselected pages and their notes stay behind.
+    let manifest_content = fs::read_to_string(source_root.join("manifest.json"))
+        .map_err(|e| format!("Failed to read source PPTE manifest: {}", e))?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_content)
+        .map_err(|e| format!("Failed to parse source PPTE manifest: {}", e))?;
+    let mut all_slide_files = HashSet::new();
+    let mut all_note_files = HashSet::new();
+    if let Some(manifest_slides) = manifest.get("slides").and_then(|value| value.as_array()) {
+        for slide in manifest_slides {
+            let Some(file) = slide.get("file").and_then(|value| value.as_str()) else { continue; };
+            let safe_file = ppte_safe_relative_path(file)?;
+            all_slide_files.insert(safe_file);
+            all_note_files.insert(ppte_note_path_for_slide(slide, file)?);
+        }
+    }
+
+    let mut discovered = Vec::new();
+    collect_ppte_files_excluding(&source_root, &source_root, &mut discovered, &[".ppte-copies"])?;
+    let files = ppte_filter_selected_files(
+        discovered,
+        &selected_files,
+        &selected_notes,
+        &all_slide_files,
+        &all_note_files,
+    );
+
+    // Allocate a unique isolated copy folder under .ppte-copies/.
+    let copies_root = target_root.join(".ppte-copies");
+    let mut copy_id = String::new();
+    let mut copy_dir = PathBuf::new();
+    for _ in 0..8 {
+        let random_suffix = &uuid::Uuid::new_v4().simple().to_string()[..4];
+        let candidate = format!("copy-{}-{}", ppte_copy_timestamp(SystemTime::now()), random_suffix);
+        let candidate_dir = copies_root.join(&candidate);
+        if !candidate_dir.exists() {
+            copy_id = candidate;
+            copy_dir = candidate_dir;
+            break;
+        }
+    }
+    if copy_id.is_empty() {
+        return Err("Failed to allocate a unique PPTE copy folder".to_string());
+    }
+
+    fs::create_dir_all(&copy_dir)
+        .map_err(|e| format!("Failed to create PPTE copy folder: {}", e))?;
+    let copy_result = ppte_copy_files_preserving_layout(&source_root, &files, &copy_dir);
+    if copy_result.is_err() {
+        let _ = fs::remove_dir_all(&copy_dir);
+    }
+    copy_result?;
+
+    let copy_root = format!(".ppte-copies/{}", copy_id);
+    let slides = ordered_slides.into_iter().map(|file| {
+        let file_string = file.to_string_lossy().replace('\\', "/");
+        PpteCopiedSlide {
+            source_file: file_string.clone(),
+            target_file: format!("{}/{}", copy_root, file_string),
+        }
+    }).collect();
+
+    Ok(PpteCopySlidesResult { copy_id, copy_root, slides })
+}
+
+#[tauri::command]
+async fn ppte_copy_slides(
+    source_path: String,
+    target_path: String,
+    slide_files: Vec<String>,
+) -> Result<PpteCopySlidesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ppte_copy_slides_impl(source_path, target_path, slide_files)
+    })
+    .await
+    .map_err(|e| format!("PPTE copy task failed: {}", e))?
 }
 
 fn ppte_shared_snapshot_hash_impl(target_path: String, snapshot_root: String) -> Result<String, String> {
@@ -3412,6 +3628,145 @@ mod ppte_save_tests {
             ).unwrap(),
             restored.snapshot_hash,
         );
+
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    fn write_copy_test_source(source: &Path) {
+        fs::create_dir_all(source.join("images")).unwrap();
+        let source_manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "deckId": "deck_source",
+            "title": "Source",
+            "slides": [
+                {"id":"slide_a","file":"slide01.html","title":"A"},
+                {"id":"slide_b","file":"slide02.html","title":"B"}
+            ]
+        });
+        fs::write(source.join("manifest.json"), serde_json::to_string_pretty(&source_manifest).unwrap()).unwrap();
+        fs::write(source.join("slide01.html"), "<html>A</html>").unwrap();
+        fs::write(source.join("slide01.note"), "note A").unwrap();
+        fs::write(source.join("slide02.html"), "<html>B</html>").unwrap();
+        fs::write(source.join("slide02.note"), "note B").unwrap();
+        fs::write(source.join("style.css"), "body { color: red; }").unwrap();
+        fs::write(source.join("images").join("cover.png"), "image").unwrap();
+    }
+
+    #[test]
+    fn copy_slides_copies_selected_pages_and_shared_resources() {
+        let source = unique_temp_dir("copy-source");
+        let target = unique_temp_dir("copy-target");
+        write_copy_test_source(&source);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("manifest.json"), r#"{"schemaVersion":2,"deckId":"deck_target","title":"Target","slides":[]}"#).unwrap();
+
+        let result = ppte_copy_slides_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            vec!["slide01.html".to_string()],
+        ).unwrap();
+
+        assert!(result.copy_id.starts_with("copy-"));
+        assert_eq!(result.copy_root, format!(".ppte-copies/{}", result.copy_id));
+        let root = target.join(&result.copy_root);
+        assert!(root.is_dir());
+        assert!(root.join("slide01.html").is_file());
+        assert!(root.join("slide01.note").is_file());
+        assert!(root.join("style.css").is_file());
+        assert!(root.join("images").join("cover.png").is_file());
+        assert!(!root.join("slide02.html").exists());
+        assert!(!root.join("slide02.note").exists());
+        assert!(!root.join("manifest.json").exists());
+        assert_eq!(result.slides.len(), 1);
+        assert_eq!(result.slides[0].source_file, "slide01.html");
+        assert_eq!(result.slides[0].target_file, format!("{}/slide01.html", result.copy_root));
+
+        // A second copy lands in its own isolated folder.
+        let second = ppte_copy_slides_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            vec!["slide01.html".to_string()],
+        ).unwrap();
+        assert_ne!(second.copy_root, result.copy_root);
+        assert!(target.join(&second.copy_root).join("slide01.html").is_file());
+
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn copy_slides_excludes_sensitive_and_managed_paths() {
+        let source = unique_temp_dir("copy-exclude-source");
+        let target = unique_temp_dir("copy-exclude-target");
+        write_copy_test_source(&source);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("manifest.json"), r#"{"schemaVersion":2,"deckId":"deck_target","title":"Target","slides":[]}"#).unwrap();
+        fs::write(source.join(".env"), "SECRET=1").unwrap();
+        fs::write(source.join("private.key"), "key").unwrap();
+        fs::create_dir_all(source.join(".ppte-links").join("group_x")).unwrap();
+        fs::write(source.join(".ppte-links").join("group_x").join("linked.html"), "linked").unwrap();
+        fs::create_dir_all(source.join(".ppte-copies").join("copy-old")).unwrap();
+        fs::write(source.join(".ppte-copies").join("copy-old").join("slide01.html"), "old copy").unwrap();
+
+        let result = ppte_copy_slides_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            vec!["slide01.html".to_string()],
+        ).unwrap();
+
+        let root = target.join(&result.copy_root);
+        assert!(root.join("slide01.html").is_file());
+        assert!(root.join("style.css").is_file());
+        assert!(!root.join(".env").exists());
+        assert!(!root.join("private.key").exists());
+        assert!(!root.join(".ppte-links").exists());
+        assert!(!root.join(".ppte-copies").exists());
+
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn copy_slides_rejects_same_source_and_target() {
+        let source = unique_temp_dir("copy-same");
+        write_copy_test_source(&source);
+
+        let result = ppte_copy_slides_impl(
+            source.to_string_lossy().to_string(),
+            source.to_string_lossy().to_string(),
+            vec!["slide01.html".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(!source.join(".ppte-copies").exists());
+
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn copy_slides_rejects_empty_or_missing_slide_files() {
+        let source = unique_temp_dir("copy-invalid-source");
+        let target = unique_temp_dir("copy-invalid-target");
+        write_copy_test_source(&source);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("manifest.json"), r#"{"schemaVersion":2,"deckId":"deck_target","title":"Target","slides":[]}"#).unwrap();
+
+        assert!(ppte_copy_slides_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            vec![],
+        ).is_err());
+        assert!(ppte_copy_slides_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            vec!["missing.html".to_string()],
+        ).is_err());
+        assert!(ppte_copy_slides_impl(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            vec!["../escape.html".to_string()],
+        ).is_err());
+        assert!(!target.join(".ppte-copies").exists());
 
         fs::remove_dir_all(source).unwrap();
         fs::remove_dir_all(target).unwrap();
@@ -5070,6 +5425,7 @@ pub fn run() {
             ppte_shared_group_inspect,
             ppte_shared_group_snapshot,
             ppte_shared_snapshot_hash,
+            ppte_copy_slides,
             watch_ppte_folder,
             unwatch_ppte_folder,
             save_ppt_extra,

@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="css/ppte-annotator.css">
   <link rel="stylesheet" href="css/live-caption.css">
   <link rel="stylesheet" href="css/ppte-shared-groups.css">
+  <link rel="stylesheet" href="css/resource-center.css">
   <link rel="stylesheet" href="vendor/highlight-github-dark.min.css" id="hljs-theme">
 </head>
 <body data-theme="dark">
@@ -18,9 +19,25 @@
   <div id="titlebar">
     <div id="titlebar-drag"></div>
     <div id="titlebar-controls">
-      <!-- 课程区: Course selector -->
-      <div class="titlebar-group">
-        <select id="course-select" title="切换课程"></select>
+      <!-- 课程区: Course switcher -->
+      <div class="titlebar-group" id="course-switcher-group">
+        <button id="course-switcher" title="切换 / 管理课程">
+          <span id="course-switcher-label">未选择课程</span>
+          <span class="course-switcher-caret">▾</span>
+        </button>
+        <div id="course-panel" class="hidden">
+          <div class="course-panel-search">
+            <input id="course-panel-search-input" type="text" placeholder="搜索课程…" />
+          </div>
+          <div id="course-panel-list" class="course-panel-list"></div>
+          <div class="course-panel-footer">
+            <button id="course-panel-create-group" title="新建分组">+ 分组</button>
+            <button id="course-panel-create">+ 创建课程</button>
+            <button id="course-panel-import">+ 导入课程</button>
+            <button id="course-panel-create-ppt">+ 创建PPTE</button>
+            <button id="course-panel-open-ppt">打开PPTE</button>
+          </div>
+        </div>
       </div>
 
       <div class="titlebar-divider"></div>
@@ -43,9 +60,11 @@
           <path d="M8 21h8M12 17v4"/>
           <path d="M7 8h2v5H7zM11 6h2v7h-2zM15 10h2v3h-2z" fill="currentColor" stroke="none"/>
         </svg></button>
-        <button id="btn-add-course" title="课程管理"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        <button id="btn-resource-center" title="资源中心"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="7" rx="1"/>
+          <rect x="14" y="3" width="7" height="7" rx="1"/>
+          <rect x="3" y="14" width="7" height="7" rx="1"/>
+          <rect x="14" y="14" width="7" height="7" rx="1"/>
         </svg></button>
         <button id="btn-settings" title="开发者设置"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/>
@@ -211,7 +230,7 @@
               <span>页面目录</span>
               <div class="ppte-page-list-actions">
                 <button id="ppte-create-shared-group" class="ppte-editor-button ppte-editor-button-compact" title="将勾选的连续页面设为唯一真源">共享所选</button>
-                <button id="ppte-insert-shared-group" class="ppte-editor-button ppte-editor-button-compact">插入共享</button>
+                <button id="ppte-insert-shared-group" class="ppte-editor-button ppte-editor-button-compact">资源中心</button>
                 <button id="ppte-add-page" class="ppte-editor-button ppte-editor-button-compact">+ 添加</button>
               </div>
             </div>
@@ -344,26 +363,6 @@
             <button class="auth-submit-btn" id="profile-change-password-btn">修改密码</button>
           </div>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Course Manager Modal -->
-  <div id="course-modal" class="hidden">
-    <div id="course-modal-overlay"></div>
-    <div id="course-modal-dialog">
-      <div class="course-modal-header">
-        <span>课程管理</span>
-        <button id="course-modal-close" title="关闭">✕</button>
-      </div>
-      <div class="course-modal-body">
-        <ul id="course-list"></ul>
-      </div>
-      <div class="course-modal-footer">
-        <button id="course-modal-create">+ 创建课程</button>
-        <button id="course-modal-import">+ 导入课程</button>
-        <button id="course-modal-create-ppt">+ 创建PPTE</button>
-        <button id="course-modal-open-ppt">打开PPTE</button>
       </div>
     </div>
   </div>
@@ -742,6 +741,7 @@
   <script src="js/ppte-recent.js"></script>
   <script src="js/ppte-editor.js"></script>
   <script src="js/ppte-shared-groups.js"></script>
+  <script src="js/resource-center.js"></script>
   <script src="js/ppte-create.js"></script>
   <script src="js/local-ppte-agent.js"></script>
   <script src="js/drag.js"></script>

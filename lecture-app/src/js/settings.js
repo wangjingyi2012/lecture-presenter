@@ -3,7 +3,7 @@ window.Settings = {
   init(appConfig) {
     this.applyTheme(appConfig.theme || 'dark');
     this.applyFontSize(appConfig.fontSize || 18);
-    this.initCourseSelect(appConfig);
+    CourseManager.refresh();
     this.initControls(appConfig);
     this.initDevSettings(appConfig);
     window.LocalPpteAgent?.init(appConfig);
@@ -54,29 +54,6 @@ window.Settings = {
     document.documentElement.style.setProperty('--font-size', size + 'px');
   },
 
-  initCourseSelect(appConfig) {
-    this.refreshCourseOptions(appConfig);
-    const select = document.getElementById('course-select');
-    select.addEventListener('change', async () => {
-      Tracker.track('course_switch', select.value);
-      CourseLoader.appConfig.lastOpenedCourse = select.value;
-      await CourseLoader.saveAppConfig(CourseLoader.appConfig);
-      await App.loadCourse(select.value);
-    });
-  },
-
-  refreshCourseOptions(appConfig) {
-    const select = document.getElementById('course-select');
-    select.innerHTML = '';
-    appConfig.courses.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent = c.label;
-      if (c.id === appConfig.lastOpenedCourse) opt.selected = true;
-      select.appendChild(opt);
-    });
-  },
-
   initControls(appConfig) {
     document.getElementById('btn-theme').addEventListener('click', () => {
       const current = document.body.dataset.theme;
@@ -101,10 +78,6 @@ window.Settings = {
       this.applyFontSize(next);
       appConfig.fontSize = next;
       CourseLoader.saveAppConfig(appConfig);
-    });
-
-    document.getElementById('btn-add-course').addEventListener('click', () => {
-      CourseManager.open();
     });
 
     // PPTE button in titlebar
@@ -225,7 +198,9 @@ window.Settings = {
 
       // Escape: close modals (priority order)
       if (e.key === 'Escape') {
-        if (CourseCreator.isOpen()) {
+        if (window.ResourceCenter?.isOpen?.()) {
+          window.ResourceCenter.close();
+        } else if (CourseCreator.isOpen()) {
           CourseCreator.close();
         } else if (CourseManager.isOpen()) {
           CourseManager.close();

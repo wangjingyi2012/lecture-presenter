@@ -81,9 +81,28 @@ html, body {
   background: var(--bg-hover);
 }
 
-#course-select {
+#course-switcher-group {
+  position: relative;
+}
+
+#course-switcher {
   min-width: 140px;
-  max-width: 200px;
+  max-width: 220px;
+  justify-content: flex-start !important;
+}
+
+#course-switcher-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.course-switcher-caret {
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 /* ===== App Layout ===== */
@@ -1957,45 +1976,7 @@ html, body {
   width: 100%;
 }
 
-/* ===== Course Manager Modal ===== */
-#course-modal {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-#course-modal.hidden {
-  display: none;
-}
-
-#course-modal-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-}
-
-#course-modal-dialog {
-  position: relative;
-  width: 480px;
-  max-height: 70vh;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
+/* ===== Shared modal header (settings modal etc.) ===== */
 .course-modal-header {
   display: flex;
   align-items: center;
@@ -2026,43 +2007,176 @@ html, body {
   color: var(--text-primary);
 }
 
-.course-modal-body {
+/* ===== Course Switcher Panel ===== */
+#course-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 320px;
+  max-height: 70vh;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 2000;
+}
+
+#course-panel.hidden {
+  display: none;
+}
+
+.course-panel-search {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.course-panel-search input {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.course-panel-search input:focus {
+  border-color: var(--accent);
+}
+
+.course-panel-list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 0;
+  padding: 6px 0;
 }
 
-#course-list {
-  list-style: none;
+.course-panel-empty {
+  padding: 20px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
-#course-list li {
+.course-group-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  transition: background 0.15s;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-secondary);
 }
 
-#course-list li:hover {
+.course-group-header:hover {
   background: var(--bg-hover);
 }
 
-#course-list li .drag-handle {
-  cursor: grab;
+.course-group-toggle {
+  font-size: 10px;
+  width: 12px;
   color: var(--text-muted);
-  font-size: 14px;
-  user-select: none;
-  padding: 2px 4px;
 }
 
-#course-list li .drag-handle:active {
+.course-group-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.course-group-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  padding: 1px 7px;
+}
+
+.course-group-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.course-group-header:hover .course-group-actions {
+  opacity: 1;
+}
+
+.course-group-actions button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 1px 5px;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+
+.course-group-actions button:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.course-group-new {
+  cursor: default;
+}
+
+.course-group-new:hover {
+  background: none;
+}
+
+.course-group-items {
+  list-style: none;
+}
+
+.course-group-items li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 8px 22px;
+  cursor: pointer;
+  transition: background 0.15s;
+  position: relative;
+}
+
+.course-group-items li:hover {
+  background: var(--bg-hover);
+}
+
+.course-group-items li.current {
+  background: var(--accent-bg);
+}
+
+.course-group-items li.current .course-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.course-group-items li .drag-handle {
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 13px;
+  user-select: none;
+  padding: 1px 3px;
+}
+
+.course-group-items li .drag-handle:active {
   cursor: grabbing;
 }
 
-#course-list li .course-label {
+.course-group-items li .course-label {
   flex: 1;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-primary);
   min-width: 0;
   overflow: hidden;
@@ -2070,9 +2184,9 @@ html, body {
   white-space: nowrap;
 }
 
-#course-list li .course-edit-input {
+.course-edit-input {
   flex: 1;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-primary);
   background: var(--bg-tertiary);
   border: 1px solid var(--accent);
@@ -2082,66 +2196,108 @@ html, body {
   min-width: 0;
 }
 
-#course-list li .course-actions {
+.course-group-items li .course-actions {
   display: flex;
-  gap: 4px;
+  gap: 2px;
   opacity: 0;
   transition: opacity 0.15s;
 }
 
-#course-list li:hover .course-actions {
+.course-group-items li:hover .course-actions {
   opacity: 1;
 }
 
-#course-list li .course-actions button {
+.course-group-items li .course-actions button {
   background: none;
   border: none;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 13px;
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 2px 5px;
   border-radius: 4px;
   transition: all 0.15s;
 }
 
-#course-list li .course-actions button:hover {
+.course-group-items li .course-actions button:hover {
   background: var(--bg-tertiary);
   color: var(--text-primary);
 }
 
-#course-list li .course-actions button.btn-delete:hover {
+.course-group-items li .course-actions button.btn-delete:hover {
   color: #f85149;
 }
 
-#course-list li.dragging {
+.course-group-items li.dragging {
   opacity: 0.4;
 }
 
-#course-list li.drag-over {
+.course-group-items li.drag-over {
   border-top: 2px solid var(--accent);
 }
 
-.course-modal-footer {
-  padding: 12px 20px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  gap: 8px;
+.course-group-header.drag-over,
+.course-group-items.drag-over {
+  background: var(--accent-bg);
 }
 
-.course-modal-footer button {
+.course-move-menu {
+  position: absolute;
+  right: 12px;
+  top: 100%;
+  z-index: 2100;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  overflow: hidden;
+}
+
+.course-move-menu button {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 7px 12px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.course-move-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.course-move-menu button.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.course-panel-footer {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.course-panel-footer button {
   flex: 1;
-  padding: 8px;
+  min-width: fit-content;
+  padding: 6px 8px;
   background: var(--accent-bg);
   color: var(--accent);
   border: 1px solid transparent;
   border-radius: 6px;
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
+  white-space: nowrap;
   transition: all 0.15s;
 }
 
-.course-modal-footer button:hover {
+.course-panel-footer button:hover {
   background: var(--accent);
   color: #fff;
 }

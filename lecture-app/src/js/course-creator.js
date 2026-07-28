@@ -894,6 +894,10 @@ const CourseCreator = {
         label,
         createdByApp: true,
       };
+      // Preserve group assignment when overwriting an existing entry
+      if (entryIndex >= 0 && config.courses[entryIndex].group) {
+        entry.group = config.courses[entryIndex].group;
+      }
 
       if (entryIndex >= 0) {
         config.courses[entryIndex] = entry;
@@ -904,7 +908,7 @@ const CourseCreator = {
       await CourseLoader.saveAppConfig(config);
 
       // Reload
-      Settings.refreshCourseOptions(config);
+      CourseManager.refresh();
       await App.loadCourse(courseId);
       Tracker.track('course_create', title);
       this.close();

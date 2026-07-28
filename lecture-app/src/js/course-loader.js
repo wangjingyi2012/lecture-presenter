@@ -82,7 +82,7 @@ const CourseLoader = {
       return this.appConfig;
     } catch (e) {
       console.error('Failed to load app config:', e);
-      this.appConfig = { courses: [], lastOpenedCourse: '', theme: 'dark', fontSize: 18 };
+      this.appConfig = { courses: [], groups: [], lastOpenedCourse: '', theme: 'dark', fontSize: 18 };
       return this.appConfig;
     }
   },
