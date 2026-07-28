@@ -444,7 +444,7 @@ window.PpteEditor = {
 
     const insertSharedBtn = document.getElementById('ppte-insert-shared-group');
     if (insertSharedBtn) {
-      insertSharedBtn.onclick = () => this._showInsertSharedGroupModal?.();
+      insertSharedBtn.onclick = () => window.ResourceCenter?.open({ mode: 'editor', pb: this._pptBuilder });
     }
 
     const titleInput = document.getElementById('ppt-current-title');

@@ -68,6 +68,7 @@ const App = {
     // Load app config
     const appConfig = await CourseLoader.loadAppConfig();
     Settings.init(appConfig);
+    window.ResourceCenter?.init();
     Tracker.configure(appConfig);
 
     // Initialize updater and notifications
