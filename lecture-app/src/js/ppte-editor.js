@@ -474,20 +474,16 @@ window.PpteEditor = {
 
     const deleteBtn = document.getElementById('ppt-delete-current');
     if (deleteBtn) {
-      // Reset confirm state when rebinding (e.g. switching PPTE)
-      deleteBtn.textContent = '删除';
-      deleteBtn.style.background = '#e74c3c';
-      let confirmPending = false;
-      let confirmTimer = null;
       deleteBtn.onclick = () => {
         const cur = this._pptBuilder;
         if (!cur) return;
-        if (cur.slides[cur.currentSlideIndex]?.linkedFrom) {
+        const slide = cur.slides[cur.currentSlideIndex];
+        if (slide?.linkedFrom) {
           this._showToast('共享页面不能单独删除，请先断开引用', true);
           return;
         }
         const sourceGroups = (cur.manifest.sharedGroups || [])
-          .filter(group => (group.slideIds || []).includes(cur.slides[cur.currentSlideIndex]?.id));
+          .filter(group => (group.slideIds || []).includes(slide?.id));
         if (sourceGroups.length) {
           this._showToast('此页面是共享真源，请先在“共享页面”中取消共享', true);
           return;
@@ -496,30 +492,13 @@ window.PpteEditor = {
           alert('至少需要保留一个页面');
           return;
         }
-        if (!confirmPending) {
-          // First click — enter confirm state
-          confirmPending = true;
-          deleteBtn.textContent = '确认删除？';
-          deleteBtn.style.background = '#c0392b';
-          clearTimeout(confirmTimer);
-          confirmTimer = setTimeout(() => {
-            confirmPending = false;
-            deleteBtn.textContent = '删除';
-            deleteBtn.style.background = '#e74c3c';
-          }, 3000);
-        } else {
-          // Second click — actually delete
-          confirmPending = false;
-          clearTimeout(confirmTimer);
-          deleteBtn.textContent = '删除';
-          deleteBtn.style.background = '#e74c3c';
-          cur.slides.splice(cur.currentSlideIndex, 1);
-          cur.manifestDirty = true;
-          if (cur.currentSlideIndex >= cur.slides.length) {
-            cur.currentSlideIndex = cur.slides.length - 1;
-          }
-          this._renderPptBuilderInContent();
+        if (!confirm(`确定删除页面「${slide?.title || '未命名'}」？`)) return;
+        cur.slides.splice(cur.currentSlideIndex, 1);
+        cur.manifestDirty = true;
+        if (cur.currentSlideIndex >= cur.slides.length) {
+          cur.currentSlideIndex = cur.slides.length - 1;
         }
+        this._renderPptBuilderInContent();
       };
     }
 
@@ -1529,26 +1508,6 @@ window.PpteEditor = {
     modal.classList.add('hidden');
     pb._editorWasOpen = true;
     return true;
-  },
-
-  _refreshPptBuilder() {
-    const modal = document.getElementById('ppt-builder-modal');
-    if (!modal) return;
-
-    // Update page list
-    const pageList = modal.querySelector('#ppt-page-list');
-    if (pageList) {
-      pageList.innerHTML = this._renderPageList();
-    }
-
-    // Update editor
-    const pageEditor = modal.querySelector('#ppt-page-editor');
-    if (pageEditor) {
-      pageEditor.innerHTML = this._renderPageEditor();
-    }
-
-    // Rebind events
-    this._bindPageListEvents(modal);
   },
 
   _refreshPageList() {

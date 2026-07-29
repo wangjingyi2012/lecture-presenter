@@ -1535,18 +1535,30 @@ html, body {
 }
 
 .ppte-page-list-header {
-  padding: 8px 16px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
 }
 
-.ppte-page-list-header span {
+.ppte-page-list-header > span {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.ppte-page-list-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ppte-page-list-actions .ppte-editor-button-compact {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
 }
 
 #ppte-page-items {
@@ -2606,13 +2618,79 @@ body.presentation-mode #week-title {
   text-align: center;
 }
 
-.empty-state .icon {
-  font-size: 3em;
-  margin-bottom: 16px;
+.empty-cards {
+  display: flex;
+  gap: 16px;
 }
 
-.empty-state p {
-  font-size: 1.1em;
+.empty-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 240px;
+  padding: 28px 20px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  color: var(--text-primary);
+}
+
+.empty-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.empty-card-primary {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.empty-card-icon {
+  color: var(--text-secondary);
+  display: flex;
+}
+
+.empty-card-primary .empty-card-icon {
+  color: var(--accent);
+}
+
+.empty-card-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.empty-card-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.empty-links {
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.empty-links button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.empty-links button:hover {
+  text-decoration: underline;
+}
+
+.empty-links-divider {
+  color: var(--text-muted);
 }
 
 /* ===== Source Code Card ===== */
