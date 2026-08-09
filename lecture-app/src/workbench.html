@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>工作台 · LectureAI</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      /* light terminal (default) */
+      --term-bg: #f6f8fa;
+      --term-surface: #eaeef2;
+      --term-border: #d0d7de;
+      --term-fg: #24292f;
+      --term-muted: #636c76;
+      --term-accent: #0969da;
+      --term-green: #1a7f37;
+      --term-red: #cf222e;
+      --term-yellow: #9a6700;
+      --term-dim: #818b98;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --term-bg: #0d1117;
+        --term-surface: #161b22;
+        --term-border: #30363d;
+        --term-fg: #c9d1d9;
+        --term-muted: #8b949e;
+        --term-accent: #58a6ff;
+        --term-green: #3fb950;
+        --term-red: #f85149;
+        --term-yellow: #d29922;
+        --term-dim: #6e7681;
+      }
+    }
+    html, body {
+      width: 100vw; height: 100vh; overflow: hidden;
+      background: var(--term-bg); color: var(--term-fg);
+      font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, "Cascadia Code", monospace;
+      font-size: 13px; line-height: 1.6;
+    }
+    #wb-root { display: flex; flex-direction: column; height: 100vh; }
+
+    /* header */
+    .wb-header { padding: 8px 14px; border-bottom: 1px solid var(--term-border); display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--term-surface); }
+    .wb-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .wb-prompt-mark { color: var(--term-accent); font-weight: 700; }
+    .wb-header-title { font-weight: 600; font-size: 13px; white-space: nowrap; }
+    .wb-header-meta { font-size: 11px; color: var(--term-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wb-header-right { display: flex; align-items: center; gap: 6px; }
+    .wb-model { font-size: 11px; padding: 3px 6px; border: 1px solid var(--term-border); border-radius: 4px; background: var(--term-bg); color: var(--term-fg); font-family: inherit; max-width: 150px; }
+    .wb-model:focus { outline: none; border-color: var(--term-accent); }
+    .wb-clear { font-size: 11px; color: var(--term-muted); background: none; border: 1px solid var(--term-border); cursor: pointer; padding: 3px 8px; border-radius: 4px; font-family: inherit; }
+    .wb-clear:hover { background: var(--term-surface); color: var(--term-fg); }
+
+    /* terminal log */
+    .term-log { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; }
+    .term-log::-webkit-scrollbar { width: 8px; }
+    .term-log::-webkit-scrollbar-thumb { background: var(--term-border); border-radius: 4px; }
+    .term-empty { color: var(--term-muted); padding: 20px 0; line-height: 1.8; }
+    .term-empty .term-empty-accent { color: var(--term-accent); }
+
+    /* log lines */
+    .ln { white-space: pre-wrap; word-break: break-word; }
+    .ln-user { color: var(--term-accent); }
+    .ln-user::before { content: "> "; color: var(--term-accent); }
+    .ln-ai { color: var(--term-fg); margin: 2px 0; }
+    .ln-act { color: var(--term-yellow); }
+    .ln-act::before { content: "▸ "; color: var(--term-yellow); }
+    .ln-ok { color: var(--term-green); }
+    .ln-ok::before { content: "✓ "; color: var(--term-green); }
+    .ln-err { color: var(--term-red); }
+    .ln-err::before { content: "✗ "; color: var(--term-red); }
+    .ln-sys { color: var(--term-muted); font-size: 12px; }
+    .ln-sys::before { content: "// "; color: var(--term-dim); }
+    .ln-muted { color: var(--term-muted); }
+
+    /* diff block */
+    .diff { margin: 2px 0 4px 14px; padding: 4px 8px; background: var(--term-surface); border-left: 2px solid var(--term-border); border-radius: 0 4px 4px 0; font-size: 12px; max-height: 220px; overflow-y: auto; }
+    .diff .d-add { color: var(--term-green); }
+    .diff .d-add::before { content: "+ "; }
+    .diff .d-del { color: var(--term-red); }
+    .diff .d-del::before { content: "- "; }
+    .diff .d-hunk { color: var(--term-dim); }
+    .diff .d-more { color: var(--term-muted); font-style: italic; }
+
+    .cursor { display: inline-block; width: 7px; height: 14px; background: var(--term-accent); vertical-align: text-bottom; margin-left: 1px; animation: blink 1s steps(2) infinite; }
+    @keyframes blink { 0%,50% { opacity: 1; } 50.01%,100% { opacity: 0; } }
+
+    /* input */
+    .term-input-area { border-top: 1px solid var(--term-border); padding: 8px 14px; background: var(--term-surface); }
+    .term-input-row { display: flex; align-items: flex-end; gap: 8px; }
+    .term-input-row .prompt-glyph { color: var(--term-accent); font-weight: 700; padding-bottom: 7px; }
+    .term-input-row textarea { flex: 1; background: var(--term-bg); color: var(--term-fg); border: 1px solid var(--term-border); border-radius: 6px; padding: 7px 10px; font-family: inherit; font-size: 13px; line-height: 1.5; resize: none; min-height: 34px; max-height: 160px; }
+    .term-input-row textarea:focus { outline: none; border-color: var(--term-accent); }
+    .term-input-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; }
+    .term-hint { font-size: 11px; color: var(--term-muted); }
+    .term-hint kbd { background: var(--term-bg); border: 1px solid var(--term-border); border-radius: 3px; padding: 0 4px; font-family: inherit; font-size: 10px; }
+    .term-send { padding: 5px 14px; border-radius: 6px; border: 1px solid var(--term-accent); background: var(--term-accent); color: #fff; cursor: pointer; font-family: inherit; font-size: 12px; }
+    .term-send:disabled { opacity: 0.4; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <div id="wb-root">
+    <div class="wb-header">
+      <div class="wb-header-left">
+        <span class="wb-prompt-mark">▌</span>
+        <div>
+          <div class="wb-header-title">LectureAI 工作台</div>
+          <span class="wb-header-meta" id="wb-course-meta">未连接课件</span>
+        </div>
+      </div>
+      <div class="wb-header-right">
+        <select id="wb-model" class="wb-model" title="选择 AI 模型"></select>
+        <button class="wb-clear" id="wb-clear" title="清空">清空</button>
+      </div>
+    </div>
+    <div class="term-log" id="wb-messages">
+      <div class="term-empty">
+        <span class="term-empty-accent">LectureAI 工作台</span> · 课件级 Agent<br>
+        对整套课件发指令，<span class="term-empty-accent">@3</span> 定位第 3 页<br>
+        改完自动保存，主窗口实时预览
+      </div>
+    </div>
+    <div class="term-input-area">
+      <div class="term-input-row">
+        <span class="prompt-glyph">&gt;</span>
+        <textarea id="wb-input" rows="1" placeholder="@3 把这页破折号改成逗号…"></textarea>
+        <button class="term-send" id="wb-send">发送 ⏎</button>
+      </div>
+      <div class="term-input-foot">
+        <span class="term-hint"><kbd>@N</kbd> 定位页 · <kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
+      </div>
+    </div>
+  </div>
+  <script src="js/ppte-rules-prompt.js"></script>
+  <script src="js/workbench-window.js"></script>
+</body>
+</html>

@@ -4537,19 +4537,39 @@ async fn call_minimax(api_key: String, system_prompt: String, user_msg: String) 
 }
 
 async fn call_lectureai(auth_token: String, system_prompt: String, user_msg: String) -> Result<String, String> {
-    // Check login before making request
+    // Legacy single-turn path (used by call_ai / test_ai_config). Converts to a
+    // 2-message array and reuses the chat endpoint.
     if auth_token.is_empty() {
         return Err("请先登录后才能使用 LectureAI".to_string());
     }
+    let messages = vec![
+        serde_json::json!({"role": "system", "content": system_prompt}),
+        serde_json::json!({"role": "user", "content": user_msg}),
+    ];
+    call_lectureai_chat_request(auth_token, messages).await
+}
 
+/// True multi-turn chat for the workbench agent: sends the full messages array.
+async fn call_lectureai_chat(auth_token: String, messages: Vec<ChatMessage>) -> Result<String, String> {
+    if auth_token.is_empty() {
+        return Err("请先登录后才能使用 LectureAI".to_string());
+    }
+    let messages = messages
+        .iter()
+        .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+        .collect();
+    call_lectureai_chat_request(auth_token, messages).await
+}
+
+async fn call_lectureai_chat_request(
+    auth_token: String,
+    messages: Vec<serde_json::Value>,
+) -> Result<String, String> {
     let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "system_prompt": system_prompt,
-        "user_msg": user_msg
-    });
+    let body = serde_json::json!({ "messages": messages });
 
     let response = client
-        .post("https://design.hz-study-system.com/api/ai/chat")
+        .post("https://design.hz-study-system.com/api/web/ai/chat")
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", auth_token))
         .json(&body)
@@ -4560,20 +4580,14 @@ async fn call_lectureai(auth_token: String, system_prompt: String, user_msg: Str
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let error_text = response.text().await.unwrap_or_default();
-        return match status {
-            401 => Err("请先登录后才能使用 LectureAI".to_string()),
-            403 => Err("账号已被禁用，请联系管理员".to_string()),
-            429 => {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_text) {
-                    if let Some(detail) = json.get("detail").and_then(|d| d.as_str()) {
-                        return Err(detail.to_string());
-                    }
-                }
-                Err("今日 AI 使用次数已达上限，请明天再试或升级会员".to_string())
-            },
-            503 => Err("AI 服务暂未配置，请联系管理员".to_string()),
-            _ => Err(format!("AI 服务错误 ({})", status)),
-        };
+        // FastAPI returns {"detail": "..."} - surface it so quota/auth/config
+        // errors (e.g. "已超出本月 AI 配额", "请先登录") reach the user verbatim.
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_text) {
+            if let Some(detail) = json.get("detail").and_then(|d| d.as_str()) {
+                return Err(detail.to_string());
+            }
+        }
+        return Err(format!("AI 服务错误 ({})", status));
     }
 
     let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
@@ -4650,6 +4664,327 @@ async fn call_minimax_stream(
 
     let _ = app_handle.emit("ai-stream-done", ());
     Ok(())
+}
+
+// ---------- Multi-turn AI (workbench agent) ----------
+// ChatMessage carries the full conversation history to the model, enabling
+// Claude-Code-style multi-turn tool loops. The single-turn call_ai / call_ai_stream
+// stay untouched so the existing per-page chat keeps working unchanged.
+
+#[derive(serde::Deserialize, Clone)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+/// Build an OpenAI-style messages array [{role, content}, ...] from the history.
+fn openai_style_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+        .collect()
+}
+
+/// Split into (system, user/assistant messages) for Anthropic-style bodies,
+/// where the system prompt is a top-level field and each message content is a
+/// content-block array.
+fn anthropic_split_messages(messages: &[ChatMessage]) -> (String, Vec<serde_json::Value>) {
+    let system = messages
+        .iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let msgs = messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| {
+            serde_json::json!({ "role": m.role, "content": [{ "type": "text", "text": m.content }] })
+        })
+        .collect();
+    (system, msgs)
+}
+
+#[tauri::command]
+async fn call_ai_messages(
+    provider: String,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
+    match provider.as_str() {
+        "deepseek" => call_deepseek_messages(api_key, messages).await,
+        "minimax" => call_minimax_messages(api_key, messages).await,
+        "lectureai" => call_lectureai_chat(api_key, messages).await,
+        "custom" => call_custom_messages(api_key, api_type, base_url, model, messages).await,
+        _ => Err("不支持的AI提供商".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn call_ai_messages_stream(
+    app_handle: tauri::AppHandle,
+    provider: String,
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    messages: Vec<ChatMessage>,
+) -> Result<(), String> {
+    match provider.as_str() {
+        "minimax" => call_minimax_messages_stream(app_handle, api_key, messages).await,
+        "deepseek" => {
+            let result = call_deepseek_messages(api_key, messages).await?;
+            let _ = app_handle.emit("ai-stream-chunk", result);
+            let _ = app_handle.emit("ai-stream-done", ());
+            Ok(())
+        }
+        "lectureai" => {
+            let result = call_lectureai_chat(api_key, messages).await?;
+            let _ = app_handle.emit("ai-stream-chunk", result);
+            let _ = app_handle.emit("ai-stream-done", ());
+            Ok(())
+        }
+        "custom" => {
+            let result = call_custom_messages(api_key, api_type, base_url, model, messages).await?;
+            let _ = app_handle.emit("ai-stream-chunk", result);
+            let _ = app_handle.emit("ai-stream-done", ());
+            Ok(())
+        }
+        _ => Err("该提供商不支持流式输出".to_string()),
+    }
+}
+
+async fn call_deepseek_messages(api_key: String, messages: Vec<ChatMessage>) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": "deepseek-chat",
+        "messages": openai_style_messages(&messages),
+        "stream": false
+    });
+
+    let response = client
+        .post("https://api.deepseek.com/chat/completions")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API错误 {}: {}", status, error_text));
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    data["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "响应格式错误".to_string())
+}
+
+async fn call_minimax_messages(api_key: String, messages: Vec<ChatMessage>) -> Result<String, String> {
+    let (system, msgs) = anthropic_split_messages(&messages);
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": "MiniMax-M2.5",
+        "max_tokens": 4000,
+        "system": system,
+        "messages": msgs
+    });
+
+    let response = client
+        .post("https://api.minimaxi.com/anthropic/v1/messages")
+        .header("Content-Type", "application/json")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API错误 {}: {}", status, error_text));
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
+    if let Some(content_array) = data["content"].as_array() {
+        for item in content_array {
+            if item["type"] == "text" {
+                if let Some(text) = item["text"].as_str() {
+                    return Ok(text.to_string());
+                }
+            }
+        }
+    }
+
+    Err("响应格式错误".to_string())
+}
+
+async fn call_minimax_messages_stream(
+    app_handle: tauri::AppHandle,
+    api_key: String,
+    messages: Vec<ChatMessage>,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+
+    let (system, msgs) = anthropic_split_messages(&messages);
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": "MiniMax-M2.5",
+        "max_tokens": 4000,
+        "system": system,
+        "messages": msgs,
+        "stream": true
+    });
+
+    let response = client
+        .post("https://api.minimaxi.com/anthropic/v1/messages")
+        .header("Content-Type", "application/json")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("API错误: {}", response.status()));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("读取流失败: {}", e))?;
+        let text = String::from_utf8_lossy(&chunk);
+
+        buffer.push_str(&text);
+
+        for line in buffer.lines() {
+            if line.starts_with("data: ") {
+                let json_str = &line[6..];
+                if json_str == "[DONE]" {
+                    continue;
+                }
+
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    if data["type"] == "content_block_delta" {
+                        if let Some(delta_text) = data["delta"]["text"].as_str() {
+                            let _ = app_handle.emit("ai-stream-chunk", delta_text);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(last_newline) = buffer.rfind('\n') {
+            buffer = buffer[last_newline + 1..].to_string();
+        }
+    }
+
+    let _ = app_handle.emit("ai-stream-done", ());
+    Ok(())
+}
+
+async fn call_custom_messages(
+    api_key: String,
+    api_type: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
+    let (api_type, base_url, model) = normalize_custom_api_config(api_type, base_url, model)?;
+    match api_type.as_str() {
+        "openai-chat" => call_openai_chat_messages(api_key, base_url, model, messages).await,
+        "openai-responses" => call_openai_responses_messages(api_key, base_url, model, messages).await,
+        "anthropic-messages" => call_anthropic_messages_messages(api_key, base_url, model, messages).await,
+        _ => Err("不支持的 API 类型".to_string()),
+    }
+}
+
+async fn call_openai_chat_messages(
+    api_key: String,
+    base_url: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "messages": openai_style_messages(&messages),
+        "stream": false
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/chat/completions"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_openai_chat_response(response).await
+}
+
+async fn call_openai_responses_messages(
+    api_key: String,
+    base_url: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "input": openai_style_messages(&messages),
+        "stream": false
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/responses"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_openai_responses_response(response).await
+}
+
+async fn call_anthropic_messages_messages(
+    api_key: String,
+    base_url: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
+    let (system, msgs) = anthropic_split_messages(&messages);
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 4000,
+        "system": system,
+        "messages": msgs
+    });
+
+    let response = client
+        .post(join_api_url(&base_url, "/v1/messages"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    parse_anthropic_messages_response(response).await
 }
 
 #[tauri::command]
@@ -5329,6 +5664,37 @@ async fn close_audience_window(app_handle: tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
+// Workbench Agent window - a separate chat window so the main editor can stay
+// full-width for preview while the user talks to the agent side by side.
+// Mirrors open_audience_window. Chat/AI/protocol live in workbench.html; tool
+// execution is delegated back to the main window via events (see
+// ppte-workbench-agent.js).
+#[tauri::command]
+async fn open_workbench_window(app_handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri::WebviewWindowBuilder;
+    use tauri::WebviewUrl;
+
+    // If already open, just focus it.
+    if let Some(window) = app_handle.get_webview_window("workbench") {
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(
+        &app_handle,
+        "workbench",
+        WebviewUrl::App("workbench.html".into()),
+    )
+    .title("工作台助手")
+    .inner_size(520.0, 760.0)
+    .min_inner_size(420.0, 540.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 #[tauri::command]
 async fn emit_slide_change(app_handle: tauri::AppHandle, slide_url: String) -> Result<(), String> {
     app_handle
@@ -5438,6 +5804,8 @@ pub fn run() {
             ppte_git_sync,
             call_ai,
             call_ai_stream,
+            call_ai_messages,
+            call_ai_messages_stream,
             test_ai_config,
             local_ppte_agent_status,
             local_ppte_agent_start,
@@ -5454,6 +5822,7 @@ pub fn run() {
             caption_stop,
             open_audience_window,
             close_audience_window,
+            open_workbench_window,
             emit_slide_change,
         ])
         .run(tauri::generate_context!())

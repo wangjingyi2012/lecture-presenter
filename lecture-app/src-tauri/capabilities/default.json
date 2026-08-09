@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for the lecture app",
-  "windows": ["main", "audience"],
+  "windows": ["main", "audience", "workbench"],
   "permissions": [
     "core:default",
     "fs:default",

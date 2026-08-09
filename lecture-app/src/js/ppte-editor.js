@@ -505,7 +505,7 @@ window.PpteEditor = {
     const aiChatBtn = document.getElementById('ppt-ai-chat-btn');
     if (aiChatBtn) {
       aiChatBtn.disabled = !!pb.slides[pb.currentSlideIndex]?.linkedFrom;
-      aiChatBtn.onclick = () => this._showAiChat();
+      aiChatBtn.onclick = () => window.PpteWorkbenchAgent?.openForCurrentPage();
     }
 
     const resourcesBtn = document.getElementById('ppt-resources-btn');
