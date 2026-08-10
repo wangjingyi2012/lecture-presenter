@@ -95,6 +95,13 @@ window.Settings = {
       };
     }
 
+    const aiAssistantEntry = document.getElementById('ai-assistant-entry');
+    if (aiAssistantEntry) {
+      aiAssistantEntry.onclick = () => {
+        window.PpteWorkbenchAgent?.open();
+      };
+    }
+
     // PPTE management view buttons
     const ppteBackBtn = document.getElementById('ppte-back-to-course');
     if (ppteBackBtn) {

@@ -300,6 +300,7 @@ async fn auth_api_request(
         .trim_end_matches('/');
     let (method, path) = auth_api_spec(&action)?;
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("无法创建认证请求：{}", e))?;
@@ -3282,7 +3283,7 @@ fn gitee_token_clear() -> Result<TokenStatus, String> {
 async fn gitee_create_repo(name: String, description: Option<String>) -> Result<GiteeRepoInfo, String> {
     let token = read_gitee_token()?;
     let repo_name = sanitize_gitee_repo_name(&name);
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let mut form = vec![
         ("access_token".to_string(), token),
         ("name".to_string(), repo_name.clone()),
@@ -3953,7 +3954,7 @@ async fn verify_local_agent_admin(config: &AppConfig, auth_token: &str) -> Resul
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("https://design.hz-study-system.com")
         .trim_end_matches('/');
-    let response = reqwest::Client::new()
+    let response = direct_client()
         .get(format!("{}/api/web/auth/me", server))
         .bearer_auth(auth_token)
         .send()
@@ -4188,6 +4189,18 @@ async fn call_ai(
     user_msg: String,
 ) -> Result<String, String> {
     call_ai_with_config(provider, api_key, api_type, base_url, model, system_prompt, user_msg).await
+}
+
+/// reqwest client that bypasses the macOS system proxy. The desktop app talks
+/// to domestic endpoints (the design server, DeepSeek, MiniMax, Gitee, update
+/// server) which must NOT be routed through a local proxy (Clash/V2Ray)
+/// configured for overseas access. Overseas custom AI providers (OpenAI /
+/// Anthropic) keep using Client::new() so they still benefit from the proxy.
+fn direct_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 async fn call_ai_with_config(
@@ -4460,7 +4473,7 @@ async fn parse_anthropic_messages_response(response: reqwest::Response) -> Resul
 }
 
 async fn call_deepseek(api_key: String, system_prompt: String, user_msg: String) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let body = serde_json::json!({
         "model": "deepseek-chat",
         "messages": [
@@ -4494,7 +4507,7 @@ async fn call_deepseek(api_key: String, system_prompt: String, user_msg: String)
 }
 
 async fn call_minimax(api_key: String, system_prompt: String, user_msg: String) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let body = serde_json::json!({
         "model": "MiniMax-M2.5",
         "max_tokens": 4000,
@@ -4565,7 +4578,7 @@ async fn call_lectureai_chat_request(
     auth_token: String,
     messages: Vec<serde_json::Value>,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let body = serde_json::json!({ "messages": messages });
 
     let response = client
@@ -4606,7 +4619,7 @@ async fn call_minimax_stream(
 ) -> Result<(), String> {
     use futures_util::StreamExt;
 
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let body = serde_json::json!({
         "model": "MiniMax-M2.5",
         "max_tokens": 4000,
@@ -5104,7 +5117,7 @@ async fn call_ai_messages_stream(
 }
 
 async fn call_deepseek_messages(api_key: String, messages: Vec<ChatMessage>) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let body = serde_json::json!({
         "model": "deepseek-chat",
         "messages": openai_style_messages(&messages),
@@ -5135,7 +5148,7 @@ async fn call_deepseek_messages(api_key: String, messages: Vec<ChatMessage>) -> 
 
 async fn call_minimax_messages(api_key: String, messages: Vec<ChatMessage>) -> Result<String, String> {
     let (system, msgs) = anthropic_split_messages(&messages);
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let body = serde_json::json!({
         "model": "MiniMax-M2.5",
         "max_tokens": 4000,
@@ -5181,7 +5194,7 @@ async fn call_minimax_messages_stream(
     use futures_util::StreamExt;
 
     let (system, msgs) = anthropic_split_messages(&messages);
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let body = serde_json::json!({
         "model": "MiniMax-M2.5",
         "max_tokens": 4000,
@@ -5336,7 +5349,7 @@ async fn call_anthropic_messages_messages(
 
 #[tauri::command]
 async fn check_update(current_version: String, server_url: String) -> Result<UpdateInfo, String> {
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let url = format!("{}/api/version/check?current={}", server_url, current_version);
 
     let response = client.get(&url).send().await.map_err(|e| format!("请求失败: {}", e))?;
@@ -5358,7 +5371,7 @@ async fn check_update(current_version: String, server_url: String) -> Result<Upd
 
 #[tauri::command]
 async fn fetch_notifications(current_version: String, server_url: String) -> Result<Vec<Notification>, String> {
-    let client = reqwest::Client::new();
+    let client = direct_client();
     let url = format!("{}/api/notifications?version={}", server_url, current_version);
 
     let response = client.get(&url).send().await.map_err(|e| format!("请求失败: {}", e))?;

@@ -109,14 +109,20 @@
               <h2 id="week-title"></h2>
               <p id="week-description"></p>
             </div>
-            <button id="ppte-workbench-entry" class="workspace-entry-btn" title="进入 PPTE 工作台">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="2" y="3" width="20" height="14" rx="2"/>
-                <path d="M8 21h8M12 17v4"/>
-                <path d="M7 8h2v5H7zM11 6h2v7h-2zM15 10h2v3h-2z" fill="currentColor" stroke="none"/>
-              </svg>
-              PPTE 工作台
-            </button>
+            <div class="workspace-entry-actions">
+              <button id="ppte-workbench-entry" class="workspace-entry-btn" title="进入 PPTE 工作台">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="2" y="3" width="20" height="14" rx="2"/>
+                  <path d="M8 21h8M12 17v4"/>
+                  <path d="M7 8h2v5H7zM11 6h2v7h-2zM15 10h2v3h-2z" fill="currentColor" stroke="none"/>
+                </svg>
+                PPTE 工作台
+              </button>
+              <button id="ai-assistant-entry" class="workspace-entry-btn" style="border-color: var(--accent, #0969da); color: var(--accent, #0969da); font-weight:600" title="AI 助手：选一个 PPTE 课件开始对话">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v1H7a3 3 0 0 0-3 3v1a3 3 0 0 0 0 6v1a3 3 0 0 0 3-3h-2V5a3 3 0 0 0-3-3z"/><path d="M9 13h6"/></svg>
+                AI 助手
+              </button>
+            </div>
           </div>
         </div>
         <div id="resources"></div>

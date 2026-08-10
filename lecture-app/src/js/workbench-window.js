@@ -20,6 +20,9 @@ window.WorkbenchWindow = {
   _streamResolve: null,
   _renderTimer: null,
   _typeTimer: null,
+  _streamTextEl: null,
+  _streamCursorEl: null,
+  _thinkingTimer: null,
 
   async init() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
@@ -28,13 +31,20 @@ window.WorkbenchWindow = {
     // RPC response + prefill + streaming events
     await listen('wb-response', (e) => this._onResponse(e.payload));
     await listen('wb-prefill', (e) => this._onPrefill(e.payload));
+    await listen('wb-refresh', () => this._refreshContext());
     await listen('ai-stream-chunk', (e) => {
+      if (!this._streamFull) this._stopThinking();
       this._streamFull += e.payload;
       this._scheduleStreamingUpdate();
     });
     await listen('ai-stream-done', () => {
       if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
+      this._stopThinking();
+      // snap displayed text to the full streamed target so nothing is left
+      // half-typed by the typewriter, then drop the cursor.
+      this._displayText = this._stripActions(this._streamFull);
       this._updateStreaming();
+      if (this._streamCursorEl) { this._streamCursorEl.remove(); this._streamCursorEl = null; }
       const resolve = this._streamResolve;
       this._streamResolve = null;
       if (resolve) resolve(this._streamFull);
@@ -78,16 +88,22 @@ window.WorkbenchWindow = {
 
   // ---- RPC over events (single in-flight request; busy guard ensures serial) ----
   _pendingResolve: null,
+  _pendingType: null,
   _rpc(type, payload) {
     return new Promise((resolve) => {
       this._pendingResolve = resolve;
+      this._pendingType = type;
       window.__TAURI__.event.emit('wb-request', { type, payload });
     });
   },
   _onResponse(resp) {
     if (!resp) return;
+    // Ignore responses that don't match the in-flight request type (e.g. the
+    // pick-ppte ack arriving while a get-context refresh is pending).
+    if (this._pendingType && resp.type !== this._pendingType) return;
     const r = this._pendingResolve;
     this._pendingResolve = null;
+    this._pendingType = null;
     if (r) r(resp.result);
   },
 
@@ -117,6 +133,26 @@ window.WorkbenchWindow = {
         meta.textContent = '未连接课件';
       }
     }
+    if (!ctx || !ctx.slides?.length) {
+      this._renderPickCourse();
+    } else if (document.getElementById('wb-pick-ppte')) {
+      // was showing the pick-course guide, now connected -> reset to empty
+      this._renderEmpty();
+    }
+  },
+
+  _renderPickCourse() {
+    const m = document.getElementById('wb-messages');
+    if (!m) return;
+    m.innerHTML = `<div class="term-empty">
+      <span class="term-empty-accent">AI 助手</span> · 课件级 Agent<br>
+      未连接课件。选择一个 PPTE 课件开始对话。<br>
+      <button class="wb-pick-btn" id="wb-pick-ppte">选择 PPTE 课件</button>
+    </div>`;
+    const btn = document.getElementById('wb-pick-ppte');
+    if (btn) btn.onclick = () => {
+      window.__TAURI__.event.emit('wb-request', { type: 'pick-ppte' });
+    };
   },
 
   _applySelectedModel(id) {
@@ -300,6 +336,7 @@ window.WorkbenchWindow = {
       // the auth token, for others the raw API key. Pass it straight through.
       const apiKey = cfg.aiApiKey || '';
       const msgEl = this._appendAssistantStreaming();
+      this._startThinking();
       window.__TAURI__.core.invoke('call_ai_messages_stream', {
         provider,
         apiKey,
@@ -311,6 +348,7 @@ window.WorkbenchWindow = {
         // Surface the real backend error (quota / auth / format) instead of a
         // silent "empty" - reject so _runTurn's catch shows it.
         if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
+        this._stopThinking();
         this._streamResolve = null;
         msgEl.remove();
         reject(new Error(String(e)));
@@ -324,9 +362,8 @@ window.WorkbenchWindow = {
   },
 
   _updateStreaming() {
-    if (this._streamEl) {
-      this._streamEl.textContent = this._displayText;
-      this._streamEl.appendChild(this._cursor());
+    if (this._streamTextEl) {
+      this._streamTextEl.textContent = this._displayText;
     }
     this._scroll();
   },
@@ -382,11 +419,33 @@ window.WorkbenchWindow = {
     this._displayText = '';
     const el = document.createElement('div');
     el.className = 'ln ln-ai';
-    el.appendChild(this._cursor());
+    const text = document.createElement('span');
+    text.className = 'stream-text';
+    const cur = this._cursor();
+    el.appendChild(text);
+    el.appendChild(cur);
     m.appendChild(el);
     this._streamEl = el;
+    this._streamTextEl = text;
+    this._streamCursorEl = cur;
     this._scroll();
     return el;
+  },
+
+  // ---- "thinking" status while waiting for the first streamed chunk ----
+  _startThinking() {
+    const phrases = ['思考中', '分析中', '探索中', '推理中'];
+    let i = 0;
+    if (this._streamTextEl) this._streamTextEl.textContent = '✻ ' + phrases[0] + '…';
+    this._thinkingTimer = setInterval(() => {
+      i = (i + 1) % phrases.length;
+      if (this._streamTextEl && !this._streamFull) {
+        this._streamTextEl.textContent = '✻ ' + phrases[i] + '…';
+      }
+    }, 1400);
+  },
+  _stopThinking() {
+    if (this._thinkingTimer) { clearInterval(this._thinkingTimer); this._thinkingTimer = null; }
   },
 
   _logAction(a) {

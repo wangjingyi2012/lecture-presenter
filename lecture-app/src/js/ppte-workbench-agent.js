@@ -52,6 +52,7 @@ window.PpteWorkbenchAgent = {
       if (type === 'get-context') result = await this._getContext();
       else if (type === 'get-slide') result = this._getSlide(req.payload?.page);
       else if (type === 'execute-action') result = await this._executeAction(req.payload?.action);
+      else if (type === 'pick-ppte') result = await this._pickPpte();
       else result = { error: '未知请求类型 ' + type };
     } catch (e) {
       result = { error: String(e) };
@@ -60,6 +61,17 @@ window.PpteWorkbenchAgent = {
       window.__TAURI__.event.emit('wb-response', { type, result });
     } catch (e) {
       console.error('workbench response emit failed', e);
+    }
+    // Notify the workbench to re-pull context only AFTER the response for this
+    // request was emitted — the workbench resolves RPCs via a single pending
+    // resolver, so a wb-refresh sent before the wb-response would make the
+    // refresh's get-context resolve with this request's result instead.
+    if (type === 'pick-ppte') {
+      try {
+        window.__TAURI__.event.emit('wb-refresh', {});
+      } catch (e) {
+        console.error('workbench refresh emit failed', e);
+      }
     }
   },
 
@@ -119,6 +131,19 @@ window.PpteWorkbenchAgent = {
     const i = (page | 0) - 1;
     if (i < 0 || i >= (pb.slides || []).length) return '';
     return pb.slides[i].html || '';
+  },
+
+  // Open a PPTE folder picker in the main window (requested by the workbench
+  // window when no course is connected); _onRequest emits wb-refresh afterwards.
+  async _pickPpte() {
+    try {
+      const editor = this._editor();
+      const opener = editor.openPptExtra?.bind(editor) || window.Settings?.openPptExtra?.bind(window.Settings);
+      if (opener) await opener();
+      return 'ok';
+    } catch (e) {
+      return String(e);
+    }
   },
 
   // ---- open window ----

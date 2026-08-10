@@ -215,6 +215,13 @@ html, body {
   gap: 20px;
 }
 
+.workspace-entry-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
 .workspace-entry-btn {
   min-height: 34px;
   padding: 7px 12px;
