@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/v2/crates/tauri-utils/schema.json",
   "productName": "Lecture Presenter",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "identifier": "com.lecture.presenter",
   "build": {
     "frontendDist": "../src",
@@ -25,13 +25,19 @@
       "csp": "default-src 'self' slide: http://slide.localhost media: file: blob:; script-src 'self' 'unsafe-inline' slide: http://slide.localhost media:; style-src 'self' 'unsafe-inline' asset: https://asset.localhost slide: http://slide.localhost media:; font-src 'self' asset: https://asset.localhost slide: http://slide.localhost media: data:; img-src 'self' asset: https://asset.localhost slide: http://slide.localhost media: file: data: blob:; media-src 'self' asset: https://asset.localhost slide: http://slide.localhost media: file: blob:; connect-src 'self' ipc: http://ipc.localhost asset: https://asset.localhost slide: http://slide.localhost media: file: blob: http://localhost:* https://design.hz-study-system.com https://api.deepseek.com https://api.minimaxi.com; frame-src 'self' asset: https://asset.localhost slide: http://slide.localhost media: file: blob: http://localhost:* https://localhost:* https://* http://*",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app", "nsis"],
+    "targets": [
+      "dmg",
+      "app",
+      "nsis"
+    ],
     "copyright": "Copyright 2026 jingyi.wang. All rights reserved.",
     "shortDescription": "Professional course presentation and PPT editing tool",
     "longDescription": "Lecture Presenter - 专业的课程演示与PPT编辑工具。A Tauri 2 desktop application for browsing course materials including slides, videos, readings, and assignments, with built-in PPT-EXTRA slide editing capabilities.",
@@ -48,7 +54,10 @@
     },
     "windows": {
       "nsis": {
-        "languages": ["SimpChinese", "English"],
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
         "displayLanguageSelector": true
       }
     },
