@@ -4704,6 +4704,352 @@ fn anthropic_split_messages(messages: &[ChatMessage]) -> (String, Vec<serde_json
     (system, msgs)
 }
 
+// ── PPTE prompt asset: rules + protocol + linter ───────────────────────────
+//
+// The workbench agent's tool-protocol prompt and the formatting-rule text live
+// in a bundled asset rather than the frontend JS. At runtime the backend loads
+// either the encrypted `prompts.enc` (release builds, key injected at compile
+// time) or the plaintext `prompts.example.txt` (community builds / dev), parses
+// it, and prepends the protocol prompt to the workbench agent's system message
+// before dispatching to a non-LectureAI provider. The mechanical linter runs
+// entirely here so its rules never reach the frontend.
+
+#[derive(Clone, Default)]
+struct PromptBundle {
+    rules_prompt: String,
+    protocol_prompt: String,
+    oral_words: Vec<String>,
+}
+
+static PROMPT_BUNDLE: Mutex<Option<PromptBundle>> = Mutex::new(None);
+
+/// Parse the `===SECTION:name===` plaintext format into a PromptBundle.
+fn parse_prompt_bundle(text: &str) -> PromptBundle {
+    let mut bundle = PromptBundle::default();
+    let mut name: Option<String> = None;
+    let mut buf = String::new();
+    let assign = |bundle: &mut PromptBundle, n: &str, v: &str| {
+        match n {
+            "rules_prompt" => bundle.rules_prompt = v.to_string(),
+            "protocol_prompt" => bundle.protocol_prompt = v.to_string(),
+            "oral_words" => bundle.oral_words = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => {}
+        }
+    };
+    for line in text.lines() {
+        if let Some(rest) = line
+            .strip_prefix("===SECTION:")
+            .and_then(|r| r.strip_suffix("==="))
+        {
+            if let Some(n) = &name {
+                assign(&mut bundle, n, buf.trim_end());
+            }
+            name = Some(rest.to_string());
+            buf = String::new();
+        } else {
+            buf.push_str(line);
+            buf.push('\n');
+        }
+    }
+    if let Some(n) = &name {
+        assign(&mut bundle, n, buf.trim_end());
+    }
+    bundle
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// Decrypt `nonce(12) || ciphertext || tag(16)` with the compile-time key.
+fn decrypt_prompts(data: &[u8]) -> Option<String> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Key, Nonce,
+    };
+    let key_hex = option_env!("PPTE_PROMPT_KEY")?;
+    let key_bytes = hex_decode(key_hex)?;
+    if key_bytes.len() != 32 || data.len() < 12 + 16 {
+        return None;
+    }
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+    let nonce = Nonce::from_slice(&data[..12]);
+    cipher
+        .decrypt(nonce, &data[12..])
+        .ok()
+        .and_then(|pt| String::from_utf8(pt).ok())
+}
+
+fn load_prompt_bundle_uncached(app_handle: &tauri::AppHandle) -> Option<PromptBundle> {
+    // 1. Bundled resource (release): encrypted prompts.enc, then plaintext example.
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        let enc_path = resource_dir.join("resources").join("prompts.enc");
+        if let Ok(data) = fs::read(&enc_path) {
+            if let Some(pt) = decrypt_prompts(&data) {
+                return Some(parse_prompt_bundle(&pt));
+            }
+        }
+        let ex_path = resource_dir.join("resources").join("prompts.example.txt");
+        if let Ok(text) = fs::read_to_string(&ex_path) {
+            return Some(parse_prompt_bundle(&text));
+        }
+    }
+    // 2. Dev mode: read plaintext source/example from the crate's resources dir.
+    let dev_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    if let Ok(text) = fs::read_to_string(dev_dir.join("prompts.source.txt")) {
+        return Some(parse_prompt_bundle(&text));
+    }
+    if let Ok(text) = fs::read_to_string(dev_dir.join("prompts.example.txt")) {
+        return Some(parse_prompt_bundle(&text));
+    }
+    None
+}
+
+fn load_prompt_bundle(app_handle: &tauri::AppHandle) -> PromptBundle {
+    if let Ok(cache) = PROMPT_BUNDLE.lock() {
+        if let Some(b) = cache.clone() {
+            return b;
+        }
+    }
+    let bundle = load_prompt_bundle_uncached(app_handle).unwrap_or_default();
+    if let Ok(mut cache) = PROMPT_BUNDLE.lock() {
+        *cache = Some(bundle.clone());
+    }
+    bundle
+}
+
+/// Prepend the tool-protocol prompt to the first system message (non-LectureAI
+/// only; LectureAI's server owns the SKILL and prepends it itself).
+fn prepend_protocol_prompt(
+    app_handle: &tauri::AppHandle,
+    provider: &str,
+    mut messages: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    if provider == "lectureai" {
+        return messages;
+    }
+    let bundle = load_prompt_bundle(app_handle);
+    if bundle.protocol_prompt.is_empty() {
+        return messages;
+    }
+    if let Some(m) = messages.iter_mut().find(|m| m.role == "system") {
+        let original = std::mem::take(&mut m.content);
+        m.content = format!("{}\n\n{}", bundle.protocol_prompt, original);
+    } else {
+        messages.insert(
+            0,
+            ChatMessage {
+                role: "system".to_string(),
+                content: bundle.protocol_prompt,
+            },
+        );
+    }
+    messages
+}
+
+#[derive(serde::Serialize)]
+struct LintIssue {
+    rule: String,
+    severity: String,
+    message: String,
+    sample: Option<String>,
+}
+
+#[tauri::command]
+fn ppte_lint(app_handle: tauri::AppHandle, html: String) -> Result<Vec<LintIssue>, String> {
+    let bundle = load_prompt_bundle(&app_handle);
+    Ok(lint_html(&html, &bundle))
+}
+
+/// Extract `border-left:` / `border-top:` declarations from an inline style.
+fn find_border_side_decls(style: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lower = style.to_lowercase();
+    for key in ["border-left:", "border-top:"] {
+        let mut start = 0;
+        while let Some(rel) = lower[start..].find(key) {
+            let abs = start + rel;
+            let val_start = abs + key.len();
+            let val_end = style[val_start..]
+                .find(';')
+                .map(|e| val_start + e)
+                .unwrap_or(style.len());
+            out.push(style[abs..val_end].trim().to_string());
+            start = val_end;
+        }
+    }
+    out
+}
+
+fn lint_html(html: &str, bundle: &PromptBundle) -> Vec<LintIssue> {
+    use scraper::{node::Node, Html, Selector};
+    let mut issues: Vec<LintIssue> = Vec::new();
+    if html.trim().is_empty() {
+        return issues;
+    }
+    let doc = Html::parse_document(html);
+
+    let lecturer_words = ["开场", "动手实验", "附录", "课程回顾"];
+    let emoji_chars = [
+        '✓', '✗', '⚠', '✅', '❗', '⚡', '●', '★', '☆', '☑', '☒', '⭐', '✨',
+    ];
+    let color_keywords = [
+        "rgb", "hsl", "red", "orange", "blue", "green", "yellow", "purple", "pink", "amber",
+        "emerald",
+    ];
+
+    // 1. Title lecturer traces.
+    if let Ok(sel) = Selector::parse("h1, h2, h3, title") {
+        for el in doc.select(&sel) {
+            let t: String = el.text().collect::<Vec<_>>().join("");
+            let t: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            if t.is_empty() {
+                continue;
+            }
+            if lecturer_words.iter().any(|w| t.contains(w)) {
+                let head: String = t.chars().take(40).collect();
+                issues.push(LintIssue {
+                    rule: "去讲师痕迹".into(),
+                    severity: "warn".into(),
+                    message: format!("标题含讲师痕迹词：{}", head),
+                    sample: None,
+                });
+            }
+        }
+    }
+
+    // 2. Walk text nodes (skip pre/code/script/style ancestors).
+    let tree = &doc.tree;
+    for node_ref in tree.root().descendants() {
+        let raw: String = match node_ref.value() {
+            Node::Text(t) => t.text.trim().to_string(),
+            _ => continue,
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        let mut in_code = false;
+        let mut p = node_ref.parent();
+        while let Some(pr) = p {
+            if let Node::Element(e) = pr.value() {
+                if matches!(e.name(), "pre" | "code" | "script" | "style") {
+                    in_code = true;
+                    break;
+                }
+            }
+            p = pr.parent();
+        }
+        if in_code {
+            continue;
+        }
+        let text: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            continue;
+        }
+
+        for w in &bundle.oral_words {
+            if text.contains(w) {
+                let head: String = text.chars().take(60).collect();
+                issues.push(LintIssue {
+                    rule: "全面书面化".into(),
+                    severity: "warn".into(),
+                    message: format!("口语词\"{}\"", w),
+                    sample: Some(head),
+                });
+            }
+        }
+        if text.chars().any(|c| emoji_chars.contains(&c)) {
+            let head: String = text.chars().take(60).collect();
+            issues.push(LintIssue {
+                rule: "emoji 换 SVG".into(),
+                severity: "error".into(),
+                message: "图形 emoji 应用内联 SVG 实现".into(),
+                sample: Some(head),
+            });
+        }
+        if text.contains("--") {
+            let head: String = text.chars().take(60).collect();
+            issues.push(LintIssue {
+                rule: "去破折号".into(),
+                severity: "warn".into(),
+                message: "正文含 --，应用逗号或句号替代".into(),
+                sample: Some(head),
+            });
+        }
+        if text.ends_with('。') {
+            if let Some(pid) = node_ref.parent() {
+                if let Node::Element(e) = pid.value() {
+                    if matches!(e.name(), "p" | "li" | "div" | "span") {
+                        let tail: String = text
+                            .chars()
+                            .rev()
+                            .take(40)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        issues.push(LintIssue {
+                            rule: "去句末句号".into(),
+                            severity: "info".into(),
+                            message: "段落末尾句号建议去掉".into(),
+                            sample: Some(tail),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Card side borders (border-left/border-top with a color).
+    if let Ok(sel) =
+        Selector::parse(".card, .kpi, .map-card, [class*='step-card'], [class*='step_card']")
+    {
+        for el in doc.select(&sel) {
+            let style = el.value().attr("style").unwrap_or("");
+            for decl in find_border_side_decls(style) {
+                let lower = decl.to_lowercase();
+                let has_color =
+                    lower.contains('#') || color_keywords.iter().any(|k| lower.contains(k));
+                if has_color {
+                    issues.push(LintIssue {
+                        rule: "卡片不要侧边彩条".into(),
+                        severity: "error".into(),
+                        message: format!("卡片有 {}，应用统一 4 边边框", decl),
+                        sample: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // 4. Card colored gradient backgrounds.
+    if let Ok(sel) = Selector::parse(".card, .kpi, .map-card") {
+        for el in doc.select(&sel) {
+            let style = el.value().attr("style").unwrap_or("");
+            if style.to_lowercase().contains("gradient") {
+                issues.push(LintIssue {
+                    rule: "卡片中性背景".into(),
+                    severity: "warn".into(),
+                    message: "卡片背景含彩色渐变，应改中性 #fff / #f8fafc".into(),
+                    sample: None,
+                });
+            }
+        }
+    }
+
+    issues
+}
+
 #[tauri::command]
 async fn call_ai_messages(
     provider: String,
@@ -4732,6 +5078,7 @@ async fn call_ai_messages_stream(
     model: Option<String>,
     messages: Vec<ChatMessage>,
 ) -> Result<(), String> {
+    let messages = prepend_protocol_prompt(&app_handle, &provider, messages);
     match provider.as_str() {
         "minimax" => call_minimax_messages_stream(app_handle, api_key, messages).await,
         "deepseek" => {
@@ -5806,6 +6153,7 @@ pub fn run() {
             call_ai_stream,
             call_ai_messages,
             call_ai_messages_stream,
+            ppte_lint,
             test_ai_config,
             local_ppte_agent_status,
             local_ppte_agent_start,

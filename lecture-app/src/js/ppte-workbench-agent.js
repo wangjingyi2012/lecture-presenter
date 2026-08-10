@@ -152,7 +152,7 @@ window.PpteWorkbenchAgent = {
         case 'insert_slide': return await this._toolInsertSlide(pb, a);
         case 'reorder_slides': return await this._toolReorderSlides(pb, a);
         case 'read_slide': return this._toolReadSlide(pb, a);
-        case 'validate_slide': return this._toolValidateSlide(pb, a);
+        case 'validate_slide': return await this._toolValidateSlide(pb, a);
         case '_parse_error': return `action 解析失败：${a.error}\n原始内容：${(a.raw || '').slice(0, 200)}`;
         default: return `[未知工具] ${a.tool}`;
       }
@@ -174,7 +174,7 @@ window.PpteWorkbenchAgent = {
     }
     await this._editor()._savePptBuilderData(pb, {});
     this._editor()._renderPptBuilderInContent();
-    const lint = window.PpteRules ? window.PpteRules.lintSummary(pb.slides[i].html) : '';
+    const lint = window.PpteRules ? await window.PpteRules.lintSummary(pb.slides[i].html) : '';
     return `write_slide(第${page}页「${pb.slides[i].title}」) 已保存，主窗口已刷新预览。\n规范检查：\n${lint}`;
   },
 
@@ -232,7 +232,7 @@ window.PpteWorkbenchAgent = {
     return `第${page}页「${s.title}」HTML：\n\`\`\`html\n${s.html || ''}\n\`\`\``;
   },
 
-  _toolValidateSlide(pb, a) {
+  async _toolValidateSlide(pb, a) {
     let html, label;
     if (a.page != null) {
       const page = (a.page | 0);
@@ -245,7 +245,7 @@ window.PpteWorkbenchAgent = {
     } else {
       return `validate_slide 失败：需指定 page 或 html`;
     }
-    const lint = window.PpteRules ? window.PpteRules.lintSummary(html) : 'linter 不可用';
+    const lint = window.PpteRules ? await window.PpteRules.lintSummary(html) : 'linter 不可用';
     return `${label} 规范检查：\n${lint}`;
   }
 };

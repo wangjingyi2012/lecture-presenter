@@ -3,11 +3,12 @@
  * Build script that obfuscates JS before Tauri bundles the app.
  *
  * Flow:
- *   1. Copy  src/ → dist/   (fresh copy every run)
+ *   1. Copy  src/ -> dist/   (fresh copy every run)
  *   2. Obfuscate every .js in dist/js/  (skip vendor/)
- *   3. Patch tauri.conf.json  frontendDist → "../dist"
+ *   2b. Encrypt the prompt asset when PPTE_PROMPT_KEY is set
+ *   3. Patch tauri.conf.json  frontendDist -> "../dist" (+ prompts.enc if encrypted)
  *   4. Run `tauri build`
- *   5. Restore tauri.conf.json  frontendDist → "../src"
+ *   5. Restore tauri.conf.json
  *   6. Clean up dist/
  */
 
@@ -21,7 +22,7 @@ const SRC = path.join(ROOT, 'src');
 const DIST = path.join(ROOT, 'dist');
 const TAURI_CONF = path.join(ROOT, 'src-tauri', 'tauri.conf.json');
 
-// Obfuscator options — high obfuscation, keep runtime perf reasonable
+// Obfuscator options - high obfuscation, keep runtime perf reasonable
 const OBF_OPTIONS = {
   compact: true,
   controlFlowFlattening: true,
@@ -75,7 +76,7 @@ function obfuscateDir(dir) {
 console.log('=== Obfuscated Build ===\n');
 
 // 1. Clean & copy
-console.log('1. Copying src → dist ...');
+console.log('1. Copying src -> dist ...');
 rmSync(DIST);
 copyDirSync(SRC, DIST);
 
@@ -86,10 +87,26 @@ if (fs.existsSync(jsDir)) {
   obfuscateDir(jsDir);
 }
 
+// 2b. Encrypt the prompt asset when a key is configured.
+let encAvailable = false;
+if (process.env.PPTE_PROMPT_KEY) {
+  console.log('2b. Encrypting prompt asset ...');
+  execSync('node scripts/encrypt-prompts.js', { cwd: ROOT, stdio: 'inherit' });
+  encAvailable = true;
+} else {
+  console.log('2b. PPTE_PROMPT_KEY not set; release will use the plaintext prompt example.');
+}
+
 // 3. Patch tauri.conf.json
-console.log('3. Patching tauri.conf.json → frontendDist: "../dist" ...');
+console.log('3. Patching tauri.conf.json -> frontendDist: "../dist" ...');
 const confRaw = fs.readFileSync(TAURI_CONF, 'utf-8');
-const confPatched = confRaw.replace('"frontendDist": "../src"', '"frontendDist": "../dist"');
+let confPatched = confRaw.replace('"frontendDist": "../src"', '"frontendDist": "../dist"');
+if (encAvailable) {
+  confPatched = confPatched.replace(
+    '"resources/prompts.example.txt"',
+    '"resources/prompts.example.txt",\n      "resources/prompts.enc"'
+  );
+}
 fs.writeFileSync(TAURI_CONF, confPatched);
 
 // 4. Build
@@ -102,9 +119,14 @@ try {
   execSync(buildCmd, { cwd: ROOT, stdio: 'inherit' });
 } finally {
   // 5. Restore tauri.conf.json (always, even if build fails)
-  console.log('\n5. Restoring tauri.conf.json → frontendDist: "../src" ...');
+  console.log('\n5. Restoring tauri.conf.json -> frontendDist: "../src" ...');
   const confNow = fs.readFileSync(TAURI_CONF, 'utf-8');
-  fs.writeFileSync(TAURI_CONF, confNow.replace('"frontendDist": "../dist"', '"frontendDist": "../src"'));
+  let restored = confNow.replace('"frontendDist": "../dist"', '"frontendDist": "../src"');
+  restored = restored.replace(
+    '"resources/prompts.example.txt",\n      "resources/prompts.enc"',
+    '"resources/prompts.example.txt"'
+  );
+  fs.writeFileSync(TAURI_CONF, restored);
 
   // 6. Clean dist/
   console.log('6. Cleaning dist/ ...');

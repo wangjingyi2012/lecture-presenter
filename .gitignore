@@ -43,3 +43,9 @@ sync-to-server.sh
 *.sqlite
 *.sqlite3
 .gstack/
+
+# PPTE prompt assets: prompts.source.txt is the private enhanced ruleset,
+# prompts.enc is its encrypted build artifact. The public community version
+# lives in prompts.example.txt (committed).
+lecture-app/src-tauri/resources/prompts.source.txt
+lecture-app/src-tauri/resources/prompts.enc

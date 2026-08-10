@@ -64,7 +64,8 @@
     "resources": [
       "app-config.json",
       "PPT-Template",
-      "使用指南"
+      "使用指南",
+      "resources/prompts.example.txt"
     ]
   },
   "plugins": {

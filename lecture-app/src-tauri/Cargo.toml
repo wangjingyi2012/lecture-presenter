@@ -23,6 +23,8 @@ http = "1"
 notify = "6"
 keyring = "3"
 sha2 = "0.10"
+aes-gcm = "0.10"
+scraper = "0.20"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 uuid = { version = "1", features = ["v4"] }

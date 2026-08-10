@@ -21,28 +21,6 @@ window.WorkbenchWindow = {
   _renderTimer: null,
   _typeTimer: null,
 
-  PROTOCOL_PROMPT: `## 工具调用协议
-
-你是课件级助手，可以修改整套 PPTE 课件。用户消息里 @第N页 的 HTML 是当前该页内容；需要看其他页时用 read_slide 工具。
-
-要修改页面时，返回一个 \`\`\`action 代码块，内含 JSON（一次一个工具）：
-
-{"tool":"write_slide","page":3,"html":"<完整页面HTML>","reason":"为何这样改"}
-
-工具清单：
-- write_slide {page, html, reason}：替换某页完整 HTML（page 从 1 开始）
-- insert_slide {after, title, html, reason}：在某页之后插入新页（after=0 表示开头）
-- reorder_slides {order, reason}：重排，order 是新顺序的页码数组，如 [1,3,2]
-- read_slide {page}：读取某页 HTML
-- validate_slide {page}：对该页跑 PPTE 规范检查
-
-规则：
-- 一次只返回一个 action 块；action 块外的文字是给用户的解释
-- 不要用 \`\`\`html 返回裸 HTML，一律走 action 块
-- 改完页面后主动 validate_slide 自检，发现问题再修
-- html 字段是完整的单页 HTML（含 <style> 和页面结构）
-- 主窗口会实时预览改动，用户能看到，无需重复描述页面内容`,
-
   async init() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
     const { listen, emit } = window.__TAURI__.event;
@@ -184,16 +162,11 @@ window.WorkbenchWindow = {
       const list = this.manifest.slides.map((s, i) => `${i + 1}. ${s.title || '（无标题）'}`).join('\n');
       ctx = `当前课件：${this.manifest.title || '未命名'}（共 ${this.manifest.slides.length} 页）\n页面清单：\n${list}`;
     }
-    // LectureAI: the server owns the SKILL (rules + protocol + pedagogy) as a
-    // product asset and prepends it; the desktop sends only the dynamic manifest
+    // The tool-protocol prompt is prepended by the Rust backend when the request
+    // is dispatched to a non-LectureAI provider; LectureAI's server owns the full
+    // SKILL and prepends it itself. The desktop sends only the dynamic manifest
     // so the model isn't double-prompted.
-    if (this.selectedConfig?.aiProvider === 'lectureai') {
-      return ctx;
-    }
-    // My own AI (direct provider): MINIMAL - only the tool protocol + manifest.
-    // No SKILL (排版规范/教学法), so the contrast with LectureAI is clear:
-    // LectureAI produces SKILL-compliant high-quality slides, my own AI does not.
-    return [this.PROTOCOL_PROMPT, ctx].join('\n\n');
+    return ctx;
   },
 
   _ensureHistory() {
