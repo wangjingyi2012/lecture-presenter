@@ -25,14 +25,55 @@ PPTE（PPT-EXTRA）是自研的 HTML 幻灯片体系。每页课件是一个完�
 
 工作台是一个终端流式界面（类 Claude Code），教师输入指令，AI 自动读取页面、修改 HTML、校验排版、保存预览。
 
-关键：AI 内置了一套 **PPTE 专家 SKILL**（`workbench_skill.md`，约 2500 字），包含：
+关键：AI 内置了一套 **PPTE 专家 SKILL**（`workbench_skill.md`，约 2500 字 + 6 个专项 SKILL 文件），涵盖课件制作的全链路：
 
-- **9 条排版规范**：去讲师痕迹、去破折号、去句末句号、emoji 换 SVG、术语弹窗、卡片统一边框……
-- **教学法**：一概念一页带真实数据、五步讲实操、不留未知知识点、实战案例选型四标准
-- **设计规则**：vw 字号分级、Grid/Flex 布局、配色规范、图片放大交互
-- **工具协议**：`write_slide` / `insert_slide` / `reorder_slides` / `read_slide` / `validate_slide`
+**排版规范（9 条硬性约束）**：
+- 去讲师痕迹（标题不写"开场""续""案例①"）
+- 全面书面化（去口语词）
+- 去破折号、去句末句号
+- emoji 全换内联 SVG（✓✗⚠️→SVG 图标）
+- 重点词 `<b style="color:#dc2626">` 红色高亮
+- 卡片统一 4 边边框（禁止 border-left 彩条）
+- 术语弹窗（`<span class="term" data-popover-body>`）
+- 全局覆盖样式集中管理
 
-SKILL 沉淀在**服务器端**作为产品资产，客户端无法篡改。每次 AI 对话自动注入，保证产出合规。
+**教学法（课程设计层）**：
+- 循序渐进，不留未知知识点
+- 一个概念一页，每页要有真实数据（数据库行、JSON 字段、终端输出）
+- 实操环节五步讲：做什么→为什么→复制哪条命令→正常应看到什么→报错最常见原因
+- 概念讲透讲够，反对过度压缩
+- 实战案例选型四标准：AI 裸用做不到、环境零负担、无合规风险、教学真刚需
+
+**设计规则（视觉与交互层）**：
+- 字号分级（vw 制）：H1=3-3.5vw、Body=1.8vw、Caption=1.5vw，禁用 px
+- 布局体系：宽度 `%`、垂直 `vh`、字体 `vw`，Grid/Flex 优先
+- 16:9 投影安全区（76vh），溢出用 `min-height:0; overflow-y:auto`
+- 配色规范：科技蓝 `#3b82f6` + 翡翠绿 `#10b981` + 深灰文字；禁止紫粉渐变
+- 卡片：圆角 + 轻阴影 + 浅灰边框，禁止发光/彩条
+- 图片点击放大全屏（`.zoomable` + overlay + Esc 关闭）
+- 文案直接面向学员，禁讲者口吻（"我们""接下来""大家"）
+
+**页面类型与模板**：
+- slide_type：封面 cover / 目录 toc / 内容 content / 图文分栏 split / 卡片网格 cards / 结束 ending
+- 排版模板库：feature-list / two-column / timeline / table / image-text-split / image-grid / hero-figure
+- 每页 `.note` 文件存放讲师口述（不进正文）
+
+**工具协议（Agent 执行层）**：
+- `write_slide` {page, html, reason}：替换某页完整 HTML
+- `insert_slide` {after, title, html, reason}：在某页之后插入新页
+- `reorder_slides` {order, reason}：重排页面顺序
+- `read_slide` {page}：读取某页当前 HTML（AI 自主查看）
+- `validate_slide` {page}：对该页跑 PPTE 规范 linter，返回违规项
+
+**动画与交互效果（PPTE 格式原生能力）**：
+- CSS 动画 / 过渡 / 关键帧（页面进入、内容揭示、数据高亮）
+- 交互弹窗（术语首次出现点击展开）
+- 点击放大图片（全屏 overlay）
+- 键盘导航（方向键翻页、F 全屏、S 演讲者模式）
+- 演讲者模式（独立观众窗口 + 当前/下一页预览 + 计时器 + Markdown 讲稿）
+- 批注叠加层（画笔/高亮/文本，内存态不修改课件）
+
+SKILL 沉淀在**服务器端**作为产品资产，客户端无法篡改。每次 AI 对话自动注入，保证产出合规。这不是简单的 prompt 工程，而是将**教学方法论 + 视觉设计规范 + 交互能力 + Agent 工具链**系统化为可执行的 AI 指令集。
 
 ### 3. "选 AI" 模型：LectureAI vs 自己的 AI
 
@@ -43,6 +84,27 @@ SKILL 沉淀在**服务器端**作为产品资产，客户端无法篡改。每�
 | 质量 | 高（专家级合规课件） | 低（无 SKILL，反衬 LectureAI 价值） |
 
 用户选 LectureAI = 走平台 LLM + 完整 SKILL = 高质量产出（产品卖点）；选自己的 AI = 走自己的 LLM + 无 SKILL = 效果自然差。**SKILL 是差异化壁垒**。
+
+### 4. 双端互通：桌面 ↔ Web 课件无缝流转
+
+PPTE 格式是桌面端和 Web 端的**通用课件载体**。两端共享同一套 `manifest.json` + `slide*.html` + `.note` 文件结构，课件在任意一端创建，另一端可直接打开：
+
+```
+桌面应用创建/编辑 PPTE  ──→  上传到 Web 平台  ──→  在线播放/分享/导出 PDF
+                                ↓
+Web 平台 AI 生成 PPTE   ──→  下载 PPTE 包   ──→  桌面应用打开/播放/继续编辑
+```
+
+| 场景 | 桌面端 | Web 端 |
+|---|---|---|
+| 创建课件 | ✅ 编辑器 + AI 工作台 | ✅ 工作站 AI 面板 |
+| 打开课件 | ✅ 本地文件夹 | ✅ 上传 / 项目列表 |
+| 播放 | ✅ 全屏 + 演讲者模式 + 观众窗口 | ✅ 浏览器内在线播放 |
+| AI 生成 | ✅ 终端工作台（LectureAI / 自配） | ✅ AI 面板（LectureAI / 自配） |
+| 导出 | ✅ PPTX | ✅ PDF / PPTX |
+| 分享 | Gitee 备份 | 课件广场公开 + 链接分享 |
+
+两端通过同一套后端 API（`/api/web/*`）+ 同一套 AI 服务（`/api/web/ai/chat` + SKILL）+ 同一套账号体系（`lecture_web_token`）打通，用户在任意端登录后都能访问自己的课件和 AI 配置。
 
 ---
 

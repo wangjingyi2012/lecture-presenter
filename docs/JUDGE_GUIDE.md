@@ -120,13 +120,15 @@ Lecture Presenter 是一套 **AI 驱动的课件创作与演示平台**，包含
 
 | 创新点 | 说明 |
 |---|---|
-| **PPTE 格式** | 自研 HTML 幻灯片体系，支持动画/交互，碾压 PPTX |
-| **AI 工作台 + SKILL** | 服务器端内置 PPTE 专家知识库（排版+教学法+设计），客户端不可篡改 |
+| **PPTE 格式** | 自研 HTML 幻灯片体系，支持 CSS 动画、SVG 图标、交互弹窗、点击放大、键盘导航、演讲者模式、批注叠加--PPTX 无法实现的效果 |
+| **AI 工作台 + SKILL** | 服务器端内置 PPTE 专家知识库（排版规范 9 条 + 教学法 + 设计规则 + 页面类型/模板 + 动画交互 + Agent 工具协议），客户端不可篡改 |
+| **SKILL 体系深度** | 不只是 prompt：将教学方法论 + 视觉设计规范 + 交互能力 + Agent 工具链系统化为可执行的 AI 指令集 |
 | **"选 AI" 模型** | LectureAI（平台+SKILL=高质量）vs 用户自配 AI（无 SKILL=低质量），SKILL 是差异化壁垒 |
-| **终端流式 UI** | 类 Claude Code 的终端界面，流式输出 + diff + 工具执行 |
-| **多轮 Agent 循环** | AI 自主读页→改页→校验→修复，支持多工具链式调用 |
+| **终端流式 UI** | 类 Claude Code 终端，打字机流式 + LCS 行 diff + 亮/暗主题跟随系统 |
+| **多轮 Agent 循环** | AI 自主 read_slide -> write_slide -> validate_slide -> 修复，多工具链式调用 |
+| **双端互通** | PPTE 是通用载体：桌面创建->上传 Web->在线播放/导出；Web 生成->下载->桌面打开/继续编辑 |
 | **邮箱验证** | Resend SMTP + JWT token，完整注册闭环 |
-| **Web + 桌面双端** | 桌面 Tauri 2 + Web FastAPI，共享后端 API |
+| **Web + 桌面双端** | 桌面 Tauri 2 + Web FastAPI，共享后端 API + AI SKILL + 账号体系 | 桌面 Tauri 2 + Web FastAPI，共享后端 API |
 
 ---
 
