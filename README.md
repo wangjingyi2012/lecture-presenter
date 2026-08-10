@@ -21,17 +21,25 @@ PPTE（PPT-EXTRA）是自研的 HTML 幻灯片体系。每页课件是一个完�
 └── content.css            # 共享样式
 ```
 
-### 2. AI 工作台 + 内置 SKILL：课件质量护城河
+**PPTE 原生能力**：
+- CSS 动画 / 过渡 / 关键帧（页面进入、内容揭示、数据高亮）
+- 交互弹窗（术语首次出现点击展开）
+- 点击放大图片（全屏 overlay + Esc 关闭）
+- 键盘导航（方向键翻页、F 全屏、S 演讲者模式）
+- 演讲者模式（独立观众窗口 + 当前/下一页预览 + 计时器 + Markdown 讲稿）
+- 批注叠加层（画笔/高亮/文本，内存态不修改课件）
+
+### 2. AI 工作台 + 后端 Harness 机制：课件质量护城河
 
 工作台是一个终端流式界面（类 Claude Code），教师输入指令，AI 自动读取页面、修改 HTML、校验排版、保存预览。
 
-关键：AI 内置了一套 **PPTE 专家 SKILL**（`workbench_skill.md`，约 2500 字 + 6 个专项 SKILL 文件），涵盖课件制作的全链路：
+关键：LectureAI 在**服务器端**内置了一套 **Harness 机制**，将课件制作的**全链路专业知识**系统化为可执行的 AI 指令集，涵盖：
 
 **排版规范（9 条硬性约束）**：
 - 去讲师痕迹（标题不写"开场""续""案例①"）
 - 全面书面化（去口语词）
 - 去破折号、去句末句号
-- emoji 全换内联 SVG（✓✗⚠️→SVG 图标）
+- emoji 全换内联 SVG（✓✗⚠️ -> SVG 图标）
 - 重点词 `<b style="color:#dc2626">` 红色高亮
 - 卡片统一 4 边边框（禁止 border-left 彩条）
 - 术语弹窗（`<span class="term" data-popover-body>`）
@@ -40,7 +48,7 @@ PPTE（PPT-EXTRA）是自研的 HTML 幻灯片体系。每页课件是一个完�
 **教学法（课程设计层）**：
 - 循序渐进，不留未知知识点
 - 一个概念一页，每页要有真实数据（数据库行、JSON 字段、终端输出）
-- 实操环节五步讲：做什么→为什么→复制哪条命令→正常应看到什么→报错最常见原因
+- 实操环节五步讲：做什么 -> 为什么 -> 复制哪条命令 -> 正常应看到什么 -> 报错最常见原因
 - 概念讲透讲够，反对过度压缩
 - 实战案例选型四标准：AI 裸用做不到、环境零负担、无合规风险、教学真刚需
 
@@ -58,41 +66,33 @@ PPTE（PPT-EXTRA）是自研的 HTML 幻灯片体系。每页课件是一个完�
 - 排版模板库：feature-list / two-column / timeline / table / image-text-split / image-grid / hero-figure
 - 每页 `.note` 文件存放讲师口述（不进正文）
 
-**工具协议（Agent 执行层）**：
+**Agent 工具链**：
 - `write_slide` {page, html, reason}：替换某页完整 HTML
 - `insert_slide` {after, title, html, reason}：在某页之后插入新页
 - `reorder_slides` {order, reason}：重排页面顺序
 - `read_slide` {page}：读取某页当前 HTML（AI 自主查看）
-- `validate_slide` {page}：对该页跑 PPTE 规范 linter，返回违规项
+- `validate_slide` {page}：对该页跑排版规范校验，返回违规项
 
-**动画与交互效果（PPTE 格式原生能力）**：
-- CSS 动画 / 过渡 / 关键帧（页面进入、内容揭示、数据高亮）
-- 交互弹窗（术语首次出现点击展开）
-- 点击放大图片（全屏 overlay）
-- 键盘导航（方向键翻页、F 全屏、S 演讲者模式）
-- 演讲者模式（独立观众窗口 + 当前/下一页预览 + 计时器 + Markdown 讲稿）
-- 批注叠加层（画笔/高亮/文本，内存态不修改课件）
-
-SKILL 沉淀在**服务器端**作为产品资产，客户端无法篡改。每次 AI 对话自动注入，保证产出合规。这不是简单的 prompt 工程，而是将**教学方法论 + 视觉设计规范 + 交互能力 + Agent 工具链**系统化为可执行的 AI 指令集。
+Harness 沉淀在**服务器端**作为产品核心资产，**客户端无法查看或篡改**。每次 LectureAI 对话自动注入，保证产出始终合规。这不是简单的提示词工程，而是将**教学方法论 + 视觉设计规范 + 交互能力 + Agent 工具链**编译为结构化的后端知识引擎，在 AI 生成前进行约束、在生成后进行校验，形成闭环质量管控。
 
 ### 3. "选 AI" 模型：LectureAI vs 自己的 AI
 
 | | LectureAI（平台内置） | 我的 AI（自配） |
 |---|---|---|
-| LLM | 平台配置的 DeepSeek | 用户自己的 API Key |
-| SKILL | ✅ 完整注入（排版+教学法+设计+协议） | ❌ 仅最小格式约束 |
-| 质量 | 高（专家级合规课件） | 低（无 SKILL，反衬 LectureAI 价值） |
+| 算力 | 平台提供，用户无需自备 Key | 用户自己的 API Key |
+| Harness | ✅ 完整注入（排版+教学法+设计+工具链） | ❌ 仅最小格式约束 |
+| 质量 | 高（专家级合规课件） | 低（无 Harness 约束，反衬 LectureAI 价值） |
 
-用户选 LectureAI = 走平台 LLM + 完整 SKILL = 高质量产出（产品卖点）；选自己的 AI = 走自己的 LLM + 无 SKILL = 效果自然差。**SKILL 是差异化壁垒**。
+用户选 LectureAI = 走平台算力 + 完整 Harness = 高质量产出（产品卖点）；选自己的 AI = 走自己的算力 + 无 Harness = 效果自然差。**后端 Harness 机制是差异化壁垒**，它使得同样是 AI 生成课件，LectureAI 的产出在排版规范性、教学逻辑完整性、视觉专业度上全面领先。
 
 ### 4. 双端互通：桌面 ↔ Web 课件无缝流转
 
 PPTE 格式是桌面端和 Web 端的**通用课件载体**。两端共享同一套 `manifest.json` + `slide*.html` + `.note` 文件结构，课件在任意一端创建，另一端可直接打开：
 
 ```
-桌面应用创建/编辑 PPTE  ──→  上传到 Web 平台  ──→  在线播放/分享/导出 PDF
+桌面应用创建/编辑 PPTE  ──->  上传到 Web 平台  ──->  在线播放/分享/导出 PDF
                                 ↓
-Web 平台 AI 生成 PPTE   ──→  下载 PPTE 包   ──→  桌面应用打开/播放/继续编辑
+Web 平台 AI 生成 PPTE   ──->  下载 PPTE 包   ──->  桌面应用打开/播放/继续编辑
 ```
 
 | 场景 | 桌面端 | Web 端 |
@@ -104,7 +104,7 @@ Web 平台 AI 生成 PPTE   ──→  下载 PPTE 包   ──→  桌面应用
 | 导出 | ✅ PPTX | ✅ PDF / PPTX |
 | 分享 | Gitee 备份 | 课件广场公开 + 链接分享 |
 
-两端通过同一套后端 API（`/api/web/*`）+ 同一套 AI 服务（`/api/web/ai/chat` + SKILL）+ 同一套账号体系（`lecture_web_token`）打通，用户在任意端登录后都能访问自己的课件和 AI 配置。
+两端通过同一套后端服务 + 同一套账号体系打通，用户在任意端登录后都能访问自己的课件和 AI 配置。
 
 ---
 
@@ -132,20 +132,19 @@ Web 平台 AI 生成 PPTE   ──→  下载 PPTE 包   ──→  桌面应用
 ## 🏗️ 技术架构
 
 ```
-┌─ 桌面应用 (Tauri 2) ──────────────────────────────┐
-│  Rust 后端 (lib.rs)        Vanilla JS 前端          │
-│  · PPTE 编辑器             · 工作台 Agent 窗口       │
-│  · slide:// 协议           · 终端流式 UI             │
-│  · AI 工具执行              · @页面定位               │
-│  · PPTX 导出               · 模型选择器              │
+┌─ 桌面应用 ──────────────────────────────────────┐
+│  原生后端                   原生前端              │
+│  · PPTE 编辑器             · 工作台 Agent 窗口   │
+│  · slide:// 协议           · 终端流式 UI         │
+│  · AI 工具执行              · @页面定位           │
+│  · PPTX 导出               · 模型选择器          │
 └──────────┬───────────────────────────┬────────────┘
            │                           │
      ┌─────▼─────┐              ┌──────▼──────┐
      │ Web 平台   │              │  AI 服务     │
-     │ FastAPI    │              │  /api/web/  │
-     │ 11 页 SPA  │              │  ai/chat    │
-     │ 邮箱验证    │              │  + SKILL    │
-     │ 管理后台    │              │  + DeepSeek │
+     │ 11 页 SPA  │              │  Harness    │
+     │ 邮箱验证    │              │  注入+校验   │
+     │ 管理后台    │              │  + 算力调度  │
      └────────────┘              └─────────────┘
 ```
 
@@ -153,11 +152,12 @@ Web 平台 AI 生成 PPTE   ──→  下载 PPTE 包   ──→  桌面应用
 
 | 层 | 技术 |
 |---|---|
-| 桌面 | Tauri 2 (Rust) + 原生 HTML/CSS/JS |
-| Web 后端 | Python FastAPI + SQLAlchemy + MySQL |
-| Web 前端 | 原生多页 HTML/CSS/JS + `core.js` 共享层 |
-| AI | DeepSeek (OpenAI 兼容) + Resend (邮件) |
-| 部署 | Docker Compose + Nginx |
+| 桌面 | 跨平台原生应用 + 原生 HTML/CSS/JS |
+| Web 后端 | 高性能 Web 框架 + ORM + 关系型数据库 |
+| Web 前端 | 原生多页 HTML/CSS/JS + 共享核心库 |
+| AI | 主流大模型（OpenAI 兼容协议） + 邮件服务 |
+| 部署 | 容器化部署 + 反向代理 |
+| CI/CD | GitHub Actions（macOS + Windows 双平台自动构建） |
 
 ---
 
@@ -170,7 +170,7 @@ Web 平台 AI 生成 PPTE   ──→  下载 PPTE 包   ──→  桌面应用
 - **播放模式**：全屏播放 + 键盘导航 + 演讲者模式（观众窗口）
 - **批注**：画笔/高亮/文本标注（内存态，不修改课件）
 - **PPTX 导出**：将 PPTE 转为可编辑 .pptx
-- **AI 模型选择**：LectureAI（平台+SKILL）/ DeepSeek / MiniMax / 自定义
+- **AI 模型选择**：LectureAI（平台+Harness）/ 自配模型 / 自定义
 
 ### Web 平台（11 个页面）
 
@@ -181,9 +181,9 @@ Web 平台 AI 生成 PPTE   ──→  下载 PPTE 包   ──→  桌面应用
 | 工作站 | 幻灯片 rail + 实时预览 + AI 生成 + 校验 + 快照 |
 | AI 任务 | 任务列表 + 状态轮询 + 取消/重试 |
 | 导出 | PPTE 直下 + PDF/PPTX 异步导出 |
-| 设置 | LLM 配置 + 会员 + 模板 + 账号管理 |
+| 设置 | 模型配置 + 会员 + 模板 + 账号管理 |
 | 管理后台 | 用户管理 + AI 任务监控 + 审计日志 + 运营日报 |
-| 注册 + 邮箱验证 | Resend SMTP + JWT 验证 token |
+| 注册 + 邮箱验证 | 邮件验证 + JWT token，完整注册闭环 |
 | 演示账号 | 评审一键登录 |
 
 ---
@@ -225,10 +225,9 @@ lecture-presenter-public/
 │   │   └── js/
 │   │       ├── workbench-window.js   # 工作台 Agent（终端 + diff + 打字机）
 │   │       ├── ppte-workbench-agent.js # 主窗口侧（工具执行 + RPC）
-│   │       ├── ppte-rules-prompt.js   # PPTE 规范提示词 + linter
+│   │       ├── ppte-rules-prompt.js   # PPTE 规范 + linter
 │   │       └── ...
-│   └── src-tauri/
-│       └── src/lib.rs            # Rust 后端（AI 命令 + slide:// 协议 + 文件 I/O）
+│   └── src-tauri/                # 桌面后端
 ├── .github/workflows/            # CI 构建（macOS + Windows）
 ├── COURSE_FORMAT.md              # PPTE 课件格式规范
 └── docs/
@@ -237,7 +236,7 @@ lecture-presenter-public/
 
 ---
 
-## 📝 PPTE 排版规范（SKILL 核心，9 条）
+## 📝 PPTE 排版规范（Harness 核心，9 条）
 
 1. **去讲师痕迹**：标题不写"开场""续""案例①"等
 2. **全面书面化**：去掉口语词

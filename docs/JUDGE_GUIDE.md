@@ -11,7 +11,7 @@ Lecture Presenter 是一套 **AI 驱动的课件创作与演示平台**，包含
 - **桌面应用**（macOS / Windows）：PPTE 编辑器 + AI 工作台 + 播放器 + PPTX 导出
 - **Web 平台**（在线）：项目管理 + AI 生成 + 课件广场 + 管理后台 + 注册/邮箱验证
 
-核心创新：用 HTML 幻灯片（PPTE）替代 PPTX，内置 PPTE 专家 SKILL 的 AI 工作台，让教师用自然语言对话就能制作高质量课件。
+核心创新：用 HTML 幻灯片（PPTE）替代 PPTX，内置 PPTE 专家 Harness 的 AI 工作台，让教师用自然语言对话就能制作高质量课件。
 
 ---
 
@@ -52,16 +52,16 @@ Lecture Presenter 是一套 **AI 驱动的课件创作与演示平台**，包含
 3. 在输入框输入指令，例如：`生成一页关于 HTTP 请求方法的对比表格`
 4. 点击「生成」→ AI 任务开始运行（状态轮询）
 
-**预期**：AI 用 DeepSeek（平台配置的真实 LLM）+ 完整 PPTE SKILL 生成一页合规的高质量 HTML 幻灯片，自动校验后插入到课件中。左侧 rail 出现新页面，右侧预览实时渲染。
+**预期**：AI 用 平台大模型（平台配置的真实 LLM）+ 完整 PPTE Harness 生成一页合规的高质量 HTML 幻灯片，自动校验后插入到课件中。左侧 rail 出现新页面，右侧预览实时渲染。
 
 ### Step 3：切换"我的 AI"→ 对比质量
 
 **操作**：
-1. 先到「设置 → 模型」页配置你自己的 LLM（如 DeepSeek API Key）
+1. 先到「设置 → 模型」页配置你自己的 LLM（如 平台大模型 API Key）
 2. 回到工作站 AI 面板 → 「AI」下拉切换为 **我的 AI（基础）**
 3. 用同样指令再生成一页
 
-**预期**：产出质量明显不如 LectureAI（无 SKILL = 无排版规范、无教学法约束）。这就是产品卖点：**SKILL 让 LectureAI 产出质量碾压裸 AI**。
+**预期**：产出质量明显不如 LectureAI（无 Harness = 无排版规范、无教学法约束）。这就是产品卖点：**Harness 让 LectureAI 产出质量碾压裸 AI**。
 
 ### Step 4：课件广场 → 在线播放
 
@@ -121,14 +121,14 @@ Lecture Presenter 是一套 **AI 驱动的课件创作与演示平台**，包含
 | 创新点 | 说明 |
 |---|---|
 | **PPTE 格式** | 自研 HTML 幻灯片体系，支持 CSS 动画、SVG 图标、交互弹窗、点击放大、键盘导航、演讲者模式、批注叠加--PPTX 无法实现的效果 |
-| **AI 工作台 + SKILL** | 服务器端内置 PPTE 专家知识库（排版规范 9 条 + 教学法 + 设计规则 + 页面类型/模板 + 动画交互 + Agent 工具协议），客户端不可篡改 |
-| **SKILL 体系深度** | 不只是 prompt：将教学方法论 + 视觉设计规范 + 交互能力 + Agent 工具链系统化为可执行的 AI 指令集 |
-| **"选 AI" 模型** | LectureAI（平台+SKILL=高质量）vs 用户自配 AI（无 SKILL=低质量），SKILL 是差异化壁垒 |
+| **AI 工作台 + Harness** | 服务器端内置 PPTE 专家知识库（排版规范 9 条 + 教学法 + 设计规则 + 页面类型/模板 + 动画交互 + Agent 工具协议），客户端不可篡改 |
+| **Harness 体系深度** | 不只是 prompt：将教学方法论 + 视觉设计规范 + 交互能力 + Agent 工具链系统化为可执行的 AI 指令集 |
+| **"选 AI" 模型** | LectureAI（平台+Harness=高质量）vs 用户自配 AI（无 Harness=低质量），Harness 是差异化壁垒 |
 | **终端流式 UI** | 类 Claude Code 终端，打字机流式 + LCS 行 diff + 亮/暗主题跟随系统 |
 | **多轮 Agent 循环** | AI 自主 read_slide -> write_slide -> validate_slide -> 修复，多工具链式调用 |
 | **双端互通** | PPTE 是通用载体：桌面创建->上传 Web->在线播放/导出；Web 生成->下载->桌面打开/继续编辑 |
-| **邮箱验证** | Resend SMTP + JWT token，完整注册闭环 |
-| **Web + 桌面双端** | 桌面 Tauri 2 + Web FastAPI，共享后端 API + AI SKILL + 账号体系 | 桌面 Tauri 2 + Web FastAPI，共享后端 API |
+| **邮箱验证** | 邮件验证 + JWT token，完整注册闭环 |
+| **Web + 桌面双端** | 桌面 桌面应用 + Web 平台，共享后端 API + AI Harness + 账号体系 | 桌面 桌面应用 + Web 平台，共享后端 API |
 
 ---
 
@@ -136,11 +136,11 @@ Lecture Presenter 是一套 **AI 驱动的课件创作与演示平台**，包含
 
 | 层 | 技术 |
 |---|---|
-| 桌面 | Tauri 2 (Rust) + 原生 HTML/CSS/JS |
-| Web 后端 | Python FastAPI + SQLAlchemy + MySQL |
-| Web 前端 | 原生多页 HTML/CSS/JS + `core.js` 共享层 |
-| AI | DeepSeek (OpenAI 兼容) + Resend (邮件) |
-| 部署 | Docker Compose + Nginx |
+| 桌面 | 跨平台原生应用 + 原生 HTML/CSS/JS |
+| Web 后端 | 高性能 Web 框架 + ORM + 关系型数据库 |
+| Web 前端 | 原生多页 HTML/CSS/JS + 共享核心库 |
+| AI | 平台大模型 (主流大模型协议) + 邮件服务 |
+| 部署 | 容器化部署 + 反向代理 |
 | CI/CD | GitHub Actions (macOS + Windows) |
 
 ---
