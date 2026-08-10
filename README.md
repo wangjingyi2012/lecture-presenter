@@ -112,14 +112,14 @@ Web 平台 AI 生成 PPTE   ──->  下载 PPTE 包   ──->  桌面应用�
 
 **Web 平台**：https://design.hz-study-system.com/app/login.html
 
-**评审账号**（登录页一键填入）：
+**体验账号**（登录页一键填入）：
 - 用户名 `demo` / 密码 `demo1234`
 
 也可自助注册（需邮箱验证）。
 
-### 评委体验路径
+### 快速上手
 
-详见 [评委体验指南](docs/JUDGE_GUIDE.md)，核心 5 步：
+详见 [快速上手指南](docs/QUICK_START.md)，核心 5 步：
 
 1. **登录**：用 demo 账号或注册
 2. **项目台**：创建/上传 PPTE 课件
@@ -184,7 +184,7 @@ Web 平台 AI 生成 PPTE   ──->  下载 PPTE 包   ──->  桌面应用�
 | 设置 | 模型配置 + 会员 + 模板 + 账号管理 |
 | 管理后台 | 用户管理 + AI 任务监控 + 审计日志 + 运营日报 |
 | 注册 + 邮箱验证 | 邮件验证 + JWT token，完整注册闭环 |
-| 演示账号 | 评审一键登录 |
+| 演示账号 | 一键登录体验 |
 
 ---
 
@@ -231,7 +231,7 @@ lecture-presenter-public/
 ├── .github/workflows/            # CI 构建（macOS + Windows）
 ├── COURSE_FORMAT.md              # PPTE 课件格式规范
 └── docs/
-    └── JUDGE_GUIDE.md            # 评委体验指南
+    └── QUICK_START.md            # 快速上手指南
 ```
 
 ---
