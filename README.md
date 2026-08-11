@@ -192,10 +192,13 @@ Web 平台 AI 生成 PPTE   ──->  下载 PPTE 包   ──->  桌面应用�
 
 ### 安装包
 
+从 [GitHub Releases](https://github.com/wangjingyi2012/lecture-presenter/releases/latest) 下载最新版本（当前 v2.1.0）：
+
 | 平台 | 文件 |
 |---|---|
-| macOS (Apple Silicon) | `Lecture Presenter_0.1.0_aarch64.dmg` |
-| Windows (x64) | `Lecture Presenter_0.1.0_x64-setup.exe` |
+| macOS (Apple Silicon) | `Lecture-Presenter_2.1.0_macOS_aarch64.dmg` |
+| macOS (Intel) | `Lecture-Presenter_2.1.0_macOS_x64.dmg` |
+| Windows (x64) | `Lecture.Presenter_2.1.0_x64-setup.exe` |
 
 ### 开发模式
 
