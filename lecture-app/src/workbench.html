@@ -106,12 +106,31 @@
 
     /* input */
     .term-input-area { border-top: 1px solid var(--term-border); padding: 8px 14px; background: var(--term-surface); }
+    .slash-menu { flex: 0 1 auto; max-height: min(52vh, 420px); overflow-y: auto; margin: 0 14px 6px; padding: 5px; background: var(--term-bg); border: 1px solid var(--term-border); border-radius: 7px; box-shadow: 0 -8px 24px rgba(0,0,0,0.14); }
+    .slash-menu[hidden] { display: none; }
+    .slash-menu-head { position: sticky; top: -5px; z-index: 1; display: flex; justify-content: space-between; gap: 8px; padding: 7px 8px; margin-bottom: 3px; border-bottom: 1px solid var(--term-border); background: var(--term-bg); color: var(--term-muted); font-size: 11px; }
+    .slash-item { width: 100%; display: grid; grid-template-columns: minmax(125px, auto) 1fr; gap: 12px; align-items: baseline; border: 0; border-radius: 4px; padding: 7px 8px; color: var(--term-fg); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+    .slash-item:hover, .slash-item.active { background: var(--term-surface); }
+    .slash-name { color: var(--term-accent); font-weight: 650; white-space: nowrap; }
+    .slash-desc { color: var(--term-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .slash-command-copy { min-width: 0; display: flex; align-items: baseline; }
+    .skill-source { flex: 0 0 auto; margin-left: 10px; padding: 0 5px; border: 1px solid var(--term-border); border-radius: 3px; color: var(--term-muted); font-size: 10px; }
+    .slash-command-title { color: var(--term-fg); white-space: nowrap; }
+    .slash-separator { color: var(--term-dim); white-space: pre; }
+    .slash-page-item { grid-template-columns: 60px 1fr; }
+    .slash-page-number { color: var(--term-muted); font-size: 11px; white-space: nowrap; }
+    .slash-page-copy { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .slash-page-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .slash-empty { padding: 18px 8px; color: var(--term-muted); text-align: center; }
     .term-input-row { display: flex; align-items: flex-end; gap: 8px; }
     .term-input-row .prompt-glyph { color: var(--term-accent); font-weight: 700; padding-bottom: 7px; }
     .term-input-row textarea { flex: 1; background: var(--term-bg); color: var(--term-fg); border: 1px solid var(--term-border); border-radius: 6px; padding: 7px 10px; font-family: inherit; font-size: 13px; line-height: 1.5; resize: none; min-height: 34px; max-height: 160px; }
     .term-input-row textarea:focus { outline: none; border-color: var(--term-accent); }
     .term-input-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; }
     .term-hint { font-size: 11px; color: var(--term-muted); }
+    .term-picker-triggers { display: inline-flex; gap: 5px; margin-right: 8px; }
+    .term-picker-trigger { padding: 1px 6px; border: 1px solid var(--term-border); border-radius: 4px; background: var(--term-bg); color: var(--term-accent); font: inherit; font-size: 11px; cursor: pointer; }
+    .term-picker-trigger:hover { background: var(--term-surface); }
     .term-hint kbd { background: var(--term-bg); border: 1px solid var(--term-border); border-radius: 3px; padding: 0 4px; font-family: inherit; font-size: 10px; }
     .term-send { padding: 5px 14px; border-radius: 6px; border: 1px solid var(--term-accent); background: var(--term-accent); color: #fff; cursor: pointer; font-family: inherit; font-size: 12px; }
     .term-send:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -141,20 +160,22 @@
         改完自动保存，主窗口实时预览
       </div>
     </div>
+    <div id="wb-slash-menu" class="slash-menu" hidden role="listbox" aria-label="命令与页面候选"></div>
     <div class="term-input-area">
       <div class="term-input-row">
         <span class="prompt-glyph">&gt;</span>
-        <textarea id="wb-input" rows="1" placeholder="@3 把这页破折号改成逗号…"></textarea>
+        <textarea id="wb-input" rows="1" placeholder="输入 /、@ 或 $ 查看命令、页面和技能…"></textarea>
         <button class="term-send" id="wb-send">发送 ⏎</button>
         <button class="wb-clear" id="wb-stop" hidden>停止</button>
       </div>
       <div class="term-input-foot">
-        <span class="term-hint"><kbd>@N</kbd> 定位页 · <kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行 · 运行中可停止</span>
+        <span class="term-hint"><span class="term-picker-triggers"><button type="button" id="wb-command-trigger" class="term-picker-trigger">命令 /</button><button type="button" id="wb-page-trigger" class="term-picker-trigger">页面 @</button><button type="button" id="wb-skill-trigger" class="term-picker-trigger">外接技能 $</button><button type="button" id="wb-skill-import" class="term-picker-trigger">导入 SKILL</button></span><kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行</span>
       </div>
     </div>
   </div>
   <script src="vendor/marked.min.js"></script>
   <script src="js/ppte-rules-prompt.js"></script>
+  <script src="js/ppte-slash-commands.js"></script>
   <script src="js/workbench-window.js"></script>
 </body>
 </html>

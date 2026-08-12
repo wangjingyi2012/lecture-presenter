@@ -16,6 +16,9 @@
 - insert_slide {after, title, html, reason}：在某页之后插入新页（after=0 表示开头）
 - reorder_slides {order, reason}：重排，order 是新顺序的页码数组，如 [1,3,2]
 - read_slide {page}：读取某页 HTML
+- inspect_slides {check, pages?}：确定性检查页面；check 为 font/overflow/density/card/copy/motion/concept-animation/quality，pages 省略时检查整套；concept-animation 验收标准分步交互、字体、溢出和文案
+- load_skill {skill_id}：加载一个可用 SKILL 的完整 SKILL.md
+- read_skill_resource {skill_id, path}：读取当前已启用 skill 内列出的文本资源
 - validate_slide {page}：对该页跑 PPTE 规范检查
 - validate_deck {}：整套检查页数、结束页、布局重复、卡片占比、动画覆盖和单页规范
 

@@ -22,42 +22,109 @@ window.WorkbenchWindow = {
   _modelStartedAt: 0,
   _activeRound: 0,
   _stopRequested: false,
+  _slashItems: [],
+  _slashIndex: 0,
+  _pickerMode: null,
+  currentPage: null,
+  skills: [],
 
   async init() {
+    // Input discovery must not depend on Tauri event subscriptions. If any
+    // subscription is delayed or rejected, slash/page pickers must still work.
+    this._bindInputUi();
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
     const { listen, emit } = window.__TAURI__.event;
 
-    // RPC response + prefill + streaming events
-    await listen('wb-response', (e) => this._onResponse(e.payload));
-    await listen('wb-prefill', (e) => this._onPrefill(e.payload));
-    await listen('wb-refresh', () => this._refreshContext());
-    await listen('ai-stream-chunk', (e) => {
-      const firstChunk = !this._streamFull;
-      this._streamFull += String(e.payload || '');
-      if (firstChunk) this._markModelReceiving();
-      this._scheduleStreamingUpdate();
-    });
-    await listen('ai-stream-done', () => {
-      if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
-      this._updateModelStatusFromOutput();
-      this._finishModelStatus();
-      const resolve = this._streamResolve;
-      this._streamResolve = null;
-      if (resolve) resolve(this._streamFull);
-    });
-
-    document.getElementById('wb-send').onclick = () => this._send();
-    document.getElementById('wb-stop').onclick = () => { this._stopRequested = true; };
-    document.getElementById('wb-clear').onclick = () => this._clear();
-    const input = document.getElementById('wb-input');
-    input.onkeydown = (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._send(); }
-    };
+    try {
+      // RPC response + prefill + streaming events. Register in parallel so one
+      // slow subscription cannot delay the rest of the workbench startup.
+      await Promise.all([
+        listen('wb-response', (e) => this._onResponse(e.payload)),
+        listen('wb-prefill', (e) => this._onPrefill(e.payload)),
+        listen('wb-refresh', () => this._refreshContext()),
+        listen('ai-stream-chunk', (e) => {
+          const firstChunk = !this._streamFull;
+          this._streamFull += String(e.payload || '');
+          if (firstChunk) this._markModelReceiving();
+          this._scheduleStreamingUpdate();
+        }),
+        listen('ai-stream-done', () => {
+          if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
+          this._updateModelStatusFromOutput();
+          this._finishModelStatus();
+          const resolve = this._streamResolve;
+          this._streamResolve = null;
+          if (resolve) resolve(this._streamFull);
+        }),
+      ]);
+    } catch (error) {
+      this._log('err', `工作台事件初始化失败：${String(error)}`);
+      return;
+    }
 
     // Fetch course context from the main window.
     const ctx = await this._rpc('get-context');
     if (ctx) this._onContext(ctx);
+  },
+
+  _bindInputUi() {
+    const input = document.getElementById('wb-input');
+    if (!input || input.dataset.pickerBound === 'true') return;
+    input.dataset.pickerBound = 'true';
+    const send = document.getElementById('wb-send');
+    const stop = document.getElementById('wb-stop');
+    const clear = document.getElementById('wb-clear');
+    const commandTrigger = document.getElementById('wb-command-trigger');
+    const pageTrigger = document.getElementById('wb-page-trigger');
+    const skillTrigger = document.getElementById('wb-skill-trigger');
+    const skillImport = document.getElementById('wb-skill-import');
+    if (send) send.onclick = () => this._send();
+    if (stop) stop.onclick = () => { this._stopRequested = true; };
+    if (clear) clear.onclick = () => this._clear();
+    input.oninput = () => this._updateInputPicker();
+    input.onclick = () => this._updateInputPicker();
+    input.onkeyup = (e) => {
+      if (!['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) this._updateInputPicker();
+    };
+    input.oncompositionend = () => this._updateInputPicker();
+    input.onkeydown = (e) => {
+      if (this._handleSlashKey(e)) return;
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._send(); }
+    };
+    input.onblur = () => setTimeout(() => this._hideSlashMenu(), 120);
+    if (commandTrigger) commandTrigger.onclick = () => this._openPickerToken('/');
+    if (pageTrigger) pageTrigger.onclick = () => this._openPickerToken('@');
+    if (skillTrigger) skillTrigger.onclick = () => this._openPickerToken('$');
+    if (skillImport) skillImport.onclick = () => this._importSkills();
+  },
+
+  async _importSkills() {
+    if (this.busy) return;
+    const result = await this._rpc('import-skill');
+    if (!result || result.cancelled) return;
+    if (result.error) {
+      this._log('err', `SKILL 导入失败 · ${result.error}`);
+      return;
+    }
+    await this._refreshContext();
+    const imported = Array.isArray(result.imported) ? result.imported : [];
+    const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+    if (imported.length) this._log('ok', `已导入 SKILL · ${imported.map(skill => `$${skill.name}`).join('、')}`);
+    if (skipped.length) this._log('sys', `未导入 ${skipped.length} 项 · ${skipped.join('；')}`);
+    if (!imported.length && !skipped.length) this._log('sys', '没有发现可导入的 SKILL');
+  },
+
+  _openPickerToken(token) {
+    const input = document.getElementById('wb-input');
+    if (!input) return;
+    const start = Number.isInteger(input.selectionStart) ? input.selectionStart : input.value.length;
+    const end = Number.isInteger(input.selectionEnd) ? input.selectionEnd : start;
+    const prefix = start > 0 && !/\s/.test(input.value[start - 1]) ? ' ' : '';
+    input.value = input.value.slice(0, start) + prefix + token + input.value.slice(end);
+    const caret = start + prefix.length + token.length;
+    input.setSelectionRange?.(caret, caret);
     input.focus();
+    this._updateInputPicker();
   },
 
   // ---- RPC over events (single in-flight request; busy guard ensures serial) ----
@@ -83,6 +150,8 @@ window.WorkbenchWindow = {
 
   _onContext(ctx) {
     this.manifest = ctx;
+    this.skills = Array.isArray(ctx?.skills) ? ctx.skills : [];
+    this.currentPage = Number(ctx?.currentPage || ctx?.prefillPage || 0) || null;
     this.aiConfig = ctx?.aiConfig || null;
     this.providers = ctx?.providers || [];
     // populate model selector
@@ -113,6 +182,7 @@ window.WorkbenchWindow = {
       // was showing the pick-course guide, now connected -> reset to empty
       this._renderEmpty();
     }
+    if (ctx?.prefillPage) this._onPrefill({ page: ctx.prefillPage });
   },
 
   _renderPickCourse() {
@@ -162,7 +232,130 @@ window.WorkbenchWindow = {
 
   _renderEmpty() {
     const m = document.getElementById('wb-messages');
-    if (m) m.innerHTML = `<div class="wb-empty">课件级对话窗口。<br>对整套课件发指令，<br>@页码定位单页（如 @3）。<br>改完自动保存并在主窗口预览。</div>`;
+    if (m) m.innerHTML = `<div class="wb-empty">课件级对话窗口。<br>输入 / 选择内置命令，@ 定位页面，<br>$ 启用从其他 Agent 导入的 SKILL。<br>改完自动保存并在主窗口预览。</div>`;
+  },
+
+  // ---- slash command discovery ----
+  _updateInputPicker() {
+    const input = document.getElementById('wb-input');
+    const menu = document.getElementById('wb-slash-menu');
+    if (!input || !menu || !window.PpteSlashCommands) return;
+    const commandResult = window.PpteSlashCommands.search(input.value, input.selectionStart);
+    const pageResult = window.PpteSlashCommands.searchPages(input.value, input.selectionStart, this.manifest?.slides || []);
+    const skillResult = window.PpteSlashCommands.searchSkills(input.value, input.selectionStart, this.skills);
+    const mode = skillResult.token ? 'skill' : (pageResult.token ? 'page' : (commandResult.token ? 'command' : null));
+    const result = mode === 'skill' ? skillResult : (mode === 'page' ? pageResult : commandResult);
+    this._slashItems = result.items;
+    this._slashToken = result.token;
+    this._pickerMode = mode;
+    this._slashIndex = Math.min(this._slashIndex, Math.max(0, result.items.length - 1));
+    if (!mode) {
+      this._hideSlashMenu();
+      return;
+    }
+    const heading = mode === 'skill'
+      ? `选择技能 · ${result.items.length}/${this.skills.length} 项`
+      : (mode === 'page'
+        ? `选择页面 · ${result.items.length}/${this.manifest?.slides?.length || 0} 页`
+        : `斜杠命令 · ${result.items.length}/${window.PpteSlashCommands.commands.length} 项`);
+    const rows = mode === 'skill'
+      ? result.items.map((skill, index) => `
+        <button type="button" class="slash-item${index === this._slashIndex ? ' active' : ''}" data-skill="${this._escape(skill.name)}" role="option" aria-selected="${index === this._slashIndex}">
+          <span class="slash-name">$${this._escape(skill.name)}</span>
+          <span class="slash-command-copy"><span class="slash-desc">${this._escape(skill.description)}</span><span class="skill-source">${this._escape(skill.sourceLabel || skill.source)}</span></span>
+        </button>`).join('')
+      : (mode === 'page'
+      ? result.items.map((page, index) => `
+        <button type="button" class="slash-item slash-page-item${index === this._slashIndex ? ' active' : ''}" data-page="${page.page}" role="option" aria-selected="${index === this._slashIndex}">
+          <span class="slash-page-number">第 ${page.page} 页</span>
+          <span class="slash-page-copy"><span class="slash-page-title"><span class="slash-name">@ ${this._escape(page.file || `slide${page.page}.html`)}</span><span class="slash-separator"> - </span>${this._escape(page.title)}</span><span class="slash-desc">${this._escape(page.slideType)}</span></span>
+        </button>`).join('')
+      : result.items.map((command, index) => `
+        <button type="button" class="slash-item${index === this._slashIndex ? ' active' : ''}" data-command="${this._escape(command.name)}" role="option" aria-selected="${index === this._slashIndex}">
+          <span class="slash-name">/${this._escape(command.name)}</span>
+          <span class="slash-command-copy"><span class="slash-command-title">${this._escape(command.title)}</span><span class="slash-separator"> - </span><span class="slash-desc">${this._escape(command.description)}</span></span>
+        </button>`).join(''));
+    const empty = mode === 'skill' ? '没有已导入的技能 · 点击下方“导入 SKILL”' : (mode === 'page' ? '没有匹配的页面或文件' : '没有匹配的命令');
+    menu.innerHTML = `<div class="slash-menu-head"><span>${heading}</span><span>↑↓ 选择 · Enter 插入</span></div>${rows || `<div class="slash-empty">${empty}</div>`}`;
+    menu.hidden = false;
+    menu.querySelectorAll('.slash-item').forEach(button => {
+      button.onmousedown = (event) => {
+        event.preventDefault();
+        if (button.dataset.skill) this._applySkillSuggestion(button.dataset.skill);
+        else if (button.dataset.page) this._applyPageSuggestion(Number(button.dataset.page));
+        else this._applySlashSuggestion(button.dataset.command);
+      };
+    });
+  },
+
+  _updateSlashMenu() {
+    this._updateInputPicker();
+  },
+
+  _handleSlashKey(event) {
+    const menu = document.getElementById('wb-slash-menu');
+    if (!menu || menu.hidden || !this._slashItems.length) return false;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      this._slashIndex = (this._slashIndex + delta + this._slashItems.length) % this._slashItems.length;
+      this._updateInputPicker();
+      menu.querySelector('.slash-item.active')?.scrollIntoView?.({ block: 'nearest' });
+      return true;
+    }
+    if (event.key === 'Tab' || event.key === 'Enter') {
+      event.preventDefault();
+      const item = this._slashItems[this._slashIndex];
+      if (this._pickerMode === 'skill') this._applySkillSuggestion(item.name);
+      else if (this._pickerMode === 'page') this._applyPageSuggestion(item.page);
+      else this._applySlashSuggestion(item.name);
+      return true;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this._hideSlashMenu();
+      return true;
+    }
+    return false;
+  },
+
+  _applySlashSuggestion(name) {
+    const input = document.getElementById('wb-input');
+    if (!input || !window.PpteSlashCommands) return;
+    const applied = window.PpteSlashCommands.applySuggestion(input.value, input.selectionStart, name);
+    input.value = applied.value;
+    input.setSelectionRange?.(applied.caret, applied.caret);
+    this._hideSlashMenu();
+    input.focus();
+  },
+
+  _applyPageSuggestion(page) {
+    const input = document.getElementById('wb-input');
+    if (!input || !window.PpteSlashCommands) return;
+    const applied = window.PpteSlashCommands.applyPageSuggestion(input.value, input.selectionStart, page);
+    input.value = applied.value;
+    input.setSelectionRange?.(applied.caret, applied.caret);
+    this._hideSlashMenu();
+    input.focus();
+  },
+
+  _applySkillSuggestion(name) {
+    const input = document.getElementById('wb-input');
+    if (!input || !window.PpteSlashCommands) return;
+    const applied = window.PpteSlashCommands.applySkillSuggestion(input.value, input.selectionStart, name);
+    input.value = applied.value;
+    input.setSelectionRange?.(applied.caret, applied.caret);
+    this._hideSlashMenu();
+    input.focus();
+  },
+
+  _hideSlashMenu() {
+    const menu = document.getElementById('wb-slash-menu');
+    if (menu) menu.hidden = true;
+    this._slashItems = [];
+    this._slashToken = null;
+    this._slashIndex = 0;
+    this._pickerMode = null;
   },
 
   // ---- system prompt ----
@@ -191,9 +384,16 @@ window.WorkbenchWindow = {
     } else {
       ctx += '\n\n当前项目没有 LectureAI 规划。这不影响旧项目打开、播放或单页修改；整套生成时按需创建。';
     }
+    if (this.skills.length) {
+      const catalog = this.skills.map(skill => `- ${skill.id}：${skill.description}（${skill.sourceLabel}）`).join('\n');
+      ctx += `\n\n可用 SKILL：\n${catalog}\n用户显式输入 $skill-name 时客户端会自动加载。若用户未显式指定，但任务与某个 description 明确匹配，可先调用 load_skill {skill_id}，读取完整 SKILL.md 后再行动。不要仅凭技能名猜测规则。`;
+    }
     ctx += `\n\n课件级扩展工具：
 - set_deck_plan {plan}：保存整套可执行蓝图，整套生成或大规模改造必须最先调用
 - search_design_examples {content_kind?, layout_family?, density?, motion?, exclude?, limit?}：检索真实 HTML/CSS 设计案例
+- inspect_slides {check, pages?}：确定性检查页面；check 为 font/overflow/density/card/copy/motion/concept-animation/quality，pages 省略时检查整套；concept-animation 同时检查标准分步结构、字体、溢出和学员文案
+- load_skill {skill_id}：加载一个可用 SKILL 的完整 SKILL.md；仅在任务与 description 明确匹配时调用
+- read_skill_resource {skill_id, path}：读取已启用 skill 列出的 references/scripts 文本；禁止读取 skill 目录之外的文件
 - validate_deck {}：检查页数、结束页、重复布局、卡片占比、动画覆盖与所有单页规范
 plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page、role、title、contentKind、layoutFamily、componentIds、motion、visualIntent。相邻正文页不得重复主构图，正文超过 8 页至少 6 种主布局，卡片类不超过正文 25%，12 页以上至少 3 页有意义动画。整套任务最终必须 validate_deck 通过。
 
@@ -295,6 +495,19 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     const inputEl = document.getElementById('wb-input');
     const input = inputEl?.value.trim();
     if (!input) return;
+    const slash = window.PpteSlashCommands?.parse(input, { currentPage: this.currentPage });
+    const skillNames = window.PpteSlashCommands?.parseSkillNames(input) || [];
+    if (slash?.unknown) {
+      this._appendAssistantMarkdown(`未知命令 \`/${slash.unknown}\`。输入 \`/\` 查看可用命令，或使用 \`/help\`。`);
+      return;
+    }
+    if (slash?.command?.local) {
+      this._appendUser(input, []);
+      this._appendAssistantMarkdown(window.PpteSlashCommands.helpMarkdown());
+      if (inputEl) inputEl.value = '';
+      this._hideSlashMenu();
+      return;
+    }
     const cfg = this.selectedConfig || this.aiConfig || {};
     if (!cfg.aiProvider || (cfg.aiProvider !== 'lectureai' && !cfg.aiApiKey)) {
       alert('请先在主窗口设置中配置 AI，或登录后选择 LectureAI');
@@ -311,14 +524,62 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     this.history[0] = { role: 'system', content: this._systemPrompt() };
 
     const { content, mentioned } = await this._resolveAt(input);
+    let commandContext = '';
+    const workflowContext = slash ? window.PpteSlashCommands?.commandWorkflowContext(slash.command) : '';
+    if (slash?.command?.commandContext) {
+      const prepared = await this._rpc('get-command-context', {
+        command: slash.command.name,
+        pages: slash.pages,
+      });
+      if (prepared?.error) {
+        this._appendAssistantMarkdown(`无法准备 /${slash.command.name} 的页面上下文：${prepared.error}`);
+        return;
+      }
+      commandContext = [workflowContext, prepared].filter(Boolean).join('\n\n');
+    }
+    let skillContext = '';
+    let enabledSkills = [];
+    if (skillNames.length) {
+      const loadedSkills = [];
+      for (const name of skillNames) {
+        const candidates = this.skills.filter(skill => skill.name === name);
+        const selected = candidates[0];
+        if (!selected) {
+          this._appendAssistantMarkdown(`未找到技能 \`$${name}\`。输入 \`$\` 查看当前可用技能。`);
+          return;
+        }
+        const document = await this._rpc('read-skill', { skillId: selected.id });
+        loadedSkills.push(document);
+      }
+      enabledSkills = loadedSkills.map(document => `$${document.info.name}（${document.info.sourceLabel}）`);
+      skillContext = loadedSkills.map(document => [
+        `[已启用 SKILL $${document.info.name}]`,
+        `skill_id: ${document.info.id}`,
+        `来源: ${document.info.sourceLabel}`,
+        document.files?.length ? `可按需读取的资源: ${document.files.join('、')}` : '无附加资源',
+        document.content,
+      ].join('\n')).join('\n\n');
+    }
     const taskInitialization = this._taskInitialization(input);
-    const deckLevel = this._isDeckLevelTask(input);
-    const requiresPlan = this._requiresDeckPlan(input);
-    this._activeTask = { deckLevel, requiresPlan, planSaved: !requiresPlan, deckValidated: false };
+    const deckLevel = slash ? false : this._isDeckLevelTask(input);
+    const requiresPlan = slash ? false : this._requiresDeckPlan(input);
+    this._activeTask = {
+      deckLevel,
+      requiresPlan,
+      planSaved: !requiresPlan,
+      deckValidated: false,
+      commandCheck: slash?.command?.check || null,
+      commandPages: slash?.pages || [],
+      commandInspected: false,
+      commandPassed: false,
+    };
     this._stopRequested = false;
     this._appendUser(input, mentioned);
-    this.history.push({ role: 'user', content: taskInitialization ? `${content}\n\n${taskInitialization}` : content });
+    if (enabledSkills.length) this._log('sys', `本轮启用技能 · ${enabledSkills.join('、')}`);
+    const additions = [skillContext, commandContext, taskInitialization, slash?.instruction || ''].filter(Boolean).join('\n\n');
+    this.history.push({ role: 'user', content: additions ? `${content}\n\n${additions}` : content });
     if (inputEl) inputEl.value = '';
+    this._hideSlashMenu();
 
     await this._runTurn();
   },
@@ -375,6 +636,16 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             }
             continue;
           }
+          if (this._activeTask?.commandCheck && !this._activeTask.commandPassed) {
+            recoveryRounds += 1;
+            if (recoveryRounds > 3) throw new Error('斜杠命令连续 3 次未通过复检，任务已停止，请查看最后一次检查结果');
+            const pages = this._activeTask.commandPages.length ? `,"pages":[${this._activeTask.commandPages.join(',')}]` : '';
+            this.history.push({
+              role: 'user',
+              content: `[命令完成门禁] /${this._activeTask.commandCheck} 尚未通过。请立即调用 \`\`\`action {"tool":"inspect_slides","check":"${this._activeTask.commandCheck}"${pages}} \`\`\`；若仍有问题则继续修复，不要先总结。`,
+            });
+            continue;
+          }
           this._appendAssistantMarkdown(this._stripActions(text));
           this._log('sys', `任务结束 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
           break;
@@ -385,6 +656,30 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
           if (this._stopRequested) break;
           if (this._activeTask?.requiresPlan && ['write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.planSaved) {
             results.push('[规划门禁] 这是整套课件任务，第一次修改前必须先调用 set_deck_plan。请现在输出 set_deck_plan action，不要开始写页。');
+            break;
+          }
+          if (this._activeTask?.commandCheck && ['write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.commandInspected) {
+            results.push(`[命令门禁] 必须先调用 inspect_slides，check 必须为 ${this._activeTask.commandCheck}，确认问题后再修改。`);
+            break;
+          }
+          if (a.tool === 'inspect_slides' && this._activeTask?.commandCheck && a.check !== this._activeTask.commandCheck) {
+            results.push(`[命令门禁] 当前命令要求 check=${this._activeTask.commandCheck}，不能改用 ${a.check || '空值'}。`);
+            break;
+          }
+          if (a.tool === 'inspect_slides' && this._activeTask?.commandPages?.length) {
+            const actualPages = Array.isArray(a.pages) ? [...new Set(a.pages.map(Number))].sort((x, y) => x - y) : [];
+            const expectedPages = [...this._activeTask.commandPages].sort((x, y) => x - y);
+            if (actualPages.join(',') !== expectedPages.join(',')) {
+              results.push(`[命令门禁] 当前命令范围固定为第 ${expectedPages.join('、')} 页，inspect_slides.pages 必须与之完全一致。`);
+              break;
+            }
+          }
+          if (this._activeTask?.commandPages?.length && ['insert_slide', 'reorder_slides'].includes(a.tool)) {
+            results.push(`[命令门禁] 当前命令限定第 ${this._activeTask.commandPages.join('、')} 页，不能插页或重排整套课件。`);
+            break;
+          }
+          if (this._activeTask?.commandPages?.length && a.tool === 'write_slide' && !this._activeTask.commandPages.includes(Number(a.page))) {
+            results.push(`[命令门禁] 当前命令只允许修改第 ${this._activeTask.commandPages.join('、')} 页，拒绝写入第 ${a.page} 页。`);
             break;
           }
           toolCalls += 1;
@@ -406,7 +701,22 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
           }
           if (['write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !/失败|出错|错误/.test(String(result || ''))) {
             this._activeTask.deckValidated = false;
+            if (this._activeTask.commandCheck) {
+              this._activeTask.commandInspected = false;
+              this._activeTask.commandPassed = false;
+            }
             recoveryRounds = 0;
+          }
+          if (a.tool === 'inspect_slides' && this._activeTask.commandCheck) {
+            try {
+              const inspection = JSON.parse(result);
+              this._activeTask.commandInspected = true;
+              this._activeTask.commandPassed = inspection.passed === true;
+              if (this._activeTask.commandPassed) recoveryRounds = 0;
+            } catch (_) {
+              this._activeTask.commandInspected = false;
+              this._activeTask.commandPassed = false;
+            }
           }
           if (a.tool === 'validate_deck') {
             try { this._activeTask.deckValidated = JSON.parse(result).passed === true; }
@@ -428,7 +738,8 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         }
       }
     } catch (e) {
-      this._log('err', '出错：' + this._escape(String(e)));
+      const message = this._modelErrorMessage(e);
+      this._log('err', `${e?.isModelRequestError ? '模型请求失败' : '出错'}：${message}`);
     } finally {
       this.busy = false;
       this._setBusy(false);
@@ -436,7 +747,29 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
   },
 
   // ---- streaming AI call ----
-  _callAI(messages) {
+  async _callAI(messages) {
+    const cfg = this.selectedConfig || this.aiConfig || {};
+    const maxAttempts = cfg.aiProvider === 'lectureai' ? 2 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this._callAIOnce(messages, attempt);
+      } catch (error) {
+        const message = this._modelErrorMessage(error);
+        if (attempt < maxAttempts && this._isRetryableModelError(message)) {
+          this._markModelRetry(attempt + 1);
+          await this._wait(1200);
+          continue;
+        }
+        this._finishModelStatus('模型请求失败');
+        const failure = new Error(this._friendlyModelError(message, attempt > 1));
+        failure.isModelRequestError = true;
+        throw failure;
+      }
+    }
+    throw new Error('模型请求未返回结果');
+  },
+
+  _callAIOnce(messages, attempt = 1) {
     return new Promise((resolve, reject) => {
       this._streamFull = '';
       this._streamResolve = resolve;
@@ -445,7 +778,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       // aiConfig.aiApiKey is populated by the main window: for 'lectureai' it is
       // the auth token, for others the raw API key. Pass it straight through.
       const apiKey = cfg.aiApiKey || '';
-      this._startModelStatus(this._activeRound);
+      this._startModelStatus(this._activeRound, attempt);
       window.__TAURI__.core.invoke('call_ai_messages_stream', {
         provider,
         apiKey,
@@ -457,11 +790,31 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         // Surface the real backend error (quota / auth / format) instead of a
         // silent "empty" - reject so _runTurn's catch shows it.
         if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
-        this._finishModelStatus('模型请求失败');
         this._streamResolve = null;
-        reject(new Error(String(e)));
+        reject(e instanceof Error ? e : new Error(String(e)));
       });
     });
+  },
+
+  _wait(milliseconds) {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
+  },
+
+  _modelErrorMessage(error) {
+    return String(error?.message || error || '未知错误').replace(/^(?:Error:\s*)+/i, '').trim();
+  },
+
+  _isRetryableModelError(message) {
+    return /HTTP\s*50[234]|LLM 服务请求失败|LectureAI 服务暂时不可用|LectureAI 上游模型暂时不可用|网络请求失败|连接.*失败/i.test(String(message || ''));
+  },
+
+  _friendlyModelError(message, retried = false) {
+    const source = String(message || '');
+    if (this._isRetryableModelError(source)) {
+      const status = source.match(/HTTP\s*(\d{3})/i)?.[1];
+      return `LectureAI 上游模型暂时不可用${status ? `（HTTP ${status}）` : ''}${retried ? '，已自动重试 1 次仍未恢复' : ''}。请稍后重试。`;
+    }
+    return source;
   },
 
   _scheduleStreamingUpdate() {
@@ -545,7 +898,9 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
   },
 
   _appendUser(text, mentioned) {
-    const t = mentioned.length ? `@${mentioned.map(x => x.page).join(' @')} · ${text}` : text;
+    const explicitPages = new Set([...String(text || '').matchAll(/@(\d+)\b/g)].map(match => Number(match[1])));
+    const implicitPages = (mentioned || []).map(item => Number(item.page)).filter(page => !explicitPages.has(page));
+    const t = implicitPages.length ? `@${implicitPages.join(' @')} · ${text}` : text;
     this._log('user', t);
   },
 
@@ -591,23 +946,34 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
   _modelDuration() {
     return this._duration(this._modelStartedAt);
   },
-  _startModelStatus(round) {
+  _startModelStatus(round, attempt = 1) {
     this._stopModelStatusTimer();
     this._modelStartedAt = this._now();
+    this._modelAttempt = attempt;
     const m = document.getElementById('wb-messages');
     if (this._modelStatusEl) {
       this._modelStatusEl.remove();
       this._modelStatusEl.dataset.summary = '';
       if (m) m.appendChild(this._modelStatusEl);
     } else {
-      this._modelStatusEl = this._log('phase', `第 ${round} 轮 · 已发送模型请求 · 0ms`);
+      this._modelStatusEl = this._log('phase', `第 ${round} 轮 · 正在提交模型请求 · 0ms`);
     }
-    if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${round} 轮 · 已发送模型请求 · 0ms`;
+    const attemptLabel = attempt > 1 ? `自动重试 ${attempt}/2 · ` : '';
+    if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${round} 轮 · ${attemptLabel}正在提交模型请求 · 0ms`;
     this._modelStatusTimer = setInterval(() => {
       if (this._modelStatusEl && !this._streamFull) {
-        this._modelStatusEl.textContent = `第 ${round} 轮 · 等待模型响应 · ${this._modelDuration()}`;
+        const phase = (this._now() - this._modelStartedAt) < 1200
+          ? '等待服务器接收请求'
+          : '等待服务器与模型响应';
+        this._modelStatusEl.textContent = `第 ${round} 轮 · ${attemptLabel}${phase} · ${this._modelDuration()}`;
       }
     }, 100);
+  },
+  _markModelRetry(nextAttempt) {
+    this._stopModelStatusTimer();
+    if (this._modelStatusEl) {
+      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 上游模型暂时不可用，1.2s 后自动重试 ${nextAttempt}/2`;
+    }
   },
   _markModelReceiving() {
     this._stopModelStatusTimer();

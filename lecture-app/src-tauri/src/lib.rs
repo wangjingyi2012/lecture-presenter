@@ -444,6 +444,406 @@ fn read_text_file(file_path: String) -> Result<String, String> {
     fs::read_to_string(&file_path).map_err(|e| format!("Failed to read {}: {}", file_path, e))
 }
 
+// ── Workbench skills ──────────────────────────────────────────────────────
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PpteSkillInfo {
+    id: String,
+    name: String,
+    description: String,
+    source: String,
+    source_label: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PpteSkillDocument {
+    info: PpteSkillInfo,
+    content: String,
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PpteSkillImportResult {
+    imported: Vec<PpteSkillInfo>,
+    skipped: Vec<String>,
+    destination: String,
+}
+
+fn valid_skill_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn parse_skill_frontmatter(content: &str) -> Result<(String, String), String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.first().map(|line| line.trim()) != Some("---") {
+        return Err("SKILL.md 缺少 YAML frontmatter".to_string());
+    }
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut closed = false;
+    let mut index = 1;
+    while index < lines.len() {
+        let raw_line = lines[index];
+        let line = raw_line.trim();
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        if let Some(value) = line.strip_prefix("name:") {
+            name = value.trim().trim_matches(['\'', '"']).to_string();
+        } else if let Some(value) = line.strip_prefix("description:") {
+            let value = value.trim();
+            if matches!(value, "|" | ">") {
+                let folded = value == ">";
+                let mut parts = Vec::new();
+                index += 1;
+                while index < lines.len() {
+                    let continuation = lines[index];
+                    let indented = continuation.starts_with(' ') || continuation.starts_with('\t');
+                    if continuation.trim() == "---" || (!continuation.trim().is_empty() && !indented) {
+                        index = index.saturating_sub(1);
+                        break;
+                    }
+                    if !continuation.trim().is_empty() {
+                        parts.push(continuation.trim());
+                    }
+                    index += 1;
+                }
+                description = parts.join(if folded { " " } else { "\n" });
+            } else {
+                description = value.trim_matches(['\'', '"']).to_string();
+            }
+        }
+        index += 1;
+    }
+    if !closed {
+        return Err("SKILL.md frontmatter 未闭合".to_string());
+    }
+    if !valid_skill_name(&name) {
+        return Err("skill name 只能使用小写字母、数字和连字符，最长 64 字符".to_string());
+    }
+    if description.is_empty() {
+        return Err("SKILL.md 缺少 description".to_string());
+    }
+    Ok((name, description))
+}
+
+fn discover_skills_in_root(source: &str, source_label: &str, root: &Path) -> Vec<PpteSkillInfo> {
+    let canonical_root = match root.canonicalize() {
+        Ok(path) if path.is_dir() => path,
+        _ => return Vec::new(),
+    };
+    let mut skills = Vec::new();
+    let entries = match fs::read_dir(&canonical_root) {
+        Ok(entries) => entries,
+        Err(_) => return skills,
+    };
+    for entry in entries.flatten() {
+        let folder_name = entry.file_name().to_string_lossy().to_string();
+        if !valid_skill_name(&folder_name) {
+            continue;
+        }
+        let folder = match entry.path().canonicalize() {
+            Ok(path) if path.starts_with(&canonical_root) && path.is_dir() => path,
+            _ => continue,
+        };
+        let skill_path = folder.join("SKILL.md");
+        let content = match fs::read_to_string(&skill_path) {
+            Ok(content) if content.len() <= 128 * 1024 => content,
+            _ => continue,
+        };
+        let (name, description) = match parse_skill_frontmatter(&content) {
+            Ok(metadata) if metadata.0 == folder_name => metadata,
+            _ => continue,
+        };
+        skills.push(PpteSkillInfo {
+            id: format!("{}:{}", source, name),
+            name,
+            description,
+            source: source.to_string(),
+            source_label: source_label.to_string(),
+        });
+    }
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+    skills
+}
+
+fn skill_roots(app_handle: &tauri::AppHandle, folder_path: Option<&str>) -> Result<Vec<(String, String, PathBuf)>, String> {
+    let mut roots = Vec::new();
+    if let Some(folder_path) = folder_path.filter(|value| !value.trim().is_empty()) {
+        let deck = canonical_ppte_root(folder_path)?;
+        if deck.join("manifest.json").is_file() {
+            let deck_skills = deck.join(".lectureai").join("skills");
+            if !deck_skills.exists() || deck_skills.canonicalize().map(|path| path.starts_with(&deck)).unwrap_or(false) {
+                roots.push(("deck".to_string(), "外接 · 当前课件".to_string(), deck_skills));
+            }
+        }
+    }
+    let app_data = app_handle.path().app_data_dir().map_err(|error| error.to_string())?;
+    roots.push(("user".to_string(), "外接 · 用户导入".to_string(), app_data.join("skills")));
+    Ok(roots)
+}
+
+#[tauri::command]
+fn ppte_skill_list(app_handle: tauri::AppHandle, folder_path: Option<String>) -> Result<Vec<PpteSkillInfo>, String> {
+    let roots = skill_roots(&app_handle, folder_path.as_deref())?;
+    let mut skills = Vec::new();
+    let mut ids = HashSet::new();
+    for (source, label, root) in roots {
+        for skill in discover_skills_in_root(&source, &label, &root) {
+            if ids.insert(skill.id.clone()) {
+                skills.push(skill);
+            }
+        }
+    }
+    Ok(skills)
+}
+
+fn collect_skill_text_files(root: &Path, current: &Path, output: &mut Vec<String>, depth: usize) {
+    if depth > 2 || output.len() >= 100 {
+        return;
+    }
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "SKILL.md" {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_symlink() => metadata,
+            _ => continue,
+        };
+        if metadata.is_dir() {
+            collect_skill_text_files(root, &path, output, depth + 1);
+        } else if metadata.is_file() && metadata.len() <= 256 * 1024 {
+            if let Ok(relative) = path.strip_prefix(root) {
+                let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+                if matches!(extension.as_str(), "md" | "txt" | "json" | "yaml" | "yml" | "toml" | "html" | "css" | "js" | "ts" | "py" | "sh") {
+                    output.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+}
+
+fn resolve_skill_folder(
+    app_handle: &tauri::AppHandle,
+    folder_path: Option<&str>,
+    skill_id: &str,
+) -> Result<(PpteSkillInfo, PathBuf), String> {
+    let (wanted_source, wanted_name) = skill_id.split_once(':').ok_or_else(|| "skillId 格式错误".to_string())?;
+    if !valid_skill_name(wanted_name) || !matches!(wanted_source, "deck" | "user") {
+        return Err("skillId 不安全".to_string());
+    }
+    for (source, label, root) in skill_roots(app_handle, folder_path)? {
+        if source != wanted_source {
+            continue;
+        }
+        let canonical_root = match root.canonicalize() {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let folder = match canonical_root.join(wanted_name).canonicalize() {
+            Ok(path) if path.starts_with(&canonical_root) && path.is_dir() => path,
+            _ => continue,
+        };
+        let content = fs::read_to_string(folder.join("SKILL.md")).map_err(|error| error.to_string())?;
+        let (name, description) = parse_skill_frontmatter(&content)?;
+        if name != wanted_name {
+            return Err("skill 目录名与 frontmatter name 不一致".to_string());
+        }
+        return Ok((PpteSkillInfo {
+            id: skill_id.to_string(),
+            name,
+            description,
+            source,
+            source_label: label,
+        }, folder));
+    }
+    Err(format!("未找到 skill：{}", skill_id))
+}
+
+#[tauri::command]
+fn ppte_skill_read(
+    app_handle: tauri::AppHandle,
+    folder_path: Option<String>,
+    skill_id: String,
+    relative_path: Option<String>,
+) -> Result<PpteSkillDocument, String> {
+    let (info, folder) = resolve_skill_folder(&app_handle, folder_path.as_deref(), &skill_id)?;
+    let relative = relative_path.unwrap_or_else(|| "SKILL.md".to_string());
+    let safe_relative = ppte_safe_relative_path(&relative)?;
+    let target = folder.join(&safe_relative).canonicalize()
+        .map_err(|error| format!("无法读取 skill 文件：{}", error))?;
+    if !target.starts_with(&folder) || !target.is_file() {
+        return Err("skill 文件路径越界".to_string());
+    }
+    let metadata = fs::metadata(&target).map_err(|error| error.to_string())?;
+    if metadata.len() > 256 * 1024 {
+        return Err("skill 文本文件不能超过 256KB".to_string());
+    }
+    let content = fs::read_to_string(&target).map_err(|_| "skill 资源必须是 UTF-8 文本".to_string())?;
+    let mut files = Vec::new();
+    collect_skill_text_files(&folder, &folder, &mut files, 0);
+    files.sort();
+    Ok(PpteSkillDocument { info, content, files })
+}
+
+fn skill_import_candidates(source_path: &Path) -> Result<Vec<PathBuf>, String> {
+    if fs::symlink_metadata(source_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("不能从符号链接目录导入 SKILL".to_string());
+    }
+    let source = source_path.canonicalize().map_err(|error| format!("无法读取所选目录：{}", error))?;
+    if !source.is_dir() {
+        return Err("请选择 SKILL 目录或 skills 根目录".to_string());
+    }
+    if source.join("SKILL.md").is_file() {
+        return Ok(vec![source]);
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&source).map_err(|error| error.to_string())?.flatten() {
+        if fs::symlink_metadata(entry.path())
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let path = match entry.path().canonicalize() {
+            Ok(path) if path.is_dir() && path.join("SKILL.md").is_file() => path,
+            _ => continue,
+        };
+        candidates.push(path);
+    }
+    candidates.sort();
+    if candidates.is_empty() {
+        return Err("所选目录中没有找到 SKILL.md；可选择单个技能目录，或包含多个技能目录的根目录".to_string());
+    }
+    Ok(candidates)
+}
+
+fn copy_imported_skill_tree(
+    source: &Path,
+    destination: &Path,
+    depth: usize,
+    file_count: &mut usize,
+    total_bytes: &mut u64,
+) -> Result<(), String> {
+    if depth > 8 {
+        return Err("SKILL 目录层级不能超过 8 层".to_string());
+    }
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())?.flatten() {
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        if matches!(name_text.as_ref(), ".git" | ".DS_Store" | "__pycache__") {
+            continue;
+        }
+        let source_item = entry.path();
+        let metadata = fs::symlink_metadata(&source_item).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("SKILL 包含符号链接，已拒绝导入：{}", source_item.display()));
+        }
+        let destination_item = destination.join(name);
+        if metadata.is_dir() {
+            copy_imported_skill_tree(&source_item, &destination_item, depth + 1, file_count, total_bytes)?;
+        } else if metadata.is_file() {
+            *file_count += 1;
+            *total_bytes = total_bytes.saturating_add(metadata.len());
+            if *file_count > 2_000 {
+                return Err("单个 SKILL 文件数不能超过 2000".to_string());
+            }
+            if metadata.len() > 20 * 1024 * 1024 {
+                return Err(format!("SKILL 单个文件不能超过 20MB：{}", source_item.display()));
+            }
+            if *total_bytes > 50 * 1024 * 1024 {
+                return Err("单个 SKILL 总大小不能超过 50MB".to_string());
+            }
+            fs::copy(&source_item, &destination_item).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn import_skills_into_root(source_path: &Path, destination_root: &Path) -> Result<PpteSkillImportResult, String> {
+    let candidates = skill_import_candidates(source_path)?;
+    fs::create_dir_all(destination_root).map_err(|error| error.to_string())?;
+    let canonical_destination = destination_root.canonicalize().map_err(|error| error.to_string())?;
+    let mut imported = Vec::new();
+    let mut skipped = Vec::new();
+    for candidate in candidates {
+        let content = match fs::read_to_string(candidate.join("SKILL.md")) {
+            Ok(content) if content.len() <= 128 * 1024 => content,
+            Ok(_) => {
+                skipped.push(format!("{}：SKILL.md 超过 128KB", candidate.display()));
+                continue;
+            }
+            Err(error) => {
+                skipped.push(format!("{}：{}", candidate.display(), error));
+                continue;
+            }
+        };
+        let (name, description) = match parse_skill_frontmatter(&content) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                skipped.push(format!("{}：{}", candidate.display(), error));
+                continue;
+            }
+        };
+        let destination = canonical_destination.join(&name);
+        if destination.exists() {
+            skipped.push(format!("{}：同名技能已存在，未覆盖", name));
+            continue;
+        }
+        let staging = canonical_destination.join(format!(".skill-import-{}-{}", name, uuid::Uuid::new_v4()));
+        let mut file_count = 0;
+        let mut total_bytes = 0;
+        let copy_result = copy_imported_skill_tree(&candidate, &staging, 0, &mut file_count, &mut total_bytes)
+            .and_then(|_| {
+                let staged_content = fs::read_to_string(staging.join("SKILL.md")).map_err(|error| error.to_string())?;
+                let staged_metadata = parse_skill_frontmatter(&staged_content)?;
+                if staged_metadata.0 != name {
+                    return Err("导入后的 SKILL 元数据不一致".to_string());
+                }
+                fs::rename(&staging, &destination).map_err(|error| error.to_string())
+            });
+        if let Err(error) = copy_result {
+            let _ = fs::remove_dir_all(&staging);
+            skipped.push(format!("{}：{}", name, error));
+            continue;
+        }
+        imported.push(PpteSkillInfo {
+            id: format!("user:{}", name),
+            name,
+            description,
+            source: "user".to_string(),
+            source_label: "外接 · 用户导入".to_string(),
+        });
+    }
+    Ok(PpteSkillImportResult {
+        imported,
+        skipped,
+        destination: canonical_destination.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn ppte_skill_import(app_handle: tauri::AppHandle, source_path: String) -> Result<PpteSkillImportResult, String> {
+    let app_data = app_handle.path().app_data_dir().map_err(|error| error.to_string())?;
+    import_skills_into_root(Path::new(&source_path), &app_data.join("skills"))
+}
+
 fn normalize_protocol_path(decoded: &str) -> String {
     let path = decoded.replace('/', std::path::MAIN_SEPARATOR_STR);
 
@@ -3729,6 +4129,123 @@ mod ppte_save_tests {
     }
 
     #[test]
+    fn skill_frontmatter_requires_standard_name_and_description() {
+        let valid = "---\nname: ppte-layout\ndescription: Layout workflow\n---\n\n# Rules";
+        let (name, description) = parse_skill_frontmatter(valid).unwrap();
+        assert_eq!(name, "ppte-layout");
+        assert_eq!(description, "Layout workflow");
+        assert!(parse_skill_frontmatter("# no metadata").is_err());
+        assert!(parse_skill_frontmatter("---\nname: Bad_Name\ndescription: no\n---").is_err());
+        assert!(parse_skill_frontmatter("---\nname: ok-name\n---").is_err());
+
+        let multiline = "---\nname: multi-line\ndescription: >\n  Checks typography, layout,\n  and projection readability.\n---\n";
+        assert_eq!(
+            parse_skill_frontmatter(multiline).unwrap().1,
+            "Checks typography, layout, and projection readability."
+        );
+    }
+
+    #[test]
+    fn skill_import_accepts_single_skill_and_skips_existing_name() {
+        let source = unique_temp_dir("skill-import-source");
+        let destination = unique_temp_dir("skill-import-destination");
+        fs::create_dir_all(source.join("references")).unwrap();
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: imported-skill\ndescription: Imported workflow\n---\n# Workflow\n",
+        ).unwrap();
+        fs::write(source.join("references").join("guide.md"), "# Guide").unwrap();
+
+        let result = import_skills_into_root(&source, &destination).unwrap();
+        assert_eq!(result.imported.len(), 1);
+        assert_eq!(result.imported[0].id, "user:imported-skill");
+        assert!(destination.join("imported-skill").join("SKILL.md").is_file());
+        assert!(destination.join("imported-skill").join("references").join("guide.md").is_file());
+
+        let duplicate = import_skills_into_root(&source, &destination).unwrap();
+        assert!(duplicate.imported.is_empty());
+        assert!(duplicate.skipped.iter().any(|item| item.contains("未覆盖")));
+
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn skill_import_accepts_agent_skills_root_and_skips_invalid_child() {
+        let source = unique_temp_dir("skills-root");
+        let destination = unique_temp_dir("skills-destination");
+        fs::create_dir_all(source.join("first-skill")).unwrap();
+        fs::write(
+            source.join("first-skill").join("SKILL.md"),
+            "---\nname: first-skill\ndescription: First imported workflow\n---\n",
+        ).unwrap();
+        fs::create_dir_all(source.join("invalid-skill")).unwrap();
+        fs::write(source.join("invalid-skill").join("SKILL.md"), "# Missing metadata").unwrap();
+
+        let result = import_skills_into_root(&source, &destination).unwrap();
+        assert_eq!(result.imported.len(), 1);
+        assert_eq!(result.imported[0].name, "first-skill");
+        assert_eq!(result.skipped.len(), 1);
+
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn skill_resource_relative_paths_cannot_escape() {
+        assert!(ppte_safe_relative_path("references/layout.md").is_ok());
+        assert!(ppte_safe_relative_path("../outside.md").is_err());
+        assert!(ppte_safe_relative_path("/tmp/outside.md").is_err());
+    }
+
+    #[test]
+    fn skill_discovery_skips_invalid_and_mismatched_folders() {
+        let root = unique_temp_dir("skill-discovery");
+        fs::create_dir_all(root.join("good-skill")).unwrap();
+        fs::write(
+            root.join("good-skill").join("SKILL.md"),
+            "---\nname: good-skill\ndescription: Good workflow\n---\n",
+        ).unwrap();
+        fs::create_dir_all(root.join("wrong-folder")).unwrap();
+        fs::write(
+            root.join("wrong-folder").join("SKILL.md"),
+            "---\nname: another-name\ndescription: Wrong folder\n---\n",
+        ).unwrap();
+        fs::create_dir_all(root.join("Bad_Name")).unwrap();
+        fs::write(
+            root.join("Bad_Name").join("SKILL.md"),
+            "---\nname: Bad_Name\ndescription: Invalid\n---\n",
+        ).unwrap();
+
+        let skills = discover_skills_in_root("user", "外接 · 用户导入", &root);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "user:good-skill");
+        assert_eq!(skills[0].source_label, "外接 · 用户导入");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_discovery_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let root = unique_temp_dir("skill-root");
+        let outside = unique_temp_dir("skill-outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(outside.join("outside-skill")).unwrap();
+        fs::write(
+            outside.join("outside-skill").join("SKILL.md"),
+            "---\nname: outside-skill\ndescription: Must stay outside\n---\n",
+        ).unwrap();
+        symlink(outside.join("outside-skill"), root.join("outside-skill")).unwrap();
+
+        assert!(discover_skills_in_root("user", "用户全局", &root).is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
     fn save_ppt_extra_rejects_conflict_without_partial_write() {
         let dir = unique_temp_dir("save-conflict");
         fs::create_dir_all(&dir).unwrap();
@@ -4960,14 +5477,7 @@ async fn call_lectureai_chat_request(
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let error_text = response.text().await.unwrap_or_default();
-        // FastAPI returns {"detail": "..."} - surface it so quota/auth/config
-        // errors (e.g. "已超出本月 AI 配额", "请先登录") reach the user verbatim.
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_text) {
-            if let Some(detail) = json.get("detail").and_then(|d| d.as_str()) {
-                return Err(detail.to_string());
-            }
-        }
-        return Err(format!("AI 服务错误 ({})", status));
+        return Err(lectureai_http_error(status, &error_text));
     }
 
     let data: serde_json::Value = response.json().await.map_err(|e| format!("解析响应失败: {}", e))?;
@@ -4976,6 +5486,42 @@ async fn call_lectureai_chat_request(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "响应格式错误".to_string())
+}
+
+fn lectureai_http_error(status: u16, error_text: &str) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(error_text)
+        .ok()
+        .and_then(|json| json.get("detail").and_then(|value| value.as_str()).map(str::to_string));
+    if status >= 500 {
+        return format!(
+            "LectureAI 上游模型暂时不可用（HTTP {}）：{}",
+            status,
+            detail.unwrap_or_else(|| "服务器暂时无法完成模型请求".to_string())
+        );
+    }
+    // Preserve actionable quota/auth/config messages for non-server failures.
+    detail.unwrap_or_else(|| format!("AI 服务错误（HTTP {}）", status))
+}
+
+#[cfg(test)]
+mod lectureai_error_tests {
+    use super::lectureai_http_error;
+
+    #[test]
+    fn marks_server_failures_as_retryable_without_hiding_http_status() {
+        assert_eq!(
+            lectureai_http_error(503, r#"{"detail":"LLM 服务请求失败"}"#),
+            "LectureAI 上游模型暂时不可用（HTTP 503）：LLM 服务请求失败"
+        );
+    }
+
+    #[test]
+    fn preserves_actionable_client_error_details() {
+        assert_eq!(
+            lectureai_http_error(429, r#"{"detail":"已超出本月 AI 配额"}"#),
+            "已超出本月 AI 配额"
+        );
+    }
 }
 
 async fn call_minimax_stream(
@@ -6413,8 +6959,8 @@ async fn open_workbench_window(app_handle: tauri::AppHandle) -> Result<(), Strin
         WebviewUrl::App("workbench.html".into()),
     )
     .title("工作台助手")
-    .inner_size(520.0, 760.0)
-    .min_inner_size(420.0, 540.0)
+    .inner_size(760.0, 780.0)
+    .min_inner_size(600.0, 560.0)
     .resizable(true)
     .build()
     .map_err(|e| e.to_string())?;
@@ -6494,6 +7040,9 @@ pub fn run() {
             resolve_asset_path,
             read_file_bytes,
             read_text_file,
+            ppte_skill_list,
+            ppte_skill_read,
+            ppte_skill_import,
             write_text_file,
             ppte_agent_plan_read,
             ppte_agent_plan_write,

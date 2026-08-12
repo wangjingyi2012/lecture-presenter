@@ -5,6 +5,7 @@ const vm = require('node:vm');
 
 const workbenchPath = path.join(__dirname, '..', 'src', 'js', 'workbench-window.js');
 const source = fs.readFileSync(workbenchPath, 'utf8');
+const slashSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'js', 'ppte-slash-commands.js'), 'utf8');
 const agentPath = path.join(__dirname, '..', 'src', 'js', 'ppte-workbench-agent.js');
 const agentSource = fs.readFileSync(agentPath, 'utf8');
 const createPath = path.join(__dirname, '..', 'src', 'js', 'ppte-create.js');
@@ -23,16 +24,36 @@ const context = {
 };
 
 vm.createContext(context);
+vm.runInContext(`${slashSource}\nglobalThis.PpteSlashCommands = window.PpteSlashCommands;`, context);
 vm.runInContext(`${source}\nglobalThis.WorkbenchWindow = window.WorkbenchWindow;`, context);
 
 const wb = context.WorkbenchWindow;
+const slash = context.PpteSlashCommands;
 assert.ok(wb, 'WorkbenchWindow should be defined');
+assert.ok(slash, 'PpteSlashCommands should be defined');
 assert.equal('maxToolRounds' in wb, false, 'deck-level Agent must not have a fixed tool-round cap');
 assert.match(htmlSource, /id="wb-stop"/, 'workbench needs a user-visible stop control');
 assert.match(source, /recoveryRounds > 3/, 'protocol recovery must stop before an infinite paid loop');
 assert.match(source, /deckValidated = false/, 'deck mutations must invalidate earlier deck validation');
+assert.match(source, /get-command-context/, 'concept animation command must request prepared slide context');
+assert.match(source, /正在提交模型请求/, 'the first request phase should describe submission truthfully');
+assert.match(source, /等待服务器与模型响应/, 'the waiting phase must not pretend to know whether the server or model is busy');
+assert.match(source, /上游模型暂时不可用，1\.2s 后自动重试/, 'transient LectureAI failures should expose the automatic retry phase');
+
+const originalLogForUserLine = wb._log;
+const userLines = [];
+wb._log = (_type, text) => userLines.push(text);
+wb._appendUser('@4 使用 /concept-animate 重绘', [{ page: 4 }]);
+wb._appendUser('重绘这一页', [{ page: 4 }]);
+assert.equal(userLines[0], '@4 使用 /concept-animate 重绘', 'an explicit @page must not be duplicated in the user log');
+assert.equal(userLines[1], '@4 · 重绘这一页', 'an implicit page context should remain visible');
+wb._log = originalLogForUserLine;
 assert.doesNotMatch(source, /const phrases = \['思考中'/, 'workbench must not simulate model thinking with rotating phrases');
 assert.match(htmlSource, /vendor\/marked\.min\.js/, 'workbench should load the Markdown renderer');
+assert.match(htmlSource, /ppte-slash-commands\.js/, 'workbench should load the slash-command registry before chat logic');
+assert.match(htmlSource, /id="wb-slash-menu"/, 'workbench should expose a slash-command discovery menu');
+assert.doesNotMatch(htmlSource, /\.slash-menu\s*\{[^}]*position:\s*absolute/s, 'picker must stay in normal layout flow so WKWebView scroll layers cannot cover it');
+assert.doesNotMatch(htmlSource, /<div class="term-input-area"[^>]*>[\s\S]*?id="wb-slash-menu"/, 'picker must be a sibling above the input area, not an upward-overflowing child');
 assert.match(htmlSource, /\.markdown-body table/, 'workbench should style rendered Markdown tables');
 assert.doesNotMatch(editorSource, /templateFilesDirty:\s*!!templateFiles/, 'persisted template assets must not be marked dirty when a new PPTE opens');
 assert.match(editorSource, /templateFilesDirty:\s*false/, 'new PPTE template assets should start clean');
@@ -106,6 +127,202 @@ assert.equal(wb._isDeckLevelTask('检查一下课件'), true);
 assert.equal(wb._requiresDeckPlan('检查一下课件'), false);
 assert.equal(wb._requiresDeckPlan('创建一个15页的课件'), true);
 
+const slashFont = slash.parse('@3 /font-check', { currentPage: 8 });
+assert.equal(slashFont.command.name, 'font-check');
+assert.deepEqual(Array.from(slashFont.pages), [3]);
+assert.match(slashFont.instruction, /inspect_slides/);
+assert.match(slashFont.instruction, /check:"font"/);
+assert.match(slashFont.instruction, /修改后必须再次调用同一检查/);
+const slashMotion = slash.parse('/concept-animate 用动画介绍 RAG', { currentPage: 4 });
+assert.deepEqual(Array.from(slashMotion.pages), [4]);
+assert.match(slashMotion.instruction, /用户补充：用动画介绍 RAG/);
+assert.equal(slashMotion.command.check, 'concept-animation');
+assert.match(slashMotion.instruction, /check:"concept-animation"/);
+const conceptWorkflow = slash.commandWorkflowContext(slashMotion.command);
+assert.match(conceptWorkflow, /data-ppte-concept-animation/);
+assert.match(conceptWorkflow, /class="content-area ppte-click-stage/);
+assert.match(conceptWorkflow, /\.ppte-step-rail/);
+assert.match(conceptWorkflow, /prefers-reduced-motion/);
+assert.match(conceptWorkflow, /current < maxStep/);
+assert.match(conceptWorkflow, /Right\/Space\/PageDown/);
+assert.equal(slash.parse('/quality-check').pages.length, 0);
+assert.equal(slash.parse('/not-a-command').unknown, 'not-a-command');
+assert.match(slash.helpMarkdown(), /\/overflow-check/);
+assert.match(slash.helpMarkdown(), /\/layout-check/);
+assert.match(slash.helpMarkdown(), /\/student-copy/);
+assert.match(slash.helpMarkdown(), /\/concept-animate/);
+const fontSearch = slash.search('@3 /fon', 7);
+assert.equal(fontSearch.items[0].name, 'font-check');
+const appliedSlash = slash.applySuggestion('@3 /fon', 7, 'font-check');
+assert.equal(appliedSlash.value, '@3 /font-check ');
+const allCommands = slash.search('/', 1);
+assert.equal(allCommands.items.length, slash.commands.length, 'a bare slash should list every command');
+const pageCandidates = slash.searchPages('@', 1, [
+  { title: '封面', file: 'slide01.html', slideType: 'cover' },
+  { title: 'RAG 工作流', file: 'slides/rag-flow.html', slideType: 'content' },
+]);
+assert.deepEqual(Array.from(pageCandidates.items, item => item.page), [1, 2], 'a bare @ should list every page');
+assert.equal(slash.searchPages('@rag', 4, [
+  { title: '封面', file: 'slide01.html' },
+  { title: 'RAG 工作流', file: 'slides/rag-flow.html' },
+]).items[0].file, 'slides/rag-flow.html', '@ search should match titles and file names');
+assert.equal(slash.applyPageSuggestion('/font-check @ra', 15, 2).value, '/font-check @2 ');
+assert.equal(slash.search('／', 1).items.length, slash.commands.length, 'full-width slash from a Chinese IME should list commands');
+assert.equal(slash.searchPages('＠', 1, [{ title: '封面', file: 'slide01.html' }]).items.length, 1, 'full-width @ should list pages');
+const skills = [
+  { id: 'deck:ppte-layout', name: 'ppte-layout', description: '优化 PPTE 页面布局', sourceLabel: '外接 · 当前课件' },
+  { id: 'user:security-course', name: 'security-course', description: '安全课程案例工作流', sourceLabel: '外接 · 用户导入' },
+];
+assert.equal(slash.searchSkills('$', 1, skills).items.length, 2, 'a bare $ should list every skill');
+assert.equal(slash.searchSkills('$secu', 5, skills).items[0].id, 'user:security-course');
+assert.equal(slash.applySkillSuggestion('@2 $ppte', 8, 'ppte-layout').value, '@2 $ppte-layout ');
+assert.deepEqual(Array.from(slash.parseSkillNames('$ppte-layout @2 $security-course $ppte-layout')), ['ppte-layout', 'security-course']);
+
+async function testLectureAiRetriesOneTransientUpstreamFailure() {
+  const originalSelectedConfig = wb.selectedConfig;
+  const originalCallOnce = wb._callAIOnce;
+  const originalWait = wb._wait;
+  const originalMarkRetry = wb._markModelRetry;
+  const originalFinish = wb._finishModelStatus;
+  let attempts = 0;
+  const retries = [];
+  wb.selectedConfig = { aiProvider: 'lectureai' };
+  wb._callAIOnce = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('LectureAI 上游模型暂时不可用（HTTP 503）：LLM 服务请求失败');
+    return '重试成功';
+  };
+  wb._wait = async milliseconds => { assert.equal(milliseconds, 1200); };
+  wb._markModelRetry = attempt => retries.push(attempt);
+  wb._finishModelStatus = () => {};
+
+  assert.equal(await wb._callAI([{ role: 'user', content: 'test' }]), '重试成功');
+  assert.equal(attempts, 2);
+  assert.deepEqual(retries, [2]);
+  assert.equal(wb._isRetryableModelError('已超出本月 AI 配额'), false);
+  assert.match(wb._friendlyModelError('LectureAI 上游模型暂时不可用（HTTP 503）', true), /已自动重试 1 次/);
+
+  wb.selectedConfig = originalSelectedConfig;
+  wb._callAIOnce = originalCallOnce;
+  wb._wait = originalWait;
+  wb._markModelRetry = originalMarkRetry;
+  wb._finishModelStatus = originalFinish;
+}
+
+async function testInputUiBindsWithoutTauriEvents() {
+  const elements = {};
+  const makeButton = () => ({ onclick: null, hidden: false, dataset: {} });
+  const input = {
+    value: '',
+    selectionStart: 0,
+    selectionEnd: 0,
+    dataset: {},
+    focus() {},
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+  };
+  elements['wb-input'] = input;
+  elements['wb-send'] = makeButton();
+  elements['wb-stop'] = makeButton();
+  elements['wb-clear'] = makeButton();
+  elements['wb-command-trigger'] = makeButton();
+  elements['wb-page-trigger'] = makeButton();
+  elements['wb-skill-trigger'] = makeButton();
+  elements['wb-skill-import'] = makeButton();
+  const originalGetElementById = context.document.getElementById;
+  context.document.getElementById = id => elements[id] || null;
+  const originalTauri = context.window.__TAURI__;
+  context.window.__TAURI__ = undefined;
+
+  await wb.init();
+
+  assert.equal(input.dataset.pickerBound, 'true', 'input handlers must bind even when Tauri events are unavailable');
+  assert.equal(typeof input.oninput, 'function');
+  assert.equal(typeof elements['wb-command-trigger'].onclick, 'function');
+  assert.equal(typeof elements['wb-page-trigger'].onclick, 'function');
+  assert.equal(typeof elements['wb-skill-trigger'].onclick, 'function');
+  assert.equal(typeof elements['wb-skill-import'].onclick, 'function');
+  context.window.__TAURI__ = originalTauri;
+  context.document.getElementById = originalGetElementById;
+}
+
+function testInputPickerRendering() {
+  const input = { value: '/', selectionStart: 1, focus() {}, setSelectionRange() {} };
+  const menu = {
+    hidden: true,
+    innerHTML: '',
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+  };
+  const originalGetElementById = context.document.getElementById;
+  context.document.getElementById = id => id === 'wb-input' ? input : (id === 'wb-slash-menu' ? menu : null);
+  wb.manifest = { slides: [
+    { title: '封面', file: 'slide01.html', slideType: 'cover' },
+    { title: '正文', file: 'slide02.html', slideType: 'content' },
+  ] };
+  wb.skills = skills;
+  wb._updateInputPicker();
+  assert.equal(menu.hidden, false);
+  assert.match(menu.innerHTML, new RegExp(`斜杠命令 · ${slash.commands.length}/${slash.commands.length} 项`));
+  assert.match(menu.innerHTML, /\/font-check/);
+  assert.match(menu.innerHTML, /字体检查/);
+  assert.match(menu.innerHTML, /检查字号、单位和投影可读性/);
+  assert.match(menu.innerHTML, /\/help/);
+
+  input.value = '@';
+  input.selectionStart = 1;
+  wb._updateInputPicker();
+  assert.equal(menu.hidden, false, 'a bare @ must open the page picker');
+  assert.match(menu.innerHTML, /选择页面 · 2\/2 页/);
+  assert.match(menu.innerHTML, /@ slide01\.html/);
+  assert.match(menu.innerHTML, /@ slide02\.html/);
+  assert.match(menu.innerHTML, /封面/);
+  assert.match(menu.innerHTML, /正文/);
+
+  input.value = '$';
+  input.selectionStart = 1;
+  wb._updateInputPicker();
+  assert.equal(menu.hidden, false, 'a bare $ must open the skill picker');
+  assert.match(menu.innerHTML, /选择技能 · 2\/2 项/);
+  assert.match(menu.innerHTML, /\$ppte-layout/);
+  assert.match(menu.innerHTML, /优化 PPTE 页面布局/);
+  assert.match(menu.innerHTML, /外接 · 当前课件/);
+  context.document.getElementById = originalGetElementById;
+}
+
+testInputPickerRendering();
+
+async function testExternalSkillImportRefreshesCatalog() {
+  const calls = [];
+  const logs = [];
+  const originalRpc = wb._rpc;
+  const originalLog = wb._log;
+  const originalOnContext = wb._onContext;
+  const originalGetElementById = context.document.getElementById;
+  context.document.getElementById = () => null;
+  wb._rpc = async type => {
+    calls.push(type);
+    if (type === 'import-skill') {
+      return {
+        imported: [{ name: 'security-course', description: '安全课程工作流', sourceLabel: '外接 · 用户导入' }],
+        skipped: [],
+      };
+    }
+    return { title: '测试课件', slides: [], skills: [{ name: 'security-course' }], providers: [] };
+  };
+  wb._log = (type, message) => logs.push({ type, message });
+  wb._onContext = ctx => { wb.skills = ctx.skills || []; };
+
+  await wb._importSkills();
+
+  assert.deepEqual(calls, ['import-skill', 'get-context']);
+  assert.equal(wb.skills[0].name, 'security-course');
+  assert.match(logs[0].message, /\$security-course/);
+  wb._rpc = originalRpc;
+  wb._log = originalLog;
+  wb._onContext = originalOnContext;
+  context.document.getElementById = originalGetElementById;
+}
+
 const agentContext = {
   console,
   window: {
@@ -114,7 +331,7 @@ const agentContext = {
     Auth: { getToken() { return ''; } },
     __TAURI__: { core: { async invoke() { return false; } } },
   },
-  document: { getElementById() { return null; }, querySelector() { return null; }, createElement() { return {}; } },
+  document: { getElementById() { return null; }, querySelector() { return null; }, createElement() { return {}; }, body: { appendChild() {} } },
 };
 vm.createContext(agentContext);
 vm.runInContext(`${agentSource}\nglobalThis.PpteWorkbenchAgent = window.PpteWorkbenchAgent;`, agentContext);
@@ -124,6 +341,7 @@ const pb = {
   slides: starterSlides.map((s, i) => ({ ...s, id: `s${i + 1}` })),
   currentSlideIndex: 0,
   manifestDirty: false,
+  folderPath: '/tmp/deck',
 };
 agentContext.window.Settings._pptBuilder = pb;
 agentContext.window.Settings._newPpteId = () => 'new-slide';
@@ -139,6 +357,60 @@ agentContext.window.Settings._markCurrentSlideFromEditor = () => {};
 const legacyBlueprint = agent._templateBlueprint(pb);
 assert.equal(legacyBlueprint.isStarter, true, 'legacy five-page decks should be recognized as starter templates');
 assert.deepEqual(Array.from(legacyBlueprint.roles, r => r.slideType), ['cover', 'catalog', 'chapter', 'content', 'finish']);
+
+const validConceptAnimation = `
+<style>
+.ppte-click-layer { position:absolute; opacity:0; }
+.ppte-click-layer.is-visible { opacity:1; }
+@media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+</style>
+<div data-ppte-concept-animation data-step="0" data-max-step="3">
+  <div class="ppte-click-canvas">
+    <div class="ppte-click-layer" data-show-from="0"></div>
+    <div class="ppte-click-layer" data-show-from="1"></div>
+    <div class="ppte-click-layer" data-show-from="2"></div>
+    <div class="ppte-click-layer" data-show-from="3"></div>
+  </div>
+  <div class="ppte-step-rail">
+    <button class="ppte-step-node" data-target-step="1"><span class="ppte-step-main">检索</span><span class="ppte-step-sub">找到证据</span></button>
+    <button class="ppte-step-node" data-target-step="2"><span class="ppte-step-main">增强</span><span class="ppte-step-sub">拼接上下文</span></button>
+    <button class="ppte-step-node" data-target-step="3"><span class="ppte-step-main">生成</span><span class="ppte-step-sub">基于证据回答</span></button>
+  </div>
+  <div class="ppte-step-dots"><span></span><span></span><span></span><span></span></div>
+</div>
+<script>
+root.addEventListener('click', event => {
+  const node = event.target.closest('[data-target-step]');
+  if (node) goTo(Number(node.dataset.targetStep));
+  else if (current < maxStep) goTo(current + 1);
+});
+document.addEventListener('keydown', event => {
+  if (['ArrowRight', ' ', 'PageDown'].includes(event.key) && current < maxStep) { event.preventDefault(); goTo(current + 1); }
+  if (['ArrowLeft', 'PageUp'].includes(event.key) && current > 0) { event.preventDefault(); goTo(current - 1); }
+});
+</script>`;
+assert.deepEqual(Array.from(agent._conceptAnimationSourceIssues(validConceptAnimation)), [], 'standard concept animation skeleton should pass its source contract');
+const invalidConceptRules = Array.from(agent._conceptAnimationSourceIssues(validConceptAnimation.replaceAll('current < maxStep', 'true').replace('position:absolute', 'position:relative')), issue => issue.rule);
+assert.ok(invalidConceptRules.includes('concept-boundary-navigation'), 'boundary release must be validated structurally');
+assert.ok(invalidConceptRules.includes('concept-layer-style'), 'stable overlay layers must be validated structurally');
+
+async function testConceptAnimationContextIncludesCurrentNeighborsAndStylesheet() {
+  const originalInvoke = agentContext.window.__TAURI__.core.invoke;
+  agentContext.window.Settings._pptBuilder = pb;
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    assert.equal(command, 'read_text_file');
+    return payload.filePath.endsWith('/content.css')
+      ? '.content-area { color: #123456; }'
+      : 'body { color: #111111; }';
+  };
+  const contextText = await agent._getCommandContext({ command: 'concept-animate', pages: [4] });
+  assert.match(contextText, /目标页：第 4 页/);
+  assert.match(contextText, /相邻页 第3页/);
+  assert.match(contextText, /相邻页 第5页/);
+  assert.match(contextText, /现有样式 content\.css/);
+  assert.match(contextText, /#123456/);
+  agentContext.window.__TAURI__.core.invoke = originalInvoke;
+}
 
 const createContext = { window: { Settings: {} }, console, document: {} };
 vm.createContext(createContext);
@@ -362,6 +634,96 @@ async function testDeckInspectionRequiresValidationButNotPlan() {
   assert.equal(wb.history.some(x => String(x.content).includes('[规划门禁]')), false);
 }
 
+async function testSlashCommandRequiresInspectionAndReinspection() {
+  const replies = [
+    `直接修改\n\`\`\`action\n${JSON.stringify({ tool: 'write_slide', page: 1, html: '<h1>blocked</h1>' })}\n\`\`\``,
+    `检查字体\n\`\`\`action\n${JSON.stringify({ tool: 'inspect_slides', check: 'font', pages: [1] })}\n\`\`\``,
+    `修复字体\n\`\`\`action\n${JSON.stringify({ tool: 'write_slide', page: 1, html: '<h1 style="font-size:3vw">ok</h1>' })}\n\`\`\``,
+    '已经修复。',
+    `重新检查\n\`\`\`action\n${JSON.stringify({ tool: 'inspect_slides', check: 'font', pages: [1] })}\n\`\`\``,
+    '字体检查与修复完成。',
+  ];
+  const executed = [];
+  let aiCalls = 0;
+  wb._activeTask = {
+    deckLevel: false,
+    requiresPlan: false,
+    planSaved: true,
+    deckValidated: false,
+    commandCheck: 'font',
+    commandPages: [1],
+    commandInspected: false,
+    commandPassed: false,
+  };
+  wb.history = [{ role: 'system', content: 'test' }];
+  wb._callAI = async () => replies[aiCalls++];
+  wb._rpc = async (_type, payload) => {
+    executed.push(payload.action.tool);
+    if (payload.action.tool === 'inspect_slides') {
+      const passed = executed.filter(tool => tool === 'inspect_slides').length > 1;
+      return JSON.stringify({ passed, slides: [] });
+    }
+    return `${payload.action.tool} 已完成`;
+  };
+  wb._appendAssistantMarkdown = () => {};
+  wb._log = () => {};
+  wb._logAction = () => {};
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  wb._setBusy = () => {};
+
+  await wb._runTurn();
+
+  assert.deepEqual(executed, ['inspect_slides', 'write_slide', 'inspect_slides']);
+  assert.equal(wb.history.some(item => String(item.content).includes('[命令门禁]')), true);
+  assert.equal(wb.history.some(item => String(item.content).includes('[命令完成门禁]')), true);
+  assert.equal(wb._activeTask.commandPassed, true);
+}
+
+async function testSlashCommandKeepsPageScope() {
+  const replies = [
+    `检查错误范围\n\`\`\`action\n${JSON.stringify({ tool: 'inspect_slides', check: 'font' })}\n\`\`\``,
+    `检查目标页\n\`\`\`action\n${JSON.stringify({ tool: 'inspect_slides', check: 'font', pages: [2] })}\n\`\`\``,
+    `写错页面\n\`\`\`action\n${JSON.stringify({ tool: 'write_slide', page: 3, html: '<h1>wrong</h1>' })}\n\`\`\``,
+    `写目标页\n\`\`\`action\n${JSON.stringify({ tool: 'write_slide', page: 2, html: '<h1>right</h1>' })}\n\`\`\``,
+    `复检目标页\n\`\`\`action\n${JSON.stringify({ tool: 'inspect_slides', check: 'font', pages: [2] })}\n\`\`\``,
+    '完成。',
+  ];
+  const executed = [];
+  let aiCalls = 0;
+  wb._activeTask = {
+    deckLevel: false,
+    requiresPlan: false,
+    planSaved: true,
+    deckValidated: false,
+    commandCheck: 'font',
+    commandPages: [2],
+    commandInspected: false,
+    commandPassed: false,
+  };
+  wb.history = [{ role: 'system', content: 'test' }];
+  wb._callAI = async () => replies[aiCalls++];
+  wb._rpc = async (_type, payload) => {
+    executed.push(`${payload.action.tool}:${payload.action.page || (payload.action.pages || []).join(',')}`);
+    if (payload.action.tool === 'inspect_slides') {
+      return JSON.stringify({ passed: executed.filter(item => item.startsWith('inspect_slides')).length > 1 });
+    }
+    return `${payload.action.tool} 已完成`;
+  };
+  wb._appendAssistantMarkdown = () => {};
+  wb._log = () => {};
+  wb._logAction = () => {};
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  wb._setBusy = () => {};
+
+  await wb._runTurn();
+
+  assert.deepEqual(executed, ['inspect_slides:2', 'write_slide:2', 'inspect_slides:2']);
+  assert.equal(wb.history.some(item => String(item.content).includes('范围固定为第 2 页')), true);
+  assert.equal(wb.history.some(item => String(item.content).includes('拒绝写入第 3 页')), true);
+}
+
 async function testOptionalPlanToolsUseSeparateTauriStorage() {
   const calls = [];
   agentContext.window.Auth.getToken = () => 'token';
@@ -384,8 +746,28 @@ async function testOptionalPlanToolsUseSeparateTauriStorage() {
   assert.deepEqual(calls.map(call => call.command), ['ppte_agent_plan_write', 'lectureai_design_examples']);
 }
 
+async function testAgentImportsSelectedExternalSkillFolder() {
+  const calls = [];
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    calls.push({ command, payload });
+    if (command === 'pick_folder') return '/tmp/codex-skills';
+    if (command === 'ppte_skill_import') return { imported: [{ name: 'external-skill' }], skipped: [] };
+    return null;
+  };
+
+  const result = await agent._importSkill();
+
+  assert.equal(result.imported[0].name, 'external-skill');
+  assert.deepEqual(calls.map(call => call.command), ['pick_folder', 'ppte_skill_import']);
+  assert.equal(calls[1].payload.sourcePath, '/tmp/codex-skills');
+}
+
 (async () => {
+  await testLectureAiRetriesOneTransientUpstreamFailure();
+  await testInputUiBindsWithoutTauriEvents();
+  await testExternalSkillImportRefreshesCatalog();
   agentContext.window.Settings._pptBuilder = pb;
+  await testConceptAnimationContextIncludesCurrentNeighborsAndStylesheet();
   await testTemplateAwareInsertKeepsFinishLast();
   await testStarterDeckExpandsToExactlyFifteenPages();
   await testCancelledSaveRollsBackAgentMutation();
@@ -393,7 +775,10 @@ async function testOptionalPlanToolsUseSeparateTauriStorage() {
   await testLongDeckJobRunsToCompletion();
   await testDeckTaskRequiresPlanBeforeMutationAndValidationBeforeFinish();
   await testDeckInspectionRequiresValidationButNotPlan();
+  await testSlashCommandRequiresInspectionAndReinspection();
+  await testSlashCommandKeepsPageScope();
   await testOptionalPlanToolsUseSeparateTauriStorage();
+  await testAgentImportsSelectedExternalSkillFolder();
 })()
   .then(() => console.log('test-workbench-window: all assertions passed'))
   .catch((error) => {

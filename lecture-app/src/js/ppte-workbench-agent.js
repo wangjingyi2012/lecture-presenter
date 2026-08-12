@@ -5,8 +5,10 @@
 //   1. injects the "工作台" toggle button into the PPTE editor header (opens the window)
 //   2. rewires the per-page "AI助手" button to open the window pre-@ing the current page
 //   3. answers wb-request RPC from the workbench window:
-//        get-context      -> {title, slides:[{title, slideType, file}], templateBlueprint, deckPlan, aiConfig}
+//        get-context      -> {title, slides:[{title, slideType, file}], templateBlueprint, deckPlan, skills, aiConfig}
 //        get-slide {page} -> html string
+//        get-command-context {command, pages} -> target + adjacent slide/CSS context
+//        import-skill     -> imported external SKILL metadata
 //        execute-action {action} -> result string (runs the tool against PpteEditor)
 //
 // Tool execution goes through PpteEditor._pptBuilder + _savePptBuilderData +
@@ -51,6 +53,9 @@ window.PpteWorkbenchAgent = {
     try {
       if (type === 'get-context') result = await this._getContext();
       else if (type === 'get-slide') result = this._getSlide(req.payload?.page);
+      else if (type === 'get-command-context') result = await this._getCommandContext(req.payload);
+      else if (type === 'read-skill') result = await this._readSkill(req.payload);
+      else if (type === 'import-skill') result = await this._importSkill();
       else if (type === 'execute-action') result = await this._executeAction(req.payload?.action);
       else if (type === 'pick-ppte') result = await this._pickPpte();
       else result = { error: '未知请求类型 ' + type };
@@ -114,11 +119,19 @@ window.PpteWorkbenchAgent = {
       ? 'settings'
       : (token ? 'lectureai' : null);
     let deckPlan = { plan: null, status: 'missing' };
+    let skills = [];
     if (pb?.folderPath && window.__TAURI__?.core?.invoke) {
       try {
         deckPlan = await window.__TAURI__.core.invoke('ppte_agent_plan_read', { folderPath: pb.folderPath });
       } catch (error) {
         console.warn('Failed to read optional LectureAI plan', error);
+      }
+    }
+    if (window.__TAURI__?.core?.invoke) {
+      try {
+        skills = await window.__TAURI__.core.invoke('ppte_skill_list', { folderPath: pb?.folderPath || null });
+      } catch (error) {
+        console.warn('Failed to list optional workbench skills', error);
       }
     }
     const ctx = {
@@ -130,10 +143,12 @@ window.PpteWorkbenchAgent = {
       })),
       templateBlueprint: this._templateBlueprint(pb),
       deckPlan,
+      skills,
       aiConfig: settingsConfig,
       providers,
       defaultProvider,
       prefillPage: this._pendingPrefill,
+      currentPage: pb ? (pb.currentSlideIndex || 0) + 1 : null,
     };
     this._pendingPrefill = null;
     return ctx;
@@ -221,6 +236,61 @@ window.PpteWorkbenchAgent = {
     return pb.slides[i].html || '';
   },
 
+  async _getCommandContext(payload) {
+    const pb = this._editor()._pptBuilder;
+    if (!pb || payload?.command !== 'concept-animate') return '';
+    const targetPage = Number(payload?.pages?.[0] || (pb.currentSlideIndex || 0) + 1);
+    if (!Number.isInteger(targetPage) || targetPage < 1 || targetPage > pb.slides.length) {
+      throw new Error(`概念动画目标页 ${targetPage} 超出范围`);
+    }
+    const pages = [...new Set([targetPage - 1, targetPage, targetPage + 1])]
+      .filter(page => page >= 1 && page <= pb.slides.length);
+    const sections = pages.map(page => {
+      const slide = pb.slides[page - 1];
+      const role = page === targetPage ? '目标页' : '相邻页';
+      const limit = page === targetPage ? 90000 : 25000;
+      const source = String(slide.html || '');
+      const html = source.length > limit ? `${source.slice(0, limit)}\n<!-- 上下文已截断 -->` : source;
+      return `[${role} 第${page}页「${slide.title || '无标题'}」]\n\`\`\`html\n${html}\n\`\`\``;
+    });
+    const stylesheetRefs = [...new Set(pages.flatMap(page => this._stylesheetRefs(pb.slides[page - 1]?.html)))];
+    for (const reference of stylesheetRefs.slice(0, 3)) {
+      if (!reference || /^(?:[a-z]+:|\/|#|data:)/i.test(reference) || reference.includes('..')) continue;
+      const normalized = reference.split(/[?#]/)[0].replace(/^\.\//, '');
+      if (!normalized) continue;
+      try {
+        const css = await window.__TAURI__.core.invoke('read_text_file', {
+          filePath: `${pb.folderPath.replace(/[\\/]+$/, '')}/${normalized}`,
+        });
+        sections.push(`[现有样式 ${normalized}]\n\`\`\`css\n${String(css || '').slice(0, 18000)}\n\`\`\``);
+      } catch (_) { /* optional stylesheet context */ }
+    }
+    return [
+      `[客户端已准备 /concept-animate 上下文]\n目标页：第 ${targetPage} 页。修改时必须保持相邻页的共同对象、配色与位置连续。`,
+      ...sections,
+    ].join('\n\n');
+  },
+
+  async _readSkill(payload) {
+    const pb = this._editor()._pptBuilder;
+    return await window.__TAURI__.core.invoke('ppte_skill_read', {
+      folderPath: pb?.folderPath || null,
+      skillId: payload?.skillId || '',
+      relativePath: payload?.relativePath || null,
+    });
+  },
+
+  async _importSkill() {
+    let sourcePath;
+    try {
+      sourcePath = await window.__TAURI__.core.invoke('pick_folder');
+    } catch (error) {
+      if (String(error) === 'cancelled') return { cancelled: true, imported: [], skipped: [] };
+      throw error;
+    }
+    return await window.__TAURI__.core.invoke('ppte_skill_import', { sourcePath });
+  },
+
   // Open a PPTE folder picker in the main window (requested by the workbench
   // window when no course is connected); _onRequest emits wb-refresh afterwards.
   async _pickPpte() {
@@ -267,6 +337,9 @@ window.PpteWorkbenchAgent = {
         case 'insert_slide': return await this._toolInsertSlide(pb, a);
         case 'reorder_slides': return await this._toolReorderSlides(pb, a);
         case 'read_slide': return this._toolReadSlide(pb, a);
+        case 'load_skill': return await this._toolLoadSkill(a);
+        case 'read_skill_resource': return await this._toolReadSkillResource(a);
+        case 'inspect_slides': return await this._toolInspectSlides(pb, a);
         case 'validate_slide': return await this._toolValidateSlide(pb, a);
         case 'validate_deck': return await this._toolValidateDeck(pb);
         case '_parse_error': return `action 解析失败：${a.error}\n原始内容：${(a.raw || '').slice(0, 200)}`;
@@ -482,6 +555,353 @@ window.PpteWorkbenchAgent = {
     if (i < 0 || i >= pb.slides.length) return `read_slide 失败：页码 ${page} 超出范围`;
     const s = pb.slides[i];
     return `第${page}页「${s.title}」HTML：\n\`\`\`html\n${s.html || ''}\n\`\`\``;
+  },
+
+  async _toolReadSkillResource(a) {
+    if (!a.skill_id || !a.path) return 'read_skill_resource 失败：需提供 skill_id 和 path';
+    const document = await this._readSkill({ skillId: a.skill_id, relativePath: a.path });
+    return `Skill ${document.info?.name || a.skill_id} 资源 ${a.path}：\n\`\`\`${this._skillFenceLanguage(a.path)}\n${document.content || ''}\n\`\`\``;
+  },
+
+  async _toolLoadSkill(a) {
+    if (!a.skill_id) return 'load_skill 失败：需提供 skill_id';
+    const document = await this._readSkill({ skillId: a.skill_id });
+    return [
+      `[已加载 SKILL $${document.info?.name || a.skill_id}]`,
+      `skill_id: ${document.info?.id || a.skill_id}`,
+      `来源: ${document.info?.sourceLabel || ''}`,
+      document.files?.length ? `可按需读取的资源: ${document.files.join('、')}` : '无附加资源',
+      document.content || '',
+    ].join('\n');
+  },
+
+  _skillFenceLanguage(path) {
+    const extension = String(path || '').split('.').pop().toLowerCase();
+    return ({ md: 'markdown', js: 'javascript', ts: 'typescript', py: 'python', sh: 'bash', yml: 'yaml' })[extension] || extension;
+  },
+
+  async _toolInspectSlides(pb, a) {
+    const allowed = new Set(['font', 'overflow', 'density', 'card', 'copy', 'motion', 'concept-animation', 'quality']);
+    const check = String(a.check || '').toLowerCase();
+    if (!allowed.has(check)) return `inspect_slides 失败：check 必须为 ${[...allowed].join('/')}`;
+    const requested = Array.isArray(a.pages) && a.pages.length
+      ? [...new Set(a.pages.map(Number).filter(Number.isInteger))]
+      : pb.slides.map((_, index) => index + 1);
+    const invalid = requested.filter(page => page < 1 || page > pb.slides.length);
+    if (invalid.length) return `inspect_slides 失败：页码 ${invalid.join('、')} 超出范围（共 ${pb.slides.length} 页）`;
+
+    const slides = [];
+    for (const page of requested) {
+      const slide = pb.slides[page - 1];
+      let issues = [];
+      try {
+        issues = await this._inspectRenderedSlide(pb, slide, check);
+      } catch (error) {
+        issues = [{ severity: 'error', rule: 'render-failed', message: `渲染检查失败：${String(error)}` }];
+      }
+      slides.push({
+        page,
+        title: slide.title || `第 ${page} 页`,
+        passed: !issues.some(issue => issue.severity === 'error'),
+        issues,
+      });
+    }
+    const issueCount = slides.reduce((total, slide) => total + slide.issues.length, 0);
+    const errorCount = slides.reduce((total, slide) => total + slide.issues.filter(issue => issue.severity === 'error').length, 0);
+    return JSON.stringify({
+      check,
+      scope: requested,
+      passed: errorCount === 0,
+      summary: `检查 ${requested.length} 页，发现 ${errorCount} 个必须修复项、${issueCount - errorCount} 个建议项`,
+      errorCount,
+      warningCount: issueCount - errorCount,
+      slides,
+    }, null, 2);
+  },
+
+  async _inspectRenderedSlide(pb, slide, check) {
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-same-origin');
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.cssText = 'position:fixed;left:-12000px;top:0;width:1920px;height:1080px;border:0;visibility:hidden;pointer-events:none;';
+    document.body.appendChild(iframe);
+    try {
+      const baseHref = `${this._editor()._slideProtocolUrl(pb.folderPath).replace(/\/+$/, '')}/`;
+      const wrapped = this._editor()._wrapPptHtmlForVisualEditor
+        ? this._editor()._wrapPptHtmlForVisualEditor(slide.html || '', baseHref)
+        : String(slide.html || '');
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, 1800);
+        iframe.onload = () => { clearTimeout(timer); resolve(); };
+        iframe.srcdoc = wrapped;
+      });
+      const doc = iframe.contentDocument;
+      const win = iframe.contentWindow;
+      if (!doc || !win) throw new Error('无法访问检查画布');
+      try { await Promise.race([doc.fonts?.ready || Promise.resolve(), new Promise(resolve => setTimeout(resolve, 600))]); } catch (_) { /* ignore font load errors */ }
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return await this._collectSlideInspection(doc, win, slide, check);
+    } finally {
+      iframe.remove();
+    }
+  },
+
+  _conceptAnimationSourceIssues(rawHtml) {
+    const html = String(rawHtml || '');
+    const issues = [];
+    const add = (rule, message) => issues.push({ severity: 'error', rule, message });
+    const tags = html.match(/<[a-z][^>]*>/gi) || [];
+    const attr = (tag, name) => {
+      const match = String(tag || '').match(new RegExp(`${name}\\s*=\\s*["']([^"']*)["']`, 'i'));
+      return match ? match[1] : '';
+    };
+    const hasClass = (tag, className) => attr(tag, 'class').split(/\s+/).includes(className);
+    const rootTag = tags.find(tag => /\bdata-ppte-concept-animation(?:\s|=|>)/i.test(tag));
+    if (!rootTag) {
+      add('concept-root-missing', '缺少 data-ppte-concept-animation 标准分步动画根节点');
+      return issues;
+    }
+
+    const maxStep = Number(attr(rootTag, 'data-max-step'));
+    if (!Number.isInteger(maxStep) || maxStep < 3 || maxStep > 6) add('concept-step-count', 'data-max-step 必须为 3-6');
+    if (attr(rootTag, 'data-step') !== '0') add('concept-initial-step', '分步动画默认状态必须从 data-step="0" 开始');
+    if (!tags.some(tag => hasClass(tag, 'ppte-click-canvas'))) add('concept-stable-canvas', '缺少保持稳定的 .ppte-click-canvas 主画布');
+    if (!tags.some(tag => hasClass(tag, 'ppte-step-rail'))) add('concept-step-rail', '缺少底部 .ppte-step-rail 步骤栏');
+
+    const nodeTags = tags.filter(tag => /<button\b/i.test(tag) && hasClass(tag, 'ppte-step-node'));
+    const targets = nodeTags.map(tag => Number(attr(tag, 'data-target-step')));
+    const mainCount = tags.filter(tag => hasClass(tag, 'ppte-step-main')).length;
+    const subCount = tags.filter(tag => hasClass(tag, 'ppte-step-sub')).length;
+    const layerCount = tags.filter(tag => attr(tag, 'data-show-from') !== '').length;
+    const dotsBlock = html.match(/<div\b[^>]*class=["'][^"']*\bppte-step-dots\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
+    const dotCount = dotsBlock ? (dotsBlock[1].match(/<span\b/gi) || []).length : 0;
+    if (!dotsBlock) add('concept-step-dots', '缺少右下角 .ppte-step-dots 进度点');
+    if (Number.isInteger(maxStep)) {
+      if (nodeTags.length !== maxStep) add('concept-node-count', `步骤按钮 ${nodeTags.length} 个，应为 ${maxStep} 个`);
+      if (dotCount !== maxStep + 1) add('concept-dot-count', `进度点 ${dotCount} 个，应为 ${maxStep + 1} 个（含初始状态）`);
+      if (!Array.from({ length: maxStep }, (_, index) => index + 1).every(step => targets.includes(step))) add('concept-step-targets', '步骤按钮必须覆盖从 1 到 data-max-step 的每一步');
+      if (mainCount !== maxStep || subCount !== maxStep) add('concept-two-line-node', '每个步骤按钮必须各含一个 .ppte-step-main 和 .ppte-step-sub');
+      if (layerCount < maxStep + 1) add('concept-layer-count', '每个认知步骤应有独立 data-show-from 图层，并保留共享画布图层');
+    }
+
+    if (!/@media\s*\(prefers-reduced-motion\s*:\s*reduce\)/i.test(html)) add('concept-reduced-motion', '缺少 prefers-reduced-motion 兼容');
+    if (!/\.ppte-click-layer\s*\{[^}]*position\s*:\s*absolute/is.test(html) || !/\.ppte-click-layer\.is-visible\s*\{/i.test(html)) add('concept-layer-style', '显隐图层必须使用稳定的绝对定位，并提供 .is-visible 状态');
+    if (!/addEventListener\s*\(\s*["']click["']/i.test(html)) add('concept-click-control', '缺少点击推进或步骤按钮交互');
+    if (!/addEventListener\s*\(\s*["']keydown["']/i.test(html)) add('concept-keyboard-control', '缺少键盘前进与回退交互');
+    if (!/closest\s*\(\s*["']\[data-target-step\]["']\s*\)/i.test(html) || !/dataset\.targetStep/.test(html)) add('concept-direct-step-control', '步骤按钮必须支持点击后直接跳到对应 data-target-step');
+    if (!/current\s*\+\s*1/.test(html) || !/current\s*-\s*1/.test(html)) add('concept-single-step-control', '前进或后退一次只能改变一个步骤');
+    if (!/ArrowRight/.test(html) || !/PageDown/.test(html) || !/ArrowLeft/.test(html) || !/PageUp/.test(html) || !/["'] ["']/.test(html)) add('concept-key-map', '必须支持 Right/Space/PageDown 前进与 Left/PageUp 回退');
+    if (!/current\s*<\s*maxStep/.test(html) || !/current\s*>\s*0/.test(html)) add('concept-boundary-navigation', '键盘拦截必须受当前步骤边界控制，末步放行宿主翻页');
+    if (/setInterval\s*\(/i.test(html) || /animation-iteration-count\s*:\s*infinite|animation\s*:[^;}]*\binfinite\b/i.test(html)) add('concept-autoplay-loop', '分步讲解禁止自动播放或无限循环');
+    if (/点击继续|单击继续|按空格继续/.test(html)) add('concept-visible-instruction', '页面不得显示“点击继续”等操作提示');
+    return issues;
+  },
+
+  async _collectSlideInspection(doc, win, slide, check) {
+    const issues = [];
+    const categories = check === 'quality'
+      ? new Set(['font', 'overflow', 'density', 'card', 'copy'])
+      : (check === 'concept-animation'
+        ? new Set(['font', 'overflow', 'copy', 'motion', 'concept-animation'])
+        : new Set([check]));
+    const add = (severity, rule, message, sample) => {
+      const key = `${rule}|${message}|${sample || ''}`;
+      if (issues.some(issue => issue._key === key)) return;
+      issues.push({ severity, rule, message, ...(sample ? { sample } : {}), _key: key });
+    };
+    const visible = element => {
+      const style = win.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+    };
+    const label = element => {
+      const cls = typeof element.className === 'string' && element.className.trim()
+        ? `.${element.className.trim().split(/\s+/).slice(0, 2).join('.')}` : '';
+      return `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : cls}`;
+    };
+    const textElements = [...doc.body.querySelectorAll('*')].filter(element => {
+      if (/^(SCRIPT|STYLE|SVG|PATH|DEFS|USE|BR|HR|IMG|VIDEO|CANVAS)$/.test(element.tagName)) return false;
+      return [...element.childNodes].some(node => node.nodeType === 3 && String(node.textContent || '').trim()) && visible(element);
+    });
+    const conceptRoot = categories.has('concept-animation') ? doc.querySelector('[data-ppte-concept-animation]') : null;
+    const copyElements = conceptRoot
+      ? [conceptRoot, ...conceptRoot.querySelectorAll('*')].filter(element => {
+        if (/^(SCRIPT|STYLE|SVG|PATH|DEFS|USE|BR|HR|IMG|VIDEO|CANVAS)$/.test(element.tagName)) return false;
+        return [...element.childNodes].some(node => node.nodeType === 3 && String(node.textContent || '').trim());
+      })
+      : textElements;
+
+    if (categories.has('font')) {
+      const auxiliary = /caption|tag|label|marker|page-number|page_number|meta|kicker|eyebrow|footnote|hint|badge|small/i;
+      for (const element of textElements) {
+        const size = parseFloat(win.getComputedStyle(element).fontSize || '0');
+        const minimum = element.tagName === 'H1'
+          ? 57.6
+          : (/^H[23]$/.test(element.tagName)
+            ? 38.4
+            : (auxiliary.test(`${element.tagName} ${element.className || ''}`) || element.tagName === 'SMALL' ? 28.8 : 34.56));
+        if (size + 0.25 < minimum) {
+          add('error', 'font-too-small', `${label(element)} 实际字号 ${(size / 19.2).toFixed(2)}vw，低于 ${(minimum / 19.2).toFixed(1)}vw`, String(element.textContent || '').trim().slice(0, 48));
+        }
+      }
+      const pxDecl = /font-size\s*:\s*(\d+(?:\.\d+)?)px\b/gi;
+      for (const style of doc.querySelectorAll('style, [style]')) {
+        const source = style.tagName === 'STYLE' ? style.textContent : style.getAttribute('style');
+        let match;
+        while ((match = pxDecl.exec(String(source || '')))) {
+          add('error', 'font-px-unit', `发现 ${match[1]}px 字号声明，PPTE 字号必须使用 vw`, label(style));
+        }
+      }
+      for (const sheet of [...doc.styleSheets]) {
+        if (sheet.ownerNode?.tagName === 'STYLE') continue;
+        let rules = [];
+        try { rules = [...(sheet.cssRules || [])]; } catch (_) { continue; }
+        const walkRules = nested => {
+          for (const rule of nested) {
+            const cssText = String(rule.cssText || '');
+            pxDecl.lastIndex = 0;
+            let match;
+            while ((match = pxDecl.exec(cssText))) {
+              add('error', 'font-px-unit', `外部样式中发现 ${match[1]}px 字号声明，PPTE 字号必须使用 vw`, sheet.href || 'stylesheet');
+            }
+            if (rule.cssRules) walkRules([...rule.cssRules]);
+          }
+        };
+        walkRules(rules);
+      }
+    }
+
+    if (categories.has('overflow')) {
+      const root = doc.documentElement;
+      const body = doc.body;
+      if (Math.max(root.scrollWidth, body.scrollWidth) > 1922 || Math.max(root.scrollHeight, body.scrollHeight) > 1082) {
+        add('error', 'page-overflow', `页面内容尺寸 ${Math.max(root.scrollWidth, body.scrollWidth)}×${Math.max(root.scrollHeight, body.scrollHeight)} 超出 1920×1080 画布`);
+      }
+      for (const element of [...body.querySelectorAll('*')]) {
+        if (!visible(element) || /^(SCRIPT|STYLE|SVG|PATH|DEFS)$/.test(element.tagName)) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.left < -2 || rect.top < -2 || rect.right > 1922 || rect.bottom > 1082) {
+          add('error', 'element-outside-canvas', `${label(element)} 越出画布边界`, `${Math.round(rect.left)},${Math.round(rect.top)} → ${Math.round(rect.right)},${Math.round(rect.bottom)}`);
+        }
+      }
+      for (const area of doc.querySelectorAll('.content-area')) {
+        if (area.scrollHeight > area.clientHeight + 2 || area.scrollWidth > area.clientWidth + 2) {
+          add('error', 'content-area-overflow', `.content-area 内容 ${area.scrollWidth}×${area.scrollHeight} 超出可用区 ${area.clientWidth}×${area.clientHeight}`);
+        }
+        const style = win.getComputedStyle(area);
+        if (style.overflow === 'hidden' || style.overflowY === 'hidden') {
+          add('error', 'hidden-overflow', '.content-area 使用 overflow:hidden，可能掩盖内容裁切');
+        }
+      }
+    }
+
+    const cards = [...doc.querySelectorAll('.card, [class$="-card"], [class*="-card "], .kpi, .panel, .tile')].filter(visible);
+    const cardMetrics = cards.map(card => {
+      const rect = card.getBoundingClientRect();
+      const children = [...card.children].filter(visible).map(child => child.getBoundingClientRect());
+      if (!children.length) return { card, rect, usedHeight: 0, blankRatio: 1 };
+      const top = Math.min(...children.map(item => item.top));
+      const bottom = Math.max(...children.map(item => item.bottom));
+      const usedHeight = Math.max(0, bottom - top);
+      return { card, rect, usedHeight, blankRatio: Math.max(0, 1 - usedHeight / Math.max(1, rect.height)) };
+    });
+
+    if (categories.has('density') && !['cover', 'chapter', 'finish'].includes(slide.slide_type)) {
+      const area = doc.querySelector('.content-area') || doc.body;
+      const areaRect = area.getBoundingClientRect();
+      const nodes = [...area.children].filter(visible).map(child => child.getBoundingClientRect());
+      if (nodes.length) {
+        const left = Math.min(...nodes.map(rect => rect.left));
+        const top = Math.min(...nodes.map(rect => rect.top));
+        const right = Math.max(...nodes.map(rect => rect.right));
+        const bottom = Math.max(...nodes.map(rect => rect.bottom));
+        const footprint = Math.max(0, right - left) * Math.max(0, bottom - top);
+        const ratio = footprint / Math.max(1, areaRect.width * areaRect.height);
+        if (ratio < 0.24) add('error', 'content-too-sparse', `内容仅占安全区约 ${Math.round(ratio * 100)}%，页面显得过空`);
+      }
+      for (const metric of cardMetrics) {
+        if (metric.rect.height > 180 && metric.blankRatio > 0.48) {
+          add('error', 'card-too-empty', `${label(metric.card)} 高 ${Math.round(metric.rect.height)}px，内部约 ${Math.round(metric.blankRatio * 100)}% 为空白`);
+        }
+      }
+    }
+
+    if (categories.has('card')) {
+      for (const metric of cardMetrics) {
+        const style = win.getComputedStyle(metric.card);
+        if (metric.rect.height > 180 && metric.blankRatio > 0.48) {
+          add('error', 'card-too-empty', `${label(metric.card)} 高度明显大于内容`, `空白约 ${Math.round(metric.blankRatio * 100)}%`);
+        }
+        if (style.borderLeftWidth !== style.borderRightWidth || style.borderTopWidth !== style.borderBottomWidth) {
+          add('error', 'card-accent-stripe', `${label(metric.card)} 使用不对称边框，疑似高亮侧边条`);
+        }
+        if (style.backgroundImage && style.backgroundImage !== 'none' && /gradient/i.test(style.backgroundImage)) {
+          add('error', 'card-gradient', `${label(metric.card)} 使用渐变卡片背景`);
+        }
+      }
+      if (cards.length >= 6) add('warn', 'too-many-cards', `本页包含 ${cards.length} 个卡片容器，建议改用表格、流程或关系图`);
+    }
+
+    if (categories.has('copy')) {
+      const forbidden = /(我们|我会|大家|同学|老师|接下来|下面|先看|再看|最后看|很关键|非常重要|一定要注意|希望大家|课堂上|演示时|讲解时|可以看到)/;
+      for (const element of copyElements) {
+        const text = String(element.textContent || '').replace(/\s+/g, ' ').trim();
+        if (forbidden.test(text)) add('error', 'teacher-facing-copy', `${label(element)} 含课堂或讲师口吻`, text.slice(0, 60));
+        if (/[？?]$/.test(text) && !/^(GET|POST|PUT|DELETE|SELECT|curl\b)/i.test(text)) add('error', 'question-copy', `${label(element)} 使用提问式屏显文案`, text.slice(0, 60));
+        if (text.length > 45 && !/^(PRE|CODE)$/.test(element.tagName)) add('warn', 'copy-too-long', `${label(element)} 单段 ${text.length} 字，投影阅读负担较高`, text.slice(0, 60));
+      }
+    }
+
+    if (categories.has('motion')) {
+      const source = `${[...doc.querySelectorAll('style')].map(style => style.textContent).join('\n')}\n${[...doc.querySelectorAll('script')].map(script => script.textContent).join('\n')}\n${doc.body.innerHTML}`;
+      const meaningful = /@keyframes|\banimation\s*:|data-motion|class=["'][^"']*(?:reveal|step|stage)|addEventListener\s*\(\s*["'](?:click|keydown)|requestAnimationFrame/i.test(source);
+      if (!meaningful) add('error', 'motion-missing', '页面未检测到分步揭示、状态转换或可控动画');
+    }
+
+    if (categories.has('concept-animation')) {
+      for (const issue of this._conceptAnimationSourceIssues(slide.html || '')) add(issue.severity, issue.rule, issue.message);
+      const root = doc.querySelector('[data-ppte-concept-animation]');
+      if (!root) {
+        add('error', 'concept-root-missing', '缺少 data-ppte-concept-animation 标准分步动画根节点');
+      } else {
+        const maxStep = Number(root.dataset.maxStep);
+        const initialStep = Number(root.dataset.step);
+        const nodes = [...root.querySelectorAll('[data-target-step]')];
+        const targets = nodes.map(node => Number(node.dataset.targetStep));
+        const dots = [...root.querySelectorAll('.ppte-step-dots span')];
+        const layers = [...root.querySelectorAll('[data-show-from]')];
+        if (!Number.isInteger(maxStep) || maxStep < 3 || maxStep > 6) add('error', 'concept-step-count', 'data-max-step 必须为 3-6');
+        if (initialStep !== 0) add('error', 'concept-initial-step', '分步动画默认状态必须从 data-step="0" 开始');
+        if (!root.querySelector('.ppte-click-canvas')) add('error', 'concept-stable-canvas', '缺少保持稳定的 .ppte-click-canvas 主画布');
+        if (!root.matches('.content-area') && !root.closest('.content-area')) add('error', 'concept-content-area', '标准分步动画必须放在现有 .content-area 安全区内');
+        if (!root.querySelector('.ppte-step-rail')) add('error', 'concept-step-rail', '缺少底部 .ppte-step-rail 步骤栏');
+        if (!root.querySelector('.ppte-step-dots')) add('error', 'concept-step-dots', '缺少右下角 .ppte-step-dots 进度点');
+        if (Number.isInteger(maxStep) && nodes.length !== maxStep) add('error', 'concept-node-count', `步骤按钮 ${nodes.length} 个，应为 ${maxStep} 个`);
+        if (Number.isInteger(maxStep) && dots.length !== maxStep + 1) add('error', 'concept-dot-count', `进度点 ${dots.length} 个，应为 ${maxStep + 1} 个（含初始状态）`);
+        if (Number.isInteger(maxStep) && !Array.from({ length: maxStep }, (_, index) => index + 1).every(step => targets.includes(step))) add('error', 'concept-step-targets', '步骤按钮必须覆盖从 1 到 data-max-step 的每一步');
+        for (const node of nodes) {
+          if (!node.querySelector('.ppte-step-main') || !node.querySelector('.ppte-step-sub')) add('error', 'concept-two-line-node', '每个步骤按钮必须包含 .ppte-step-main 和 .ppte-step-sub 两行文字');
+        }
+        if (layers.length < maxStep + 1) add('error', 'concept-layer-count', '每个认知步骤应有独立 data-show-from 图层，并保留共享画布图层');
+      }
+    }
+
+    if (categories.has('quality') || ['font', 'card', 'copy'].some(category => categories.has(category))) {
+      try {
+        const lintIssues = window.PpteRules ? await window.PpteRules.lint(slide.html || '') : [];
+        for (const issue of lintIssues || []) {
+          const rule = String(issue.rule || 'static-rule');
+          const lower = rule.toLowerCase();
+          const relevant = check === 'quality'
+            || (categories.has('font') && /字体|字号|font/.test(rule))
+            || (categories.has('card') && /卡片|边条|背景/.test(rule))
+            || (categories.has('copy') && /书面|讲师|句号|破折号/.test(rule));
+          if (relevant) add(issue.severity === 'error' ? 'error' : 'warn', `static-${lower}`, issue.message, issue.sample);
+        }
+      } catch (_) { /* rendered checks remain useful without the backend linter */ }
+    }
+
+    return issues.map(({ _key, ...issue }) => issue);
   },
 
   async _toolValidateSlide(pb, a) {
