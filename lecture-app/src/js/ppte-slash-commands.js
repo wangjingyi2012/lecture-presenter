@@ -86,6 +86,22 @@ window.PpteSlashCommands = {
       local: true,
       defaultScope: 'none',
     },
+    {
+      name: 'clear',
+      title: '清理上下文',
+      description: '清除当前对话历史，保留课件连接和页面状态',
+      local: true,
+      localAction: 'clear',
+      defaultScope: 'none',
+    },
+    {
+      name: 'compact',
+      title: '压缩上下文',
+      description: '保留系统规则和最近对话，压缩较早的上下文',
+      local: true,
+      localAction: 'compact',
+      defaultScope: 'none',
+    },
   ],
 
   get(name) {
@@ -324,8 +340,7 @@ window.PpteSlashCommands = {
 
   helpMarkdown() {
     const rows = this.commands
-      .filter(command => !command.local)
-      .map(command => `| \`/${command.name}\` | ${command.description} | ${command.defaultScope === 'current' ? '当前页' : '整套课件'} |`)
+      .map(command => `| \`/${command.name}\` | ${command.description} | ${command.local ? '本地' : (command.defaultScope === 'current' ? '当前页' : '整套课件')} |`)
       .join('\n');
     return `### 可用斜杠命令\n\n| 命令 | 作用 | 默认范围 |\n|---|---|---|\n${rows}\n\n用 \`@页码\` 限定范围，例如 \`@3 /font-check\`。从单页“AI助手”进入时，\`/concept-animate\` 默认处理当前页。`;
   },

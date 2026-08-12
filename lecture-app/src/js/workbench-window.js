@@ -228,6 +228,24 @@ window.WorkbenchWindow = {
   _clear() {
     this.history = [];
     this._renderEmpty();
+    this._log('sys', '上下文已清理 · 课件连接和页面状态保留');
+  },
+
+  _compact() {
+    this._ensureHistory();
+    const system = this.history[0];
+    const previous = this.history.slice(1);
+    if (previous.length <= 2) {
+      this._log('sys', '上下文无需压缩 · 当前对话已经很短');
+      return;
+    }
+    const recent = previous.slice(-6);
+    const removed = previous.length - recent.length;
+    this.history = [system, {
+      role: 'user',
+      content: `[上下文压缩] 已压缩 ${removed} 条较早消息。课件当前状态以磁盘和最新上下文为准；如需细节，请重新读取页面。`,
+    }, ...recent];
+    this._log('sys', `上下文已压缩 · 移除 ${removed} 条较早消息，保留最近 ${recent.length} 条`);
   },
 
   _renderEmpty() {
@@ -503,7 +521,9 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     }
     if (slash?.command?.local) {
       this._appendUser(input, []);
-      this._appendAssistantMarkdown(window.PpteSlashCommands.helpMarkdown());
+      if (slash.command.localAction === 'clear') this._clear();
+      else if (slash.command.localAction === 'compact') this._compact();
+      else this._appendAssistantMarkdown(window.PpteSlashCommands.helpMarkdown());
       if (inputEl) inputEl.value = '';
       this._hideSlashMenu();
       return;
