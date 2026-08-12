@@ -49,3 +49,7 @@ sync-to-server.sh
 # lives in prompts.example.txt (committed).
 lecture-app/src-tauri/resources/prompts.source.txt
 lecture-app/src-tauri/resources/prompts.enc
+参赛提交/
+output/
+tmp/
+docs/images/

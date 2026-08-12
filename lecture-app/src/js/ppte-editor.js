@@ -154,6 +154,7 @@ window.PpteEditor = {
 
     const forceAll = !!options.forceAll;
     const forceOverwrite = !!options.forceOverwrite;
+    const interactiveConflicts = options.interactiveConflicts !== false;
     const slideFiles = options.slideFiles || this._collectPptSlideFiles(pb, forceAll);
     const shouldSave = forceAll || forceOverwrite || pb.manifestDirty || slideFiles.length > 0;
     if (!shouldSave) return { skipped: true };
@@ -170,6 +171,13 @@ window.PpteEditor = {
 
     let result = await saveOnce(forceOverwrite);
     if (result.conflicts && result.conflicts.length > 0) {
+      if (!interactiveConflicts) {
+        return {
+          ...result,
+          cancelled: true,
+          reason: 'conflict',
+        };
+      }
       result = await this._handlePptSaveConflicts(pb, result.conflicts, () => saveOnce(true));
       if (result.cancelled) return result;
     }
@@ -296,7 +304,10 @@ window.PpteEditor = {
       templateFiles,
       fileStats: manifest._fileStats || {},
       manifestDirty: manifestUpgraded,
-      templateFilesDirty: !!templateFiles,
+      // create_ppt_extra_folder has already persisted every template CSS/image
+      // before the editor opens. Marking them dirty here makes the first save
+      // expect those existing files not to exist, producing a false conflict.
+      templateFilesDirty: false,
       sharedSelection: new Set(),
       linkedGroupStatuses: {},
     };

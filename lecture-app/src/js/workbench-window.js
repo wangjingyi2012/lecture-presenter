@@ -11,18 +11,17 @@
 // events; only this window listens (the main window no longer streams).
 window.WorkbenchWindow = {
   history: [],          // [{role, content}]; [0] is the system prompt
-  manifest: null,       // {title, slides:[{title}]}
+  manifest: null,       // {title, slides:[{title, slideType, file}], templateBlueprint, deckPlan}
   aiConfig: null,
   busy: false,
-  maxToolRounds: 6,
   _streamFull: '',
-  _displayText: '',
   _streamResolve: null,
   _renderTimer: null,
-  _typeTimer: null,
-  _streamTextEl: null,
-  _streamCursorEl: null,
-  _thinkingTimer: null,
+  _modelStatusTimer: null,
+  _modelStatusEl: null,
+  _modelStartedAt: 0,
+  _activeRound: 0,
+  _stopRequested: false,
 
   async init() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
@@ -33,24 +32,22 @@ window.WorkbenchWindow = {
     await listen('wb-prefill', (e) => this._onPrefill(e.payload));
     await listen('wb-refresh', () => this._refreshContext());
     await listen('ai-stream-chunk', (e) => {
-      if (!this._streamFull) this._stopThinking();
-      this._streamFull += e.payload;
+      const firstChunk = !this._streamFull;
+      this._streamFull += String(e.payload || '');
+      if (firstChunk) this._markModelReceiving();
       this._scheduleStreamingUpdate();
     });
     await listen('ai-stream-done', () => {
       if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
-      this._stopThinking();
-      // snap displayed text to the full streamed target so nothing is left
-      // half-typed by the typewriter, then drop the cursor.
-      this._displayText = this._stripActions(this._streamFull);
-      this._updateStreaming();
-      if (this._streamCursorEl) { this._streamCursorEl.remove(); this._streamCursorEl = null; }
+      this._updateModelStatusFromOutput();
+      this._finishModelStatus();
       const resolve = this._streamResolve;
       this._streamResolve = null;
       if (resolve) resolve(this._streamFull);
     });
 
     document.getElementById('wb-send').onclick = () => this._send();
+    document.getElementById('wb-stop').onclick = () => { this._stopRequested = true; };
     document.getElementById('wb-clear').onclick = () => this._clear();
     const input = document.getElementById('wb-input');
     input.onkeydown = (e) => {
@@ -61,29 +58,6 @@ window.WorkbenchWindow = {
     const ctx = await this._rpc('get-context');
     if (ctx) this._onContext(ctx);
     input.focus();
-    // typewriter: continuously catch up the displayed text toward the streamed target
-    this._typeTimer = setInterval(() => this._typeTick(), 16);
-  },
-
-  _typeTick() {
-    if (!this._streamEl || !this._streamFull) return;
-    const target = this._stripActions(this._streamFull);
-    if (this._displayText.length < target.length) {
-      // type ~3 chars per tick (~188 chars/sec) for a smooth terminal feel
-      this._displayText = target.slice(0, this._displayText.length + 3);
-      this._updateStreaming();
-    }
-  },
-
-  _waitForTypewriter() {
-    return new Promise(resolve => {
-      const check = () => {
-        const target = this._stripActions(this._streamFull);
-        if (!target || this._displayText.length >= target.length) resolve();
-        else setTimeout(check, 30);
-      };
-      check();
-    });
   },
 
   // ---- RPC over events (single in-flight request; busy guard ensures serial) ----
@@ -195,9 +169,36 @@ window.WorkbenchWindow = {
   _systemPrompt() {
     let ctx = '当前未连接课件。';
     if (this.manifest?.slides?.length) {
-      const list = this.manifest.slides.map((s, i) => `${i + 1}. ${s.title || '（无标题）'}`).join('\n');
+      const list = this.manifest.slides.map((s, i) =>
+        `${i + 1}. [${s.slideType || 'content'}] ${s.title || '（无标题）'}${s.file ? ` (${s.file})` : ''}`
+      ).join('\n');
       ctx = `当前课件：${this.manifest.title || '未命名'}（共 ${this.manifest.slides.length} 页）\n页面清单：\n${list}`;
     }
+    const blueprint = this.manifest?.templateBlueprint;
+    if (blueprint?.roles?.length) {
+      const roles = blueprint.roles
+        .filter(role => role.page != null)
+        .map(role => `- ${role.slideType}: 第${role.page}页「${role.title || role.file}」${role.stylesheets?.length ? `，样式 ${role.stylesheets.join('、')}` : ''}`)
+        .join('\n');
+      ctx += `\n\n模板蓝图：${blueprint.name || '默认模板'}（${blueprint.isStarter ? '尚未初始化' : '已用于当前课件'}）\n${roles}`;
+    }
+    if (blueprint?.isStarter) {
+      ctx += `\n\n这是客户端刚创建的“五页母版”，不是已经完成的五页课件。五页分别是封面、目录、章节过渡、正文、结束的样式样例。收到“制作 N 页课件”时，最终总页数必须恰好为 N，不是在现有 5 页后再追加 N 页。先按主题规划完整页序，再把现有五页改造成实际页面，并按需新增页面。封面、目录、章节过渡、正文、结束必须使用各自角色的母版，保留原模板的 stylesheet 链接、背景资源、布局容器和配色，不得把正文页样式套到封面、目录或章节页。新增页面优先用 insert_slide 的 template_role 克隆对应母版，再用 write_slide 填充内容。章节过渡页必须放在对应章节内容之前，结束页必须是最后一页。`;
+    }
+    const planState = this.manifest?.deckPlan;
+    if (planState?.plan) {
+      ctx += `\n\n现有 LectureAI 规划状态：${planState.status || 'unknown'}。${planState.status === 'stale' ? '课件已在规划后变化，整套任务开始前应重新 set_deck_plan。' : ''}`;
+    } else {
+      ctx += '\n\n当前项目没有 LectureAI 规划。这不影响旧项目打开、播放或单页修改；整套生成时按需创建。';
+    }
+    ctx += `\n\n课件级扩展工具：
+- set_deck_plan {plan}：保存整套可执行蓝图，整套生成或大规模改造必须最先调用
+- search_design_examples {content_kind?, layout_family?, density?, motion?, exclude?, limit?}：检索真实 HTML/CSS 设计案例
+- validate_deck {}：检查页数、结束页、重复布局、卡片占比、动画覆盖与所有单页规范
+plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page、role、title、contentKind、layoutFamily、componentIds、motion、visualIntent。相邻正文页不得重复主构图，正文超过 8 页至少 6 种主布局，卡片类不超过正文 25%，12 页以上至少 3 页有意义动画。整套任务最终必须 validate_deck 通过。
+
+扩展页面参数：write_slide 可同时提供 title 和 slide_type；insert_slide 可提供稳定的 template_role（cover/catalog/chapter/content/finish）、兼容参数 template_page 和 slide_type。例：克隆章节母版到第6页后：{"tool":"insert_slide","after":6,"template_role":"chapter","slide_type":"chapter","title":"第二章"}。当存在 finish 页时，客户端会自动把普通新增页放到 finish 页之前；reorder_slides 也不允许把唯一的 finish 页移出末页。`;
+    ctx += `\n\n工作台会把工具轮次压缩成单行动态状态。需要读取、校验或修改页面时，必须在同一响应中输出对应的 \`\`\`action 工具块；只描述“准备读取/校验/修改”但不附 action 属于协议错误。带 action 的响应中，action 前只写一句不超过 32 个汉字的状态摘要，直接说明当前动作；禁止寒暄、重复已完成步骤或使用“好的”“收到”“我先”“继续读取”等填充句。最终不再调用工具时，一次性输出完整 Markdown 结论。不要输出冗长的内部思维链。`;
     // The tool-protocol prompt is prepended by the Rust backend when the request
     // is dispatched to a non-LectureAI provider; LectureAI's server owns the full
     // SKILL and prepends it itself. The desktop sends only the dynamic manifest
@@ -207,6 +208,40 @@ window.WorkbenchWindow = {
 
   _ensureHistory() {
     if (!this.history.length) this.history.push({ role: 'system', content: this._systemPrompt() });
+  },
+
+  _requestedSlideCount(input) {
+    const text = String(input || '');
+    const matches = [
+      ...text.matchAll(/(?:创建|制作|生成|做)(?:一套|一个|份)?\s*(\d{1,2})\s*页/gi),
+      ...text.matchAll(/(?:目标|总共|一共|共)\s*(\d{1,2})\s*页/gi),
+      ...text.matchAll(/(\d{1,2})\s*页(?:的|关于|课件|PPT|幻灯片)/gi),
+    ];
+    const count = matches.length ? Number(matches[0][1]) : 0;
+    return count >= 3 && count <= 60 ? count : null;
+  },
+
+  _taskInitialization(input) {
+    const blueprint = this.manifest?.templateBlueprint;
+    if (!blueprint?.isStarter) return '';
+    const target = this._requestedSlideCount(input);
+    const targetRule = target
+      ? `用户要求最终 ${target} 页。当前 5 页都是母版占位，必须计入最终 ${target} 页，因此只需净新增 ${Math.max(0, target - this.manifest.slides.length)} 页，完成后核对总页数恰好为 ${target}。`
+      : '如果用户指定总页数，该数字包含当前五个母版页，完成后必须核对最终总页数。';
+    return `[客户端模板初始化]\n${targetRule}\n先按封面、目录、章节过渡、正文、结束规划全套顺序。使用 template_role 克隆正确角色，保持模板配色与背景；章节页紧邻其章节内容之前，finish 页始终最后。`;
+  },
+
+  _isDeckLevelTask(input) {
+    const value = String(input || '');
+    if (/(?:创建|制作|生成|重做|改造).{0,16}(?:整套|课件|PPT|幻灯片|\d{1,2}\s*页)/i.test(value)) return true;
+    if (/(?:整套|整体|全部|所有|逐页).{0,10}(?:修改|重写|检查|优化|生成)/i.test(value)) return true;
+    return /(?:检查|校验|审查).{0,8}(?:一下|整个|整套|整体)?\s*(?:课件|PPT|幻灯片)|(?:课件|PPT|幻灯片).{0,8}(?:问题|检查|校验)/i.test(value);
+  },
+
+  _requiresDeckPlan(input) {
+    const value = String(input || '');
+    if (/(?:创建|制作|生成|重做|改造).{0,16}(?:整套|课件|PPT|幻灯片|\d{1,2}\s*页)/i.test(value)) return true;
+    return /(?:整套|整体|全部|所有|逐页).{0,10}(?:修改|重写|优化|生成)/i.test(value);
   },
 
   // ---- @-mention resolution (fetch slide HTML via RPC) ----
@@ -276,8 +311,13 @@ window.WorkbenchWindow = {
     this.history[0] = { role: 'system', content: this._systemPrompt() };
 
     const { content, mentioned } = await this._resolveAt(input);
+    const taskInitialization = this._taskInitialization(input);
+    const deckLevel = this._isDeckLevelTask(input);
+    const requiresPlan = this._requiresDeckPlan(input);
+    this._activeTask = { deckLevel, requiresPlan, planSaved: !requiresPlan, deckValidated: false };
+    this._stopRequested = false;
     this._appendUser(input, mentioned);
-    this.history.push({ role: 'user', content });
+    this.history.push({ role: 'user', content: taskInitialization ? `${content}\n\n${taskInitialization}` : content });
     if (inputEl) inputEl.value = '';
 
     await this._runTurn();
@@ -288,18 +328,68 @@ window.WorkbenchWindow = {
     this._setBusy(true);
     try {
       let rounds = 0;
-      while (rounds < this.maxToolRounds) {
-        rounds++;
+      let toolCalls = 0;
+      let recoveryRounds = 0;
+      const turnStartedAt = this._now();
+      // Keep the agent running until it returns a normal response without an
+      // action. A fixed round cap breaks deck-level jobs because the model may
+      // need to read, rewrite, and validate every slide in separate calls.
+      while (true) {
+        if (this._stopRequested) {
+          this._appendAssistantMarkdown('### 任务已停止\n\n已停止后续模型请求，已成功保存的页面保留。');
+          this._log('sys', `任务停止 · 用户取消 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
+          break;
+        }
+        rounds += 1;
+        this._activeRound = rounds;
         const text = await this._callAI(this.history);
-        await this._waitForTypewriter();
         if (!text) { this._log('err', 'AI 返回空内容，可能是服务端问题、额度耗尽或请求被拒'); break; }
         this.history.push({ role: 'assistant', content: text });
         const actions = this._parseActions(text);
-        // prose already streamed into the log by _updateStreaming
-        if (!actions.length) break;
+        // Tool-round prose stays compressed in the single status line. Only a
+        // final response without actions is rendered as a full Markdown block.
+        if (!actions.length) {
+          if (this._hasUnexecutedToolIntent(text)) {
+            recoveryRounds += 1;
+            if (recoveryRounds > 3) throw new Error('模型连续 3 次未发出有效工具调用，任务已停止，避免无限请求');
+            this.history.push({
+              role: 'user',
+              content: '[工具协议纠正] 你刚才描述了要执行的页面操作，但没有调用工具。请立即输出对应的 ```action JSON``` 工具块，不要重复说明。',
+            });
+            if (this._modelStatusEl) {
+              this._modelStatusEl.dataset.summary = '正在补发工具调用';
+              this._modelStatusEl.textContent = `第 ${rounds} 轮 · 正在补发工具调用 · ${this._duration(turnStartedAt)}`;
+            }
+            continue;
+          }
+          if (this._activeTask?.deckLevel && !this._activeTask.deckValidated) {
+            recoveryRounds += 1;
+            if (recoveryRounds > 3) throw new Error('整套校验连续 3 次未通过或未执行，任务已停止，请查看校验结果后重试');
+            this.history.push({
+              role: 'user',
+              content: '[完成门禁] 整套课件任务结束前必须调用 validate_deck 且检查通过。请现在直接调用，不要先总结。',
+            });
+            if (this._modelStatusEl) {
+              this._modelStatusEl.dataset.summary = '等待整套课件校验';
+              this._modelStatusEl.textContent = `第 ${rounds} 轮 · 等待整套课件校验 · ${this._duration(turnStartedAt)}`;
+            }
+            continue;
+          }
+          this._appendAssistantMarkdown(this._stripActions(text));
+          this._log('sys', `任务结束 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
+          break;
+        }
         const results = [];
+        let terminalToolFailure = '';
         for (const a of actions) {
-          this._logAction(a);
+          if (this._stopRequested) break;
+          if (this._activeTask?.requiresPlan && ['write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.planSaved) {
+            results.push('[规划门禁] 这是整套课件任务，第一次修改前必须先调用 set_deck_plan。请现在输出 set_deck_plan action，不要开始写页。');
+            break;
+          }
+          toolCalls += 1;
+          const actionStartedAt = this._now();
+          const actionEl = this._logAction(a, toolCalls);
           // inline diff for slide rewrites (current vs new html)
           if (a.tool === 'write_slide' && a.page != null) {
             try {
@@ -308,14 +398,34 @@ window.WorkbenchWindow = {
             } catch (e) { /* skip diff if fetch fails */ }
           }
           const result = await this._rpc('execute-action', { action: a });
+          this._finishAction(actionEl, actionStartedAt, result);
           this._logResult(result);
           results.push(result || '(无结果)');
+          if (a.tool === 'set_deck_plan' && !/失败|出错|错误/.test(String(result || ''))) {
+            this._activeTask.planSaved = true;
+          }
+          if (['write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !/失败|出错|错误/.test(String(result || ''))) {
+            this._activeTask.deckValidated = false;
+            recoveryRounds = 0;
+          }
+          if (a.tool === 'validate_deck') {
+            try { this._activeTask.deckValidated = JSON.parse(result).passed === true; }
+            catch (_) { this._activeTask.deckValidated = false; }
+            if (this._activeTask.deckValidated) recoveryRounds = 0;
+            else recoveryRounds += 1;
+          }
+          if (this._isTerminalToolFailure(result)) {
+            terminalToolFailure = String(result || '磁盘保存失败');
+            break;
+          }
         }
         const resultMsg = '[工具结果]\n' + results.join('\n\n');
         this.history.push({ role: 'user', content: resultMsg });
-      }
-      if (rounds >= this.maxToolRounds) {
-        this._log('sys', '已达工具调用上限，停止本轮');
+        if (terminalToolFailure) {
+          this._appendAssistantMarkdown(`### 任务已停止\n\n${terminalToolFailure}\n\n未确认写入磁盘的修改不会继续累积。请处理文件冲突或重新打开课件后再试。`);
+          this._log('sys', `任务停止 · 磁盘保存未成功 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
+          break;
+        }
       }
     } catch (e) {
       this._log('err', '出错：' + this._escape(String(e)));
@@ -335,8 +445,7 @@ window.WorkbenchWindow = {
       // aiConfig.aiApiKey is populated by the main window: for 'lectureai' it is
       // the auth token, for others the raw API key. Pass it straight through.
       const apiKey = cfg.aiApiKey || '';
-      const msgEl = this._appendAssistantStreaming();
-      this._startThinking();
+      this._startModelStatus(this._activeRound);
       window.__TAURI__.core.invoke('call_ai_messages_stream', {
         provider,
         apiKey,
@@ -348,9 +457,8 @@ window.WorkbenchWindow = {
         // Surface the real backend error (quota / auth / format) instead of a
         // silent "empty" - reject so _runTurn's catch shows it.
         if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
-        this._stopThinking();
+        this._finishModelStatus('模型请求失败');
         this._streamResolve = null;
-        msgEl.remove();
         reject(new Error(String(e)));
       });
     });
@@ -358,14 +466,33 @@ window.WorkbenchWindow = {
 
   _scheduleStreamingUpdate() {
     if (this._renderTimer) return;
-    this._renderTimer = setTimeout(() => { this._renderTimer = null; this._updateStreaming(); }, 50);
+    this._renderTimer = setTimeout(() => {
+      this._renderTimer = null;
+      this._updateModelStatusFromOutput();
+    }, 50);
   },
 
-  _updateStreaming() {
-    if (this._streamTextEl) {
-      this._streamTextEl.textContent = this._displayText;
+  _compactStatus(text) {
+    const lines = String(text || '')
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/[*_`>|]/g, '')
+      .split(/\n+/)
+      .map(line => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    const clean = lines[lines.length - 1] || '';
+    if (!clean) return '';
+    const sentences = clean.match(/[^。！？.!?]+[。！？.!?]?/g) || [clean];
+    return sentences[sentences.length - 1].trim().slice(0, 48);
+  },
+
+  _updateModelStatusFromOutput() {
+    const summary = this._compactStatus(this._stripActions(this._streamFull));
+    if (summary && this._modelStatusEl) {
+      this._modelStatusEl.dataset.summary = summary;
+      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · ${summary} · ${this._modelDuration()}`;
+      this._scroll();
     }
-    this._scroll();
   },
 
   // ---- action parsing ----
@@ -390,6 +517,21 @@ window.WorkbenchWindow = {
     return text.replace(/```action\s*[\s\S]*?```/gi, '').trim();
   },
 
+  _hasUnexecutedToolIntent(text) {
+    const clean = this._stripActions(String(text || ''))
+      .replace(/^[#>*_`\s-]+/gm, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!clean || clean.length > 160) return false;
+    if (/检查结果|校验结果|处理完成|检查完成|总结|发现以下|问题如下|无需修改/.test(clean)) return false;
+    return /^(?:好的[，。!！\s]*)?(?:收到[，。!！\s]*)?(?:我?先|现在|继续|接下来|准备|开始|将|需要)?\s*(?:逐页)?(?:读取|查看|打开|检查|校验|验证|修改|重写|写入|插入|新增|删除|调整|重排)/u.test(clean);
+  },
+
+  _isTerminalToolFailure(result) {
+    const text = String(result || '');
+    return /(?:write_slide|insert_slide|reorder_slides|set_deck_plan) 保存失败|已恢复执行前状态|文件冲突/.test(text);
+  },
+
   // ---- terminal log ----
   _log(type, text) {
     const m = document.getElementById('wb-messages');
@@ -402,61 +544,110 @@ window.WorkbenchWindow = {
     return el;
   },
 
-  _cursor() {
-    const s = document.createElement('span');
-    s.className = 'cursor';
-    return s;
-  },
-
   _appendUser(text, mentioned) {
     const t = mentioned.length ? `@${mentioned.map(x => x.page).join(' @')} · ${text}` : text;
     this._log('user', t);
   },
 
-  _appendAssistantStreaming() {
+  _appendAssistantMarkdown(markdown) {
     const m = document.getElementById('wb-messages');
-    if (!m) return document.createElement('div');
-    this._displayText = '';
+    if (!m || !markdown) return;
     const el = document.createElement('div');
-    el.className = 'ln ln-ai';
-    const text = document.createElement('span');
-    text.className = 'stream-text';
-    const cur = this._cursor();
-    el.appendChild(text);
-    el.appendChild(cur);
+    el.className = 'ln ln-ai markdown-body';
+    if (window.marked) {
+      el.innerHTML = this._sanitizeHtml(window.marked.parse(markdown));
+    } else {
+      el.textContent = markdown;
+    }
     m.appendChild(el);
-    this._streamEl = el;
-    this._streamTextEl = text;
-    this._streamCursorEl = cur;
     this._scroll();
     return el;
   },
 
-  // ---- "thinking" status while waiting for the first streamed chunk ----
-  _startThinking() {
-    const phrases = ['思考中', '分析中', '探索中', '推理中'];
-    let i = 0;
-    if (this._streamTextEl) this._streamTextEl.textContent = '✻ ' + phrases[0] + '…';
-    this._thinkingTimer = setInterval(() => {
-      i = (i + 1) % phrases.length;
-      if (this._streamTextEl && !this._streamFull) {
-        this._streamTextEl.textContent = '✻ ' + phrases[i] + '…';
+  _sanitizeHtml(html) {
+    const template = document.createElement('template');
+    template.innerHTML = String(html || '');
+    template.content.querySelectorAll('script, style, iframe, object, embed, link, meta').forEach(el => el.remove());
+    template.content.querySelectorAll('*').forEach(el => {
+      for (const attr of [...el.attributes]) {
+        const name = attr.name.toLowerCase();
+        const value = attr.value.trim().toLowerCase();
+        if (name.startsWith('on') || ((name === 'href' || name === 'src') && value.startsWith('javascript:'))) {
+          el.removeAttribute(attr.name);
+        }
       }
-    }, 1400);
-  },
-  _stopThinking() {
-    if (this._thinkingTimer) { clearInterval(this._thinkingTimer); this._thinkingTimer = null; }
+    });
+    return template.innerHTML;
   },
 
-  _logAction(a) {
+  // ---- truthful model-request status (no simulated "thinking" phrases) ----
+  _now() {
+    return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  },
+  _duration(startedAt) {
+    const elapsed = Math.max(0, this._now() - startedAt);
+    return elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed.toFixed(0)}ms`;
+  },
+  _modelDuration() {
+    return this._duration(this._modelStartedAt);
+  },
+  _startModelStatus(round) {
+    this._stopModelStatusTimer();
+    this._modelStartedAt = this._now();
+    const m = document.getElementById('wb-messages');
+    if (this._modelStatusEl) {
+      this._modelStatusEl.remove();
+      this._modelStatusEl.dataset.summary = '';
+      if (m) m.appendChild(this._modelStatusEl);
+    } else {
+      this._modelStatusEl = this._log('phase', `第 ${round} 轮 · 已发送模型请求 · 0ms`);
+    }
+    if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${round} 轮 · 已发送模型请求 · 0ms`;
+    this._modelStatusTimer = setInterval(() => {
+      if (this._modelStatusEl && !this._streamFull) {
+        this._modelStatusEl.textContent = `第 ${round} 轮 · 等待模型响应 · ${this._modelDuration()}`;
+      }
+    }, 100);
+  },
+  _markModelReceiving() {
+    this._stopModelStatusTimer();
+    if (this._modelStatusEl) {
+      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 接收模型输出 · ${this._modelDuration()}`;
+    }
+  },
+  _finishModelStatus(label = '') {
+    this._stopModelStatusTimer();
+    if (this._modelStatusEl) {
+      const summary = this._modelStatusEl.dataset.summary || label || '模型响应完成';
+      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · ${summary} · ${this._modelDuration()}`;
+    }
+  },
+  _stopModelStatusTimer() {
+    if (this._modelStatusTimer) {
+      clearInterval(this._modelStatusTimer);
+      this._modelStatusTimer = null;
+    }
+  },
+
+  _logAction(a, callNumber) {
     if (a.tool === '_parse_error') {
-      this._log('err', `action 解析失败：${a.error || ''}`);
-      return;
+      return this._log('err', `action 解析失败：${a.error || ''}`);
     }
     const page = a.page != null ? ` 第${a.page}页` : '';
     const after = a.after != null ? `（插在第${a.after}页后）` : '';
     const reason = a.reason ? ` · ${a.reason}` : '';
-    this._log('act', `${a.tool}${page}${after}${reason}`);
+    const label = `工具 ${callNumber} · ${a.tool}${page}${after}${reason}`;
+    const el = this._log('act', `${label} · 执行中`);
+    if (el) el.dataset.actionLabel = label;
+    return el;
+  },
+
+  _finishAction(el, startedAt, result) {
+    if (!el) return;
+    const firstLine = String(result || '').split('\n')[0];
+    const failed = /失败|错误|出错|超出范围/.test(firstLine);
+    el.textContent = `${el.dataset.actionLabel || '工具'} · ${failed ? '失败' : '完成'} · ${this._duration(startedAt)}`;
+    if (failed) el.className = 'ln ln-err';
   },
 
   _logResult(result) {
@@ -503,8 +694,10 @@ window.WorkbenchWindow = {
 
   _setBusy(busy) {
     const send = document.getElementById('wb-send');
+    const stop = document.getElementById('wb-stop');
     const input = document.getElementById('wb-input');
     if (send) send.disabled = busy;
+    if (stop) stop.hidden = !busy;
     if (input) input.disabled = busy;
   },
 

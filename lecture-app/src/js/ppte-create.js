@@ -178,6 +178,15 @@ window.PpteCreate = {
         const content = await window.__TAURI__.core.invoke('read_text_file', { filePath: manifestPath });
         const manifest = JSON.parse(content);
 
+        // A newly created PPTE contains five role templates, not five finished
+        // content pages. Persist that distinction so the workbench Agent can
+        // bootstrap from a template blueprint instead of guessing from titles.
+        manifest.agentTemplate = this._buildAgentTemplateMetadata(templateName, manifest.slides);
+        await window.__TAURI__.core.invoke('write_text_file', {
+          filePath: manifestPath,
+          content: JSON.stringify(manifest, null, 2),
+        });
+
         // Load HTML content for each slide
         const slides = manifest.slides || [];
         for (let i = 0; i < slides.length; i++) {
@@ -311,6 +320,19 @@ window.PpteCreate = {
     await this._addRecentPpte(folderPath, manifest.title || '未命名');
     manifest._fileStats = await this._loadPptFileStats(folderPath, manifest);
     this._openPptBuilder(folderPath, manifest);
+  },
+
+  _buildAgentTemplateMetadata(templateName, slides) {
+    return {
+      schemaVersion: 1,
+      name: templateName || '默认模板',
+      state: 'starter',
+      roles: (Array.isArray(slides) ? slides : []).map((slide, index) => ({
+        file: slide?.file || `slide${String(index + 1).padStart(2, '0')}.html`,
+        title: slide?.title || `页面 ${index + 1}`,
+        slideType: slide?.slide_type || 'content',
+      })),
+    };
   },
 
 };

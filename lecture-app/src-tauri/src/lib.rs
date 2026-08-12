@@ -610,6 +610,218 @@ fn write_text_file(file_path: String, content: String) -> Result<(), String> {
     fs::write(&file_path, &content).map_err(|e| format!("Failed to write {}: {}", file_path, e))
 }
 
+fn ppte_agent_revision(folder_path: &str) -> Result<serde_json::Value, String> {
+    let root = PathBuf::from(folder_path)
+        .canonicalize()
+        .map_err(|e| format!("无法读取 PPTE 目录：{}", e))?;
+    let manifest_path = root.join("manifest.json");
+    let manifest_bytes = fs::read(&manifest_path)
+        .map_err(|e| format!("无法读取 manifest.json：{}", e))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("manifest.json 格式错误：{}", e))?;
+    let slides = manifest.get("slides").and_then(|value| value.as_array())
+        .ok_or_else(|| "manifest.json 中 slides 必须是数组".to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"lectureai-deck-revision-v1\0");
+    hasher.update(manifest.get("title").and_then(|value| value.as_str()).unwrap_or("").as_bytes());
+    hasher.update(b"\0");
+    let mut slide_files = Vec::new();
+    for (index, slide) in slides.iter().enumerate() {
+        let relative = slide.as_str()
+            .or_else(|| slide.get("file").and_then(|value| value.as_str()))
+            .ok_or_else(|| format!("第 {} 页缺少 file", index + 1))?;
+        let default_title = format!("第 {} 页", index + 1);
+        let title = slide.get("title").and_then(|value| value.as_str()).unwrap_or(&default_title);
+        let raw_type = slide.get("slide_type")
+            .or_else(|| slide.get("type"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(if index == 0 { "cover" } else { "content" });
+        let slide_type = match raw_type {
+            "toc" => "catalog",
+            "finish" => "ending",
+            value => value,
+        };
+        let path = root.join(relative);
+        let canonical = path.canonicalize()
+            .map_err(|e| format!("无法读取幻灯片 {}：{}", relative, e))?;
+        if !canonical.starts_with(&root) || !canonical.is_file() {
+            return Err(format!("幻灯片路径不安全：{}", relative));
+        }
+        hasher.update(relative.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(title.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(slide_type.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(fs::read(&canonical).map_err(|e| format!("无法读取幻灯片 {}：{}", relative, e))?);
+        hasher.update(b"\0");
+        slide_files.push(relative.to_string());
+    }
+    Ok(serde_json::json!({
+        "deckHash": format!("sha256:{:x}", hasher.finalize()),
+        "slideCount": slide_files.len(),
+        "slideFiles": slide_files,
+    }))
+}
+
+fn ppte_agent_plan_path(folder_path: &str) -> Result<PathBuf, String> {
+    let root = canonical_ppte_root(folder_path)?;
+    if !root.join("manifest.json").is_file() {
+        return Err("所选目录不是有效 PPTE".to_string());
+    }
+    let plan_dir = ppte_safe_destination(&root, Path::new(".lectureai"))?;
+    if plan_dir.exists() && !plan_dir.is_dir() {
+        return Err(".lectureai 必须是课件内的普通目录".to_string());
+    }
+    Ok(plan_dir.join("deck-plan.json"))
+}
+
+fn validate_agent_plan_value(plan: &serde_json::Value) -> Result<(), String> {
+    let object = plan.as_object().ok_or_else(|| "plan 必须是对象".to_string())?;
+    let target = object.get("targetSlideCount").and_then(|value| value.as_u64())
+        .ok_or_else(|| "targetSlideCount 必须是整数".to_string())?;
+    if target == 0 || target > 60 {
+        return Err("targetSlideCount 必须为 1 至 60".to_string());
+    }
+    if !object.get("visualSystem").map(|value| value.is_object()).unwrap_or(false) {
+        return Err("visualSystem 必须是对象".to_string());
+    }
+    let slides = object.get("slides").and_then(|value| value.as_array())
+        .ok_or_else(|| "plan.slides 必须是数组".to_string())?;
+    if slides.len() != target as usize {
+        return Err(format!("targetSlideCount={} 与 slides 数量 {} 不一致", target, slides.len()));
+    }
+    for (index, slide) in slides.iter().enumerate() {
+        let page = slide.get("page").and_then(|value| value.as_u64()).unwrap_or_default();
+        if page != (index + 1) as u64 {
+            return Err("plan.slides.page 必须从 1 连续编号".to_string());
+        }
+        if slide.get("title").and_then(|value| value.as_str()).unwrap_or("").trim().is_empty() {
+            return Err(format!("第 {} 项缺少 title", index + 1));
+        }
+        let layout = slide.get("layoutFamily")
+            .or_else(|| slide.get("layout_family"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if layout.trim().is_empty() {
+            return Err(format!("第 {} 项缺少 layoutFamily", index + 1));
+        }
+        for field in ["role", "contentKind", "motion", "visualIntent"] {
+            if slide.get(field).and_then(|value| value.as_str()).unwrap_or("").trim().is_empty() {
+                return Err(format!("第 {} 项缺少 {}", index + 1, field));
+            }
+        }
+        if !slide.get("componentIds").map(|value| value.is_array()).unwrap_or(false) {
+            return Err(format!("第 {} 项的 componentIds 必须是数组", index + 1));
+        }
+    }
+    Ok(())
+}
+
+fn write_agent_plan_file(folder_path: &str, mut plan: serde_json::Value) -> Result<serde_json::Value, String> {
+    validate_agent_plan_value(&plan)?;
+    let revision = ppte_agent_revision(folder_path)?;
+    let object = plan.as_object_mut().ok_or_else(|| "plan 必须是对象".to_string())?;
+    object.insert("schemaVersion".to_string(), serde_json::json!(1));
+    object.insert("baseRevision".to_string(), revision);
+    object.insert("status".to_string(), serde_json::json!("active"));
+    object.insert("updatedAt".to_string(), serde_json::json!(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()));
+    let target = ppte_agent_plan_path(folder_path)?;
+    let parent = target.parent().ok_or_else(|| "无法确定规划目录".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("无法创建规划目录：{}", e))?;
+    let temporary = parent.join("deck-plan.json.tmp");
+    let backup = parent.join("deck-plan.json.bak");
+    let content = serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())? + "\n";
+    fs::write(&temporary, content).map_err(|e| format!("无法写入规划：{}", e))?;
+    let _ = fs::remove_file(&backup);
+    if target.exists() {
+        fs::rename(&target, &backup).map_err(|e| format!("无法备份旧规划：{}", e))?;
+    }
+    if let Err(error) = fs::rename(&temporary, &target) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &target);
+        }
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("无法保存规划：{}", error));
+    }
+    let _ = fs::remove_file(&backup);
+    Ok(plan)
+}
+
+#[tauri::command]
+fn ppte_agent_plan_read(folder_path: String) -> Result<serde_json::Value, String> {
+    let path = ppte_agent_plan_path(&folder_path)?;
+    if !path.exists() {
+        return Ok(serde_json::json!({"plan": null, "status": "missing"}));
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("无法读取规划：{}", e))?;
+    let mut plan: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(_) => return Ok(serde_json::json!({"plan": {"schemaVersion": 1, "status": "invalid", "error": "规划文件损坏，可安全重新规划"}, "status": "invalid"})),
+    };
+    if validate_agent_plan_value(&plan).is_err() {
+        if let Some(object) = plan.as_object_mut() {
+            object.insert("status".to_string(), serde_json::json!("invalid"));
+            object.insert("error".to_string(), serde_json::json!("规划文件格式错误，可安全重新规划"));
+        }
+        return Ok(serde_json::json!({"plan": plan, "status": "invalid"}));
+    }
+    let current = ppte_agent_revision(&folder_path)?;
+    let stored_hash = plan.pointer("/baseRevision/deckHash").and_then(|value| value.as_str());
+    let current_hash = current.get("deckHash").and_then(|value| value.as_str());
+    let status = if stored_hash == current_hash { "active" } else { "stale" };
+    if let Some(object) = plan.as_object_mut() {
+        object.insert("status".to_string(), serde_json::json!(status));
+        if status == "stale" {
+            object.insert("currentRevision".to_string(), current);
+        }
+    }
+    Ok(serde_json::json!({"plan": plan, "status": status}))
+}
+
+#[tauri::command]
+fn ppte_agent_plan_write(folder_path: String, plan: serde_json::Value) -> Result<serde_json::Value, String> {
+    write_agent_plan_file(&folder_path, plan)
+}
+
+#[tauri::command]
+fn ppte_agent_plan_refresh(folder_path: String) -> Result<bool, String> {
+    let path = ppte_agent_plan_path(&folder_path)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let plan: serde_json::Value = match serde_json::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    if validate_agent_plan_value(&plan).is_err() {
+        return Ok(false);
+    }
+    write_agent_plan_file(&folder_path, plan)?;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn lectureai_design_examples(auth_token: String, query: serde_json::Value) -> Result<serde_json::Value, String> {
+    if auth_token.trim().is_empty() {
+        return Err("检索 LectureAI 设计案例需要先登录".to_string());
+    }
+    let response = direct_client()
+        .post("https://design.hz-study-system.com/api/web/ai/design-examples/search")
+        .header("Content-Type", "application/json")
+        .bearer_auth(auth_token)
+        .json(&query)
+        .send()
+        .await
+        .map_err(|e| format!("设计案例服务连接失败：{}", e))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| format!("设计案例响应读取失败：{}", e))?;
+    if !status.is_success() {
+        return Err(format!("设计案例服务错误（{}）：{}", status.as_u16(), text));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("设计案例响应格式错误：{}", e))
+}
+
 #[tauri::command]
 async fn save_pptx_file(app_handle: tauri::AppHandle, default_name: String, bytes: Vec<u8>) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -2666,34 +2878,78 @@ fn save_ppt_extra(
         }
     }
 
-    // Save manifest
-    fs::write(base_dir.join("manifest.json"), &manifest_json).map_err(|e| format!("Failed to save manifest: {}", e))?;
-    saved.push("manifest.json".to_string());
-
-    // Save each slide file
+    // Prepare and validate every payload before touching the live PPTE. This
+    // prevents a bad base64 asset or unsafe path from leaving a partial save.
+    let mut prepared: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
     for (filename, content) in slide_files {
         let relative = ppte_safe_relative_path(&filename)?;
         let file_path = ppte_safe_destination(&base_dir, &relative)?;
-        if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create folder for {}: {}", filename, e))?;
-        }
         let file_ext = file_path.extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-
-        // Check if this is an image file that needs base64 decoding
-        if matches!(file_ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") {
-            // Decode base64 to binary
-            let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content)
-                .map_err(|e| format!("Failed to decode base64 for {}: {}", filename, e))?;
-            fs::write(&file_path, decoded).map_err(|e| format!("Failed to save {}: {}", filename, e))?;
+        let bytes = if matches!(file_ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") {
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content)
+                .map_err(|e| format!("Failed to decode base64 for {}: {}", filename, e))?
         } else {
-            // Save as-is (HTML, CSS, manifest)
-            fs::write(&file_path, &content).map_err(|e| format!("Failed to save {}: {}", filename, e))?;
-        }
-        saved.push(filename);
+            content.into_bytes()
+        };
+        prepared.push((filename, file_path, bytes));
     }
+
+    let transaction = base_dir.join(format!(".ppte-save-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()));
+    let staged = transaction.join("staged");
+    let backups = transaction.join("backups");
+    fs::create_dir_all(&staged).map_err(|e| format!("Failed to prepare PPTE save: {}", e))?;
+    let mut entries: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    let stage_manifest = staged.join("manifest.json");
+    fs::write(&stage_manifest, manifest_json.as_bytes()).map_err(|e| format!("Failed to stage manifest: {}", e))?;
+    entries.push(("manifest.json".to_string(), base_dir.join("manifest.json"), stage_manifest));
+    for (filename, destination, bytes) in prepared {
+        let stage_path = staged.join(ppte_safe_relative_path(&filename)?);
+        if let Some(parent) = stage_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to stage folder for {}: {}", filename, e))?;
+        }
+        fs::write(&stage_path, bytes).map_err(|e| format!("Failed to stage {}: {}", filename, e))?;
+        entries.push((filename, destination, stage_path));
+    }
+
+    let mut installed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+    let install_result: Result<(), String> = (|| {
+        for (index, (name, destination, stage_path)) in entries.iter().enumerate() {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("Failed to create folder for {}: {}", name, e))?;
+            }
+            let backup = if destination.exists() {
+                fs::create_dir_all(&backups).map_err(|e| format!("Failed to prepare backup: {}", e))?;
+                let path = backups.join(index.to_string());
+                fs::rename(destination, &path).map_err(|e| format!("Failed to back up {}: {}", name, e))?;
+                Some(path)
+            } else {
+                None
+            };
+            if let Err(error) = fs::rename(stage_path, destination) {
+                if let Some(ref path) = backup {
+                    let _ = fs::rename(path, destination);
+                }
+                return Err(format!("Failed to install {}: {}", name, error));
+            }
+            installed.push((destination.clone(), backup));
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = install_result {
+        for (destination, backup) in installed.into_iter().rev() {
+            let _ = fs::remove_file(&destination);
+            if let Some(path) = backup {
+                let _ = fs::rename(path, destination);
+            }
+        }
+        let _ = fs::remove_dir_all(&transaction);
+        return Err(error);
+    }
+    saved.extend(entries.iter().map(|(name, _, _)| name.clone()));
+    let _ = fs::remove_dir_all(&transaction);
 
     Ok(SaveResult {
         saved,
@@ -3513,6 +3769,117 @@ mod ppte_save_tests {
         assert_eq!(fs::read_to_string(dir.join("slide01.html")).unwrap(), "external");
         assert_eq!(fs::read_to_string(dir.join("manifest.json")).unwrap(), manifest);
 
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agent_plan_is_optional_and_preserves_legacy_manifest() {
+        let dir = unique_temp_dir("agent-plan-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let legacy = r#"{"title":"Legacy","slides":["slide01.html"]}"#;
+        fs::write(dir.join("manifest.json"), legacy).unwrap();
+        fs::write(dir.join("slide01.html"), "<!doctype html><h1>Legacy</h1>").unwrap();
+
+        let missing = ppte_agent_plan_read(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!(missing.get("status").and_then(|value| value.as_str()), Some("missing"));
+        assert!(!dir.join(".lectureai").exists());
+        let revision = ppte_agent_revision(&dir.to_string_lossy()).unwrap();
+        assert_eq!(
+            revision.get("deckHash").and_then(|value| value.as_str()),
+            Some("sha256:77c457f5e865f6c86ce00d12cb82090686efa1d2846baf688bef97a02903cec3")
+        );
+
+        let plan = serde_json::json!({
+            "targetSlideCount": 1,
+            "visualSystem": {"style": "editorial-tech"},
+            "slides": [{
+                "page": 1,
+                "role": "cover",
+                "title": "Legacy",
+                "contentKind": "cover",
+                "layoutFamily": "cover",
+                "componentIds": [],
+                "motion": "none",
+                "visualIntent": "建立主题"
+            }]
+        });
+        let saved = ppte_agent_plan_write(dir.to_string_lossy().to_string(), plan).unwrap();
+        assert_eq!(saved.get("status").and_then(|value| value.as_str()), Some("active"));
+        assert!(dir.join(".lectureai").join("deck-plan.json").is_file());
+        assert_eq!(fs::read_to_string(dir.join("manifest.json")).unwrap(), legacy);
+
+        fs::write(dir.join("slide01.html"), "<!doctype html><h1>External</h1>").unwrap();
+        let stale = ppte_agent_plan_read(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!(stale.get("status").and_then(|value| value.as_str()), Some("stale"));
+        assert!(ppte_agent_plan_refresh(dir.to_string_lossy().to_string()).unwrap());
+        let active = ppte_agent_plan_read(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!(active.get("status").and_then(|value| value.as_str()), Some("active"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_agent_plan_never_breaks_legacy_ppte() {
+        let dir = unique_temp_dir("agent-plan-corrupt");
+        fs::create_dir_all(dir.join(".lectureai")).unwrap();
+        fs::write(dir.join("manifest.json"), r#"{"title":"Legacy","slides":["slide01.html"]}"#).unwrap();
+        fs::write(dir.join("slide01.html"), "<!doctype html><h1>Legacy</h1>").unwrap();
+        fs::write(dir.join(".lectureai").join("deck-plan.json"), "{broken").unwrap();
+
+        let result = ppte_agent_plan_read(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!(result.get("status").and_then(|value| value.as_str()), Some("invalid"));
+        assert!(dir.join("slide01.html").is_file());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_plan_rejects_symlinked_metadata_directory() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_temp_dir("agent-plan-symlink");
+        let outside = unique_temp_dir("agent-plan-outside");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(dir.join("manifest.json"), r#"{"title":"Demo","slides":["slide01.html"]}"#).unwrap();
+        fs::write(dir.join("slide01.html"), "<h1>Demo</h1>").unwrap();
+        symlink(&outside, dir.join(".lectureai")).unwrap();
+
+        let plan = serde_json::json!({
+            "targetSlideCount": 1,
+            "visualSystem": {},
+            "slides": [{"page":1,"role":"cover","title":"Demo","contentKind":"cover","layoutFamily":"cover","componentIds":[],"motion":"none","visualIntent":"title"}]
+        });
+        assert!(ppte_agent_plan_write(dir.to_string_lossy().to_string(), plan).is_err());
+        assert!(!outside.join("deck-plan.json").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn save_ppt_extra_rejects_bad_payload_before_any_disk_write() {
+        let dir = unique_temp_dir("save-atomic-prepare");
+        fs::create_dir_all(&dir).unwrap();
+        let original_manifest = r#"{"title":"Original","slides":[{"file":"slide01.html","title":"One"}]}"#;
+        fs::write(dir.join("manifest.json"), original_manifest).unwrap();
+        fs::write(dir.join("slide01.html"), "original slide").unwrap();
+
+        let result = save_ppt_extra(
+            dir.to_string_lossy().to_string(),
+            r#"{"title":"Changed","slides":[{"file":"slide01.html","title":"Changed"}]}"#.to_string(),
+            vec![
+                ("slide01.html".to_string(), "changed slide".to_string()),
+                ("broken.png".to_string(), "not-base64".to_string()),
+            ],
+            None,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(dir.join("manifest.json")).unwrap(), original_manifest);
+        assert_eq!(fs::read_to_string(dir.join("slide01.html")).unwrap(), "original slide");
+        assert!(!dir.join("broken.png").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6128,6 +6495,10 @@ pub fn run() {
             read_file_bytes,
             read_text_file,
             write_text_file,
+            ppte_agent_plan_read,
+            ppte_agent_plan_write,
+            ppte_agent_plan_refresh,
+            lectureai_design_examples,
             save_pptx_file,
             list_ppt_templates,
             get_template_files,
