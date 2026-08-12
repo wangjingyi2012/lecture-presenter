@@ -12,6 +12,7 @@
     "test:annotator": "node scripts/test-ppte-annotator.js",
     "test:captions": "node scripts/test-live-caption.js",
     "test:course-manager": "node scripts/test-course-manager.js",
+    "test:workbench": "node scripts/test-workbench-window.js",
     "build:release": "node scripts/build-obfuscated.js",
     "encrypt-prompts": "node scripts/encrypt-prompts.js"
   },

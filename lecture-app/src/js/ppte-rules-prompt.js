@@ -8,13 +8,8 @@
 // PpteRules.lintSummary(html) -> Promise<string>
 window.PpteRules = {
   async lint(html) {
-    if (!window.__TAURI__ || !window.__TAURI__.core) return [];
-    try {
-      return await window.__TAURI__.core.invoke('ppte_lint', { html: html || '' });
-    } catch (e) {
-      console.warn('ppte_lint failed', e);
-      return [];
-    }
+    if (!window.__TAURI__ || !window.__TAURI__.core) throw new Error('ppte_lint 不可用');
+    return await window.__TAURI__.core.invoke('ppte_lint', { html: html || '' });
   },
 
   async lintSummary(html) {
