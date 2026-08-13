@@ -39,6 +39,8 @@ assert.match(source, /get-command-context/, 'concept animation command must requ
 assert.match(source, /正在提交模型请求/, 'the first request phase should describe submission truthfully');
 assert.match(source, /请求已送达，等待模型首个响应/);
 assert.match(source, /模型正在准备下一步工具计划/);
+assert.match(source, /用户取消了当前任务/);
+assert.match(source, /_turnGeneration/);
 assert.match(source, /上游模型暂时不可用，1\.2s 后自动重试/, 'transient LectureAI failures should expose the automatic retry phase');
 
 const originalLogForUserLine = wb._log;

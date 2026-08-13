@@ -22,6 +22,8 @@ window.WorkbenchWindow = {
   _modelStartedAt: 0,
   _activeRound: 0,
   _stopRequested: false,
+  _turnGeneration: 0,
+  _activeStreamRequest: null,
   _slashItems: [],
   _slashIndex: 0,
   _pickerMode: null,
@@ -43,12 +45,14 @@ window.WorkbenchWindow = {
         listen('wb-prefill', (e) => this._onPrefill(e.payload)),
         listen('wb-refresh', () => this._refreshContext()),
         listen('ai-stream-chunk', (e) => {
+          if (!this._activeStreamRequest || this._activeStreamRequest.generation !== this._turnGeneration) return;
           const firstChunk = !this._streamFull;
           this._streamFull += String(e.payload || '');
           if (firstChunk) this._markModelReceiving();
           this._scheduleStreamingUpdate();
         }),
         listen('ai-stream-done', () => {
+          if (!this._activeStreamRequest || this._activeStreamRequest.generation !== this._turnGeneration) return;
           if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
           this._updateModelStatusFromOutput();
           this._finishModelStatus();
@@ -79,7 +83,7 @@ window.WorkbenchWindow = {
     const skillTrigger = document.getElementById('wb-skill-trigger');
     const skillImport = document.getElementById('wb-skill-import');
     if (send) send.onclick = () => this._send();
-    if (stop) stop.onclick = () => { this._stopRequested = true; };
+    if (stop) stop.onclick = () => this._requestStop();
     if (clear) clear.onclick = () => this._clear();
     input.oninput = () => this._updateInputPicker();
     input.onclick = () => this._updateInputPicker();
@@ -758,8 +762,13 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         }
       }
     } catch (e) {
-      const message = this._modelErrorMessage(e);
-      this._log('err', `${e?.isModelRequestError ? '模型请求失败' : '出错'}：${message}`);
+      if (this._stopRequested) {
+        this._appendAssistantMarkdown('### 任务已停止\n\n已立即停止后续模型请求，已成功保存的页面保留。');
+        this._log('sys', '任务停止 · 用户取消');
+      } else {
+        const message = this._modelErrorMessage(e);
+        this._log('err', `${e?.isModelRequestError ? '模型请求失败' : '出错'}：${message}`);
+      }
     } finally {
       this.busy = false;
       this._setBusy(false);
@@ -793,6 +802,8 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     return new Promise((resolve, reject) => {
       this._streamFull = '';
       this._streamResolve = resolve;
+      const request = { generation: this._turnGeneration, reject };
+      this._activeStreamRequest = request;
       const cfg = this.selectedConfig || this.aiConfig || {};
       const provider = cfg.aiProvider;
       // aiConfig.aiApiKey is populated by the main window: for 'lectureai' it is
@@ -810,10 +821,24 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         // Surface the real backend error (quota / auth / format) instead of a
         // silent "empty" - reject so _runTurn's catch shows it.
         if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
+        if (this._activeStreamRequest === request) this._activeStreamRequest = null;
         this._streamResolve = null;
         reject(e instanceof Error ? e : new Error(String(e)));
       });
     });
+  },
+
+  _requestStop() {
+    if (!this.busy) return;
+    this._stopRequested = true;
+    this._turnGeneration += 1;
+    this._stopModelStatusTimer();
+    const request = this._activeStreamRequest;
+    this._activeStreamRequest = null;
+    this._streamResolve = null;
+    if (request?.reject) request.reject(new Error('用户取消了当前任务'));
+    if (this._modelStatusEl) this._modelStatusEl.textContent = '任务已停止 · 不再等待当前模型响应';
+    this._setBusy(false);
   },
 
   _wait(milliseconds) {
