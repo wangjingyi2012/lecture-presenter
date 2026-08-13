@@ -982,9 +982,14 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${round} 轮 · ${attemptLabel}正在提交模型请求 · 0ms`;
     this._modelStatusTimer = setInterval(() => {
       if (this._modelStatusEl && !this._streamFull) {
-        const phase = (this._now() - this._modelStartedAt) < 1200
-          ? '等待服务器接收请求'
-          : '等待服务器与模型响应';
+        const elapsed = this._now() - this._modelStartedAt;
+        const phase = elapsed < 1200
+          ? '正在提交模型请求'
+          : elapsed < 5000
+            ? '请求已送达，等待模型首个响应'
+            : elapsed < 15000
+              ? '模型正在准备下一步工具计划'
+              : '模型响应较慢，仍在等待首个响应';
         this._modelStatusEl.textContent = `第 ${round} 轮 · ${attemptLabel}${phase} · ${this._modelDuration()}`;
       }
     }, 100);
@@ -1031,7 +1036,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
   _finishAction(el, startedAt, result) {
     if (!el) return;
     const firstLine = String(result || '').split('\n')[0];
-    const failed = /失败|错误|出错|超出范围/.test(firstLine);
+    const failed = this._resultIsError(firstLine);
     el.textContent = `${el.dataset.actionLabel || '工具'} · ${failed ? '失败' : '完成'} · ${this._duration(startedAt)}`;
     if (failed) el.className = 'ln ln-err';
   },
@@ -1039,9 +1044,15 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
   _logResult(result) {
     const r = String(result || '(无结果)');
     const firstLine = r.split('\n')[0] || r;
-    const isErr = /失败|错误|出错|超出范围/.test(firstLine);
+    const isErr = this._resultIsError(firstLine);
     const summary = r.split('\n').slice(0, 3).join(' · ').slice(0, 200);
     this._log(isErr ? 'err' : 'ok', summary);
+  },
+
+  _resultIsError(value) {
+    const text = String(value || '').trim();
+    return /(?:执行出错|保存失败|文件冲突|超出范围|缺少 tool|action 解析失败|未知工具)/.test(text)
+      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|reorder_slides|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(text);
   },
 
   _appendDiff(before, after) {

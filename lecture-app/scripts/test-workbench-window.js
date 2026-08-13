@@ -37,7 +37,8 @@ assert.match(source, /recoveryRounds > 3/, 'protocol recovery must stop before a
 assert.match(source, /deckValidated = false/, 'deck mutations must invalidate earlier deck validation');
 assert.match(source, /get-command-context/, 'concept animation command must request prepared slide context');
 assert.match(source, /正在提交模型请求/, 'the first request phase should describe submission truthfully');
-assert.match(source, /等待服务器与模型响应/, 'the waiting phase must not pretend to know whether the server or model is busy');
+assert.match(source, /请求已送达，等待模型首个响应/);
+assert.match(source, /模型正在准备下一步工具计划/);
 assert.match(source, /上游模型暂时不可用，1\.2s 后自动重试/, 'transient LectureAI failures should expose the automatic retry phase');
 
 const originalLogForUserLine = wb._log;
@@ -86,6 +87,8 @@ assert.match(wb._systemPrompt(), /不超过 32 个汉字/);
 assert.match(wb._systemPrompt(), /最终不再调用工具时/);
 assert.equal(wb._compactStatus('好的。\n\n现在读取第 3 页。'), '现在读取第 3 页。');
 assert.equal(wb._compactStatus('## 检查结果\n- 已完成全部检查'), '- 已完成全部检查');
+assert.equal(wb._resultIsError('set_deck_plan 已保存课件蓝图（目标 20 页）。'), false);
+assert.equal(wb._resultIsError('set_deck_plan 失败：缺少完整 plan 对象'), true);
 assert.equal(wb._hasUnexecutedToolIntent('先读取第 1 页，确认封面风格。'), true);
 assert.equal(wb._hasUnexecutedToolIntent('现在校验第 3 页。'), true);
 assert.equal(wb._hasUnexecutedToolIntent('检查结果：课件结构完整，无需修改。'), false);

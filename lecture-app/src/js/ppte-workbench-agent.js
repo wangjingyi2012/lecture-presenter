@@ -357,7 +357,7 @@ window.PpteWorkbenchAgent = {
       plan: a.plan,
     });
     const count = Number(saved?.targetSlideCount || 0);
-    return `set_deck_plan 已保存课件蓝图${count ? `（目标 ${count} 页）` : ''}。规划失败不会影响 PPTE 页面。`;
+    return `set_deck_plan 已保存课件蓝图${count ? `（目标 ${count} 页）` : ''}。`;
   },
 
   async _toolSearchDesignExamples(a) {
