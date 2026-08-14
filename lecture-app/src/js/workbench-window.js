@@ -413,11 +413,14 @@ window.WorkbenchWindow = {
     ctx += `\n\n课件级扩展工具：
 - set_deck_plan {plan}：保存整套可执行蓝图，整套生成或大规模改造必须最先调用
 - search_design_examples {content_kind?, layout_family?, density?, motion?, exclude?, limit?}：检索真实 HTML/CSS 设计案例
+- render_template {template_id, template_version?, payload, mode, page?, after?, title?, slide_type?, note?}：正文页优先使用服务端私有模板；replace 提供 page，insert 可提供 after
 - inspect_slides {check, pages?}：确定性检查页面；check 为 font/overflow/density/card/copy/motion/concept-animation/quality，pages 省略时检查整套；concept-animation 同时检查标准分步结构、字体、溢出和学员文案
 - load_skill {skill_id}：加载一个可用 SKILL 的完整 SKILL.md；仅在任务与 description 明确匹配时调用
 - read_skill_resource {skill_id, path}：读取已启用 skill 列出的 references/scripts 文本；禁止读取 skill 目录之外的文件
 - validate_deck {}：检查页数、结束页、重复布局、卡片占比、动画覆盖与所有单页规范
-plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page、role、title、contentKind、layoutFamily、componentIds、motion、visualIntent。相邻正文页不得重复主构图，正文超过 8 页至少 6 种主布局，卡片类不超过正文 25%，12 页以上至少 3 页有意义动画。整套任务最终必须 validate_deck 通过。
+plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page、role、title、contentKind、layoutFamily、componentIds、motion、visualIntent。每个正文页还必须包含 narrative：buildsOn、learningGoal、keyTakeaway、leadsTo；相邻正文页的前页 leadsTo 与后页 buildsOn 必须是完全相同的短句，形成从已知到未知的教学叙事链。正文页在规划阶段就指定注册 templateId、templateVersion；任一模板最多占正文 25%，同一模板在连续三个正文页窗口内只能出现一次。普通正文及已覆盖的复杂场景优先 render_template，只提交结构化 payload；封面、目录、章节、结束页只做角色母版安全填充，不自由重写结构或样式，只有无法由模板表达的特殊正文页才自由写页。不得读取或索取模板源码。相邻正文页不得重复主构图，正文超过 8 页至少 6 种主布局，卡片类不超过正文 25%，12 页以上至少 3 页有意义动画。整套任务最终必须 validate_deck 通过。
+
+用户指定的最终页数必须与 targetSlideCount 和 slides 数量完全一致，五类母版页也计入总数。默认情况下，30 页及以内采用单段连续叙事，不生成目录页和章节过渡页；超过 30 页才默认分为 2 章，可保留 1 个目录页和 2 个章节过渡页，保证每章至少约 15 页。只有用户明确下达“分成 N 章、保留/增加目录页或章节过渡页”等指令时才覆盖默认规则；仅提到章节问题、重写课件或内容中包含章节不算明确分章。starter 中的 catalog、chapter 只是角色母版占位：若成品规划不需要它们，必须在 plan 中将对应页标为 content，客户端才会允许转为正文。cover、catalog、chapter、finish 在保留原角色时必须保留角色母版 CSS、背景和结构；目录只替换标题与目录条目，不得覆盖 catalog.css 的目录组件样式；背景已有文字的 finish 页保持可见正文为空。正文和表格正文均不低于 1.8vw，1.5vw 仅限不超过 8 个字的短标签；正文统一使用 visualSystem 的深色 text/subtext，禁止模板自行使用浅灰正文。
 
 扩展页面参数：write_slide 可同时提供 title 和 slide_type；insert_slide 可提供稳定的 template_role（cover/catalog/chapter/content/finish）、兼容参数 template_page 和 slide_type。例：克隆章节母版到第6页后：{"tool":"insert_slide","after":6,"template_role":"chapter","slide_type":"chapter","title":"第二章"}。当存在 finish 页时，客户端会自动把普通新增页放到 finish 页之前；reorder_slides 也不允许把唯一的 finish 页移出末页。`;
     ctx += `\n\n工作台会把工具轮次压缩成单行动态状态。需要读取、校验或修改页面时，必须在同一响应中输出对应的 \`\`\`action 工具块；只描述“准备读取/校验/修改”但不附 action 属于协议错误。带 action 的响应中，action 前只写一句不超过 32 个汉字的状态摘要，直接说明当前动作；禁止寒暄、重复已完成步骤或使用“好的”“收到”“我先”“继续读取”等填充句。最终不再调用工具时，一次性输出完整 Markdown 结论。不要输出冗长的内部思维链。`;
@@ -443,6 +446,16 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     return count >= 3 && count <= 60 ? count : null;
   },
 
+  _explicitSectionRequest(input) {
+    const text = String(input || '');
+    if (this._continuousSectionRequest(text)) return false;
+    return /(?:分(?:成|为)?|划分为?|按)\s*(?:\d+|[一二两三四五六七八九十]+)\s*(?:个)?(?:章|章节)|(?:保留|需要|生成|增加|添加)\s*(?:一个|1个|一页|1页)?\s*(?:目录页?|章节过渡页?)/i.test(text);
+  },
+
+  _continuousSectionRequest(input) {
+    return /(?:不分|无需|不要|取消).{0,8}(?:目录页?|章节(?:页|过渡页?)?)/i.test(String(input || ''));
+  },
+
   _taskInitialization(input) {
     const blueprint = this.manifest?.templateBlueprint;
     if (!blueprint?.isStarter) return '';
@@ -450,7 +463,16 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     const targetRule = target
       ? `用户要求最终 ${target} 页。当前 5 页都是母版占位，必须计入最终 ${target} 页，因此只需净新增 ${Math.max(0, target - this.manifest.slides.length)} 页，完成后核对总页数恰好为 ${target}。`
       : '如果用户指定总页数，该数字包含当前五个母版页，完成后必须核对最终总页数。';
-    return `[客户端模板初始化]\n${targetRule}\n先按封面、目录、章节过渡、正文、结束规划全套顺序。使用 template_role 克隆正确角色，保持模板配色与背景；章节页紧邻其章节内容之前，finish 页始终最后。`;
+    const explicitSections = this._explicitSectionRequest(input);
+    const continuousSections = this._continuousSectionRequest(input);
+    const sectionRule = continuousSections
+      ? '用户明确要求连续叙事：成品不要目录页和章节过渡页，catalog、chapter 占位页必须在 plan 中标为 content 后转成正文。'
+      : target && target <= 30 && !explicitSections
+      ? '本任务默认不分章：成品不要目录页和章节过渡页。catalog、chapter 只是母版占位，请在 plan 中把第 2、3 页规划为 content，再用正文模板覆盖。'
+      : target && target > 30 && !explicitSections
+        ? '本任务默认分 2 章：最多保留 1 个目录页和 2 个章节过渡页，每章至少约 15 页。'
+        : '按用户明确提出的分章或目录要求规划；未要求的结构页不要额外增加。';
+    return `[客户端模板初始化]\n${targetRule}\n${sectionRule}\n使用 template_role 克隆正确角色，保持模板配色与背景；保留章节页时应紧邻其章节内容之前，finish 页始终最后。`;
   },
 
   _isDeckLevelTask(input) {
@@ -543,6 +565,15 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       alert('未连接课件。请在主窗口打开一个 PPTE 课件进编辑器，再发送指令。');
       return;
     }
+    const resumablePlan = this.manifest?.deckPlan?.plan;
+    const executionStatus = resumablePlan?.execution?.status;
+    if (this._isHarnessResumeRequest(input) && ['running', 'paused', 'failed', 'repairing', 'needs-repair'].includes(executionStatus)) {
+      this._appendUser(input, []);
+      if (inputEl) inputEl.value = '';
+      this._hideSlashMenu();
+      await this._resumePlannedHarness(resumablePlan, input);
+      return;
+    }
     this._ensureHistory();
     // refresh system prompt (manifest may have changed)
     this.history[0] = { role: 'system', content: this._systemPrompt() };
@@ -596,6 +627,12 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       commandPages: slash?.pages || [],
       commandInspected: false,
       commandPassed: false,
+      requestedSlideCount: this._requestedSlideCount(input),
+      explicitSections: this._explicitSectionRequest(input),
+      continuousSections: this._continuousSectionRequest(input),
+      plan: null,
+      harnessEnabled: requiresPlan,
+      userInstruction: input,
     };
     this._stopRequested = false;
     this._appendUser(input, mentioned);
@@ -678,11 +715,25 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         let terminalToolFailure = '';
         for (const a of actions) {
           if (this._stopRequested) break;
-          if (this._activeTask?.requiresPlan && ['write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.planSaved) {
+          if (this._activeTask?.requiresPlan && ['render_template', 'write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.planSaved) {
             results.push('[规划门禁] 这是整套课件任务，第一次修改前必须先调用 set_deck_plan。请现在输出 set_deck_plan action，不要开始写页。');
             break;
           }
-          if (this._activeTask?.commandCheck && ['write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.commandInspected) {
+          if (a.tool === 'set_deck_plan') {
+            const explicitSections = this._activeTask?.explicitSections === true;
+            const continuousSections = this._activeTask?.continuousSections === true;
+            a.plan = {
+              ...a.plan,
+              qualityPolicy: { schemaVersion: 2, source: 'desktop-client' },
+            };
+            const planError = this._deckPlanGateError(a.plan, this._activeTask?.requestedSlideCount, explicitSections, continuousSections);
+            if (planError) {
+              results.push(`[规划门禁] ${planError}。请修正规划后重新调用 set_deck_plan。`);
+              break;
+            }
+            a.plan.sectionPolicy = { explicit: explicitSections || continuousSections, mode: continuousSections ? 'continuous' : explicitSections ? 'custom' : 'default', source: 'desktop-client' };
+          }
+          if (this._activeTask?.commandCheck && ['render_template', 'write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.commandInspected) {
             results.push(`[命令门禁] 必须先调用 inspect_slides，check 必须为 ${this._activeTask.commandCheck}，确认问题后再修改。`);
             break;
           }
@@ -706,6 +757,14 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             results.push(`[命令门禁] 当前命令只允许修改第 ${this._activeTask.commandPages.join('、')} 页，拒绝写入第 ${a.page} 页。`);
             break;
           }
+          if (this._activeTask?.commandPages?.length && a.tool === 'render_template' && (a.mode || 'replace') !== 'replace') {
+            results.push(`[命令门禁] 当前命令限定第 ${this._activeTask.commandPages.join('、')} 页，模板工具只能使用 replace 模式。`);
+            break;
+          }
+          if (this._activeTask?.commandPages?.length && a.tool === 'render_template' && !this._activeTask.commandPages.includes(Number(a.page))) {
+            results.push(`[命令门禁] 当前命令只允许修改第 ${this._activeTask.commandPages.join('、')} 页，拒绝写入第 ${a.page} 页。`);
+            break;
+          }
           toolCalls += 1;
           const actionStartedAt = this._now();
           const actionEl = this._logAction(a, toolCalls);
@@ -722,8 +781,9 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
           results.push(result || '(无结果)');
           if (a.tool === 'set_deck_plan' && !/失败|出错|错误/.test(String(result || ''))) {
             this._activeTask.planSaved = true;
+            this._activeTask.plan = a.plan;
           }
-          if (['write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !/失败|出错|错误/.test(String(result || ''))) {
+          if (['render_template', 'write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !/失败|出错|错误/.test(String(result || ''))) {
             this._activeTask.deckValidated = false;
             if (this._activeTask.commandCheck) {
               this._activeTask.commandInspected = false;
@@ -760,6 +820,10 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
           this._log('sys', `任务停止 · 磁盘保存未成功 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
           break;
         }
+        if (this._activeTask?.harnessEnabled && this._activeTask.planSaved && this._activeTask.plan) {
+          await this._runPlannedHarness(this._activeTask.plan, this._activeTask.userInstruction || '生成整套课件');
+          break;
+        }
       }
     } catch (e) {
       if (this._stopRequested) {
@@ -775,13 +839,406 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     }
   },
 
+  _deckPlanGateError(plan, requestedCount = null, explicitSections = false, continuousSections = false) {
+    if (!plan || typeof plan !== 'object') return '缺少完整 plan 对象';
+    const target = Number(plan.targetSlideCount);
+    const slides = Array.isArray(plan.slides) ? plan.slides : [];
+    if (requestedCount && target !== requestedCount) return `用户要求最终 ${requestedCount} 页，targetSlideCount 不能是 ${target || '空值'}`;
+    if (!Number.isInteger(target) || slides.length !== target) return `targetSlideCount=${target || '空值'} 与 slides 数量 ${slides.length} 必须完全一致`;
+    const strictQuality = Number(plan?.qualityPolicy?.schemaVersion) === 2;
+    const contentSlides = slides.filter(slide => String(slide?.role || slide?.slide_type || '').toLowerCase() === 'content');
+    for (let index = 0; strictQuality && index < contentSlides.length; index += 1) {
+      const slide = contentSlides[index];
+      const narrative = slide?.narrative;
+      if (!narrative || ['buildsOn', 'learningGoal', 'keyTakeaway', 'leadsTo'].some(field => !String(narrative[field] || '').trim())) {
+        return `第 ${slide?.page || '?'} 页缺少完整 narrative 教学叙事`;
+      }
+      if (!String(slide?.templateId || slide?.template_id || '').trim()
+        && !(String(slide?.renderMode || '').toLowerCase() === 'custom' && String(slide?.customLayoutReason || '').trim())) {
+        return `第 ${slide?.page || '?'} 页正文必须指定 templateId，或声明 renderMode=custom 及 customLayoutReason`;
+      }
+      if (index > 0 && String(contentSlides[index - 1].narrative.leadsTo).trim() !== String(narrative.buildsOn).trim()) {
+        return `第 ${contentSlides[index - 1].page} 页 leadsTo 必须与第 ${slide.page} 页 buildsOn 完全一致`;
+      }
+    }
+    const templateIds = contentSlides.map(slide => String(slide.templateId || slide.template_id || '').trim());
+    const templateLimit = Math.max(2, Math.ceil(contentSlides.length * 0.25));
+    for (const templateId of strictQuality ? new Set(templateIds) : []) {
+      const count = templateIds.filter(id => id === templateId).length;
+      if (templateId && count > templateLimit) return `模板 ${templateId} 使用 ${count} 次，超过本套正文上限 ${templateLimit} 次`;
+    }
+    for (let index = 0; strictQuality && index < templateIds.length; index += 1) {
+      if (templateIds[index] && templateIds.slice(Math.max(0, index - 2), index).includes(templateIds[index])) {
+        return `第 ${contentSlides[index].page} 页在三页窗口内重复使用模板 ${templateIds[index]}`;
+      }
+    }
+    const chapters = slides.filter(slide => ['chapter', 'immersive-chapter'].includes(String(slide?.role || slide?.slide_type || slide?.layoutFamily || slide?.layout_family || '').toLowerCase())).length;
+    const catalogs = slides.filter(slide => ['catalog', 'toc'].includes(String(slide?.role || slide?.slide_type || slide?.layoutFamily || slide?.layout_family || '').toLowerCase())).length;
+    if (continuousSections && (catalogs || chapters)) {
+      return `用户明确要求不分章，规划中不能包含目录页或章节过渡页（当前目录 ${catalogs} 页、章节过渡 ${chapters} 页）`;
+    }
+    if (!continuousSections && !explicitSections && target <= 30 && (catalogs || chapters)) {
+      return `${target} 页课件默认不分章，规划中不能包含目录页或章节过渡页（当前目录 ${catalogs} 页、章节过渡 ${chapters} 页）`;
+    }
+    if (!continuousSections && !explicitSections && target > 30 && chapters !== 2) {
+      return `${target} 页课件默认分为 2 章，规划中必须恰好包含 2 个章节过渡页（当前为 ${chapters} 个）`;
+    }
+    if (!continuousSections && !explicitSections && target > 30 && catalogs > 1) return `${target} 页课件最多保留 1 个目录页，当前为 ${catalogs} 个`;
+    return '';
+  },
+
+  _harnessSystemPrompt() {
+    return `你是 LectureAI 的单页课件 Worker。客户端 Harness 已经完成整套规划和页序调度；你只负责当前指定页面。
+严格限制：
+1. 只处理“当前页面任务”，不得主动读取或修改其他页面，不得重新规划整套课件。
+2. 当前页为正文且给出 templateId 时，必须使用 render_template；只有 renderMode=custom 才能自由 write_slide。
+3. replace 前若需要保留角色母版，先 read_slide 当前页；insert 不读取其他页。
+4. 写入后必须 validate_slide 当前页，未通过则仅修复当前页并重验。
+5. 工具一次一个。完成后返回不含 action 的一句总结，不输出长篇分析。
+6. 页面正文不低于 1.8vw，短标签不低于 1.5vw，使用深色 text/subtext；容量不足时删减内容或换结构，不缩字。
+7. 只使用 Harness 明确允许的 page、mode、after、templateId 和页面角色。`;
+  },
+
+  _harnessOutline(plan) {
+    return (plan?.slides || []).map(slide => {
+      const narrative = slide?.narrative || {};
+      return `${slide.page}. [${slide.role || 'content'}] ${slide.title} | 结论：${narrative.keyTakeaway || slide.visualIntent || ''}`;
+    }).join('\n');
+  },
+
+  _harnessMutationDirective(planSlide) {
+    const page = Number(planSlide?.page || 0);
+    const plannedRole = String(planSlide?.role || 'content').toLowerCase();
+    const current = this.manifest?.slides?.[page - 1];
+    const currentRole = String(current?.slideType || '').toLowerCase();
+    const insert = !current || (['finish', 'ending'].includes(currentRole) && !['finish', 'ending'].includes(plannedRole));
+    return insert
+      ? { mode: 'insert', page, after: Math.max(0, page - 1), currentRole: currentRole || null }
+      : { mode: 'replace', page, after: null, currentRole: currentRole || null };
+  },
+
+  _harnessPageContext(plan, planSlide, summaries = {}, stageGuidance = '') {
+    const page = Number(planSlide.page);
+    const nearby = (plan.slides || []).filter(item => Math.abs(Number(item.page) - page) <= 2);
+    const neighborSummaries = Object.entries(summaries)
+      .filter(([key]) => Math.abs(Number(key) - page) <= 2)
+      .map(([key, value]) => `第${key}页：${value}`)
+      .join('\n') || '尚无相邻页面执行摘要';
+    const directive = this._harnessMutationDirective(planSlide);
+    const templateId = planSlide.templateId || planSlide.template_id || '';
+    const templateVersion = planSlide.templateVersion || planSlide.template_version || '';
+    return `[整套任务原始目标]\n${this._activeTask?.userInstruction || ''}
+
+[全局视觉规范]\n${JSON.stringify(plan.visualSystem || {})}
+
+[全套精简页序]\n${this._harnessOutline(plan)}
+
+[当前页前后两页详细规划]\n${JSON.stringify(nearby)}
+
+[已完成相邻页摘要]\n${neighborSummaries}
+
+[最近阶段审查建议]\n${stageGuidance || '无'}
+
+[当前页面任务]\n${JSON.stringify(planSlide)}
+
+[Harness 写入指令]
+- 目标页：第 ${page} 页
+- 操作：${directive.mode}
+${directive.mode === 'insert' ? `- 必须使用 after=${directive.after}，插入后即为第 ${page} 页` : `- 必须使用 page=${page}`}
+- 页面角色：${planSlide.role || 'content'}
+${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templateVersion}` : ''}` : `- 自定义原因：${planSlide.customLayoutReason || '角色母版页'}`}
+- 本页完成后必须调用 validate_slide {"page":${page}}
+
+不要携带或索取其他页面完整 HTML。现在完成且只完成这一页。`;
+  },
+
+  _harnessAllowedAction(action, planSlide, directive, mutated) {
+    const page = Number(planSlide.page);
+    const tool = String(action?.tool || '');
+    if (!['read_slide', 'search_design_examples', 'render_template', 'write_slide', 'validate_slide'].includes(tool)) {
+      return `分页 Worker 不允许调用 ${tool || '空工具'}`;
+    }
+    if (['read_slide', 'write_slide', 'validate_slide'].includes(tool) && Number(action.page) !== page) {
+      return `分页 Worker 只允许操作第 ${page} 页`;
+    }
+    if (tool === 'render_template') {
+      const expectedTemplate = String(planSlide.templateId || planSlide.template_id || '');
+      if (!expectedTemplate || String(action.template_id || '') !== expectedTemplate) return `第 ${page} 页必须使用规划模板 ${expectedTemplate || '（无）'}`;
+      if (String(action.mode || '') !== directive.mode) return `第 ${page} 页必须使用 ${directive.mode} 模式`;
+      if (directive.mode === 'replace' && Number(action.page) !== page) return `模板必须替换第 ${page} 页`;
+      if (directive.mode === 'insert' && Number(action.after) !== directive.after) return `模板必须在第 ${directive.after} 页后插入`;
+    }
+    if (tool === 'write_slide' && directive.mode === 'insert') return '当前页需要插入，不能用 write_slide 覆盖结束页';
+    if (tool === 'search_design_examples' && mutated) return '页面写入后不能再切换设计方向';
+    return '';
+  },
+
+  _isHarnessResumeRequest(input) {
+    return /^(?:请)?(?:继续|恢复|接着)(?:生成|制作|执行|完成)?(?:课件|任务)?[。！!\s]*$/u.test(String(input || '').trim());
+  },
+
+  async _prepareHarnessTarget(planSlide, counters) {
+    let directive = this._harnessMutationDirective(planSlide);
+    const hasTemplate = !!String(planSlide.templateId || planSlide.template_id || '').trim();
+    const role = String(planSlide.role || 'content').toLowerCase();
+    const templateRole = role === 'ending' ? 'finish' : role === 'toc' ? 'catalog' : role;
+    if (directive.mode === 'replace' && !hasTemplate && ['cover', 'catalog', 'chapter', 'finish'].includes(templateRole) && directive.currentRole !== templateRole) {
+      const action = { tool: 'apply_role_template', page: Number(planSlide.page), role: templateRole, title: planSlide.title };
+      counters.tools += 1;
+      const actionStartedAt = this._now();
+      const actionEl = this._logAction(action, counters.tools);
+      const result = await this._rpc('execute-action', { action });
+      this._finishAction(actionEl, actionStartedAt, result);
+      this._logResult(result);
+      if (this._isTerminalToolFailure(result) || this._resultIsError(result)) throw new Error(String(result));
+      await this._refreshContext();
+      directive = this._harnessMutationDirective(planSlide);
+    }
+    if (directive.mode !== 'insert' || hasTemplate) return directive;
+    const action = {
+      tool: 'insert_slide',
+      after: directive.after,
+      template_role: ['cover', 'catalog', 'chapter', 'content', 'finish'].includes(templateRole) ? templateRole : 'content',
+      slide_type: templateRole,
+      title: planSlide.title,
+    };
+    counters.tools += 1;
+    const actionStartedAt = this._now();
+    const actionEl = this._logAction(action, counters.tools);
+    const result = await this._rpc('execute-action', { action });
+    this._finishAction(actionEl, actionStartedAt, result);
+    this._logResult(result);
+    if (this._isTerminalToolFailure(result) || this._resultIsError(result)) throw new Error(String(result));
+    await this._refreshContext();
+    return this._harnessMutationDirective(planSlide);
+  },
+
+  async _runHarnessPage(plan, planSlide, summaries, stageGuidance, counters) {
+    const page = Number(planSlide.page);
+    const directive = await this._prepareHarnessTarget(planSlide, counters);
+    const messages = [
+      { role: 'system', content: this._harnessSystemPrompt() },
+      { role: 'user', content: this._harnessPageContext(plan, planSlide, summaries, stageGuidance) },
+    ];
+    let mutated = false;
+    let validated = false;
+    let protocolRetries = 0;
+    for (let round = 1; round <= 12; round += 1) {
+      if (this._stopRequested) throw new Error('用户取消了当前任务');
+      counters.rounds += 1;
+      this._activeRound = counters.rounds;
+      const templateId = planSlide.templateId || planSlide.template_id || '';
+      const text = await this._callAI(messages, 'page-worker', templateId ? [templateId] : []);
+      if (!text) throw new Error(`第 ${page} 页模型返回空内容`);
+      messages.push({ role: 'assistant', content: text });
+      const actions = this._parseActions(text);
+      if (!actions.length) {
+        if (!mutated || !validated) {
+          protocolRetries += 1;
+          if (protocolRetries > 3) throw new Error(`第 ${page} 页未完成写入与校验`);
+          messages.push({ role: 'user', content: mutated
+            ? `[页面门禁] 第 ${page} 页尚未通过 validate_slide，请立即校验，不要总结。`
+            : `[页面门禁] 第 ${page} 页尚未写入，请按 Harness 指令调用工具，不要总结。` });
+          continue;
+        }
+        const narrative = planSlide.narrative || {};
+        const reported = this._stripActions(text).replace(/\s+/g, ' ').trim().slice(0, 180);
+        return reported || `${narrative.keyTakeaway || planSlide.visualIntent || planSlide.title}；已按 ${planSlide.templateId || planSlide.renderMode || planSlide.role} 生成并校验`;
+      }
+      if (actions.length !== 1) {
+        messages.push({ role: 'user', content: '[工具协议纠正] 每次只能输出一个 action，请重新发送当前动作。' });
+        continue;
+      }
+      const action = actions[0];
+      const gateError = this._harnessAllowedAction(action, planSlide, directive, mutated);
+      if (gateError) {
+        messages.push({ role: 'user', content: `[Harness 门禁] ${gateError}。请按当前页固定指令修正。` });
+        continue;
+      }
+      counters.tools += 1;
+      const actionStartedAt = this._now();
+      const actionEl = this._logAction(action, counters.tools);
+      const result = await this._rpc('execute-action', { action });
+      this._finishAction(actionEl, actionStartedAt, result);
+      this._logResult(result);
+      if (this._isTerminalToolFailure(result) || this._resultIsError(result)) throw new Error(String(result));
+      if (['render_template', 'write_slide'].includes(action.tool)) {
+        mutated = true;
+        validated = false;
+        await this._refreshContext();
+      }
+      if (action.tool === 'validate_slide') {
+        try { validated = JSON.parse(String(result).replace(/^[^{]*/, '')).passed === true; }
+        catch (_) { validated = /合规：未发现|校验通过|"passed"\s*:\s*true/.test(String(result)); }
+        if (!validated) protocolRetries += 1;
+      }
+      const compact = String(result || '').length > 10000
+        ? `${String(result).slice(0, 10000)}\n[当前页工具回执已截断]`
+        : String(result || '');
+      messages.push({ role: 'user', content: `[当前页工具回执]\n${compact}\n只继续第 ${page} 页。` });
+    }
+    throw new Error(`第 ${page} 页超过单页执行轮次上限`);
+  },
+
+  async _runHarnessStageReview(plan, completedPages, summaries) {
+    const pages = completedPages.slice(-5);
+    const next = (plan.slides || []).filter(slide => Number(slide.page) > pages[pages.length - 1]).slice(0, 3);
+    const messages = [
+      { role: 'system', content: '你是课件阶段审查器。只根据规划和页面摘要检查教学递进、概念跳跃、术语漂移和模板节奏。不得调用工具。输出不超过 180 字的具体修正建议；没有问题则输出“阶段衔接通过”。' },
+      { role: 'user', content: `[刚完成页面]\n${pages.map(page => `第${page}页：${summaries[page]}`).join('\n')}\n\n[后续三页规划]\n${JSON.stringify(next)}\n\n[全局目标]\n${JSON.stringify(plan.goal || plan.learningObjectives || plan.title || '')}` },
+    ];
+    this._activeRound += 1;
+    const review = await this._callAI(messages, 'stage-review');
+    return this._stripActions(String(review || '')).replace(/\s+/g, ' ').trim().slice(0, 240) || '阶段衔接通过';
+  },
+
+  async _persistHarnessExecution(plan, execution) {
+    plan.execution = { schemaVersion: 1, ...execution, updatedAt: new Date().toISOString() };
+    const result = await this._rpc('execute-action', { action: { tool: 'set_deck_plan', plan } });
+    if (this._resultIsError(result)) throw new Error(String(result));
+  },
+
+  _harnessRepairPages(plan, validation) {
+    const errors = Array.isArray(validation?.errors) ? validation.errors : [];
+    const referenced = new Set();
+    for (const error of errors) {
+      for (const match of String(error).matchAll(/第\s*(\d+)\s*页/g)) referenced.add(Number(match[1]));
+    }
+    if (referenced.size) return [...referenced].filter(page => page >= 1 && page <= Number(plan.targetSlideCount)).slice(0, 5);
+    const motionError = errors.some(error => /动画|交互/.test(String(error)));
+    const candidates = (plan.slides || []).filter(slide => String(slide.role || '').toLowerCase() === 'content');
+    const preferred = motionError
+      ? candidates.filter(slide => !['', 'none', 'static'].includes(String(slide.motion || '').toLowerCase()))
+      : candidates;
+    return (preferred.length ? preferred : candidates).slice(-3).map(slide => Number(slide.page));
+  },
+
+  async _validateAndRepairHarness(plan, state, counters) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const validationAction = { tool: 'validate_deck' };
+      counters.tools += 1;
+      const actionEl = this._logAction(validationAction, counters.tools);
+      const actionStartedAt = this._now();
+      const validationResult = await this._rpc('execute-action', { action: validationAction });
+      this._finishAction(actionEl, actionStartedAt, validationResult);
+      this._logResult(validationResult);
+      let validation = null;
+      try { validation = JSON.parse(validationResult); } catch (_) { /* handled below */ }
+      if (validation?.passed) return validation;
+      if (attempt === 2) return validation || { passed: false, errors: [validationResult] };
+      const repairPages = this._harnessRepairPages(plan, validation);
+      if (!repairPages.length) return validation || { passed: false, errors: [validationResult] };
+      const guidance = `整套校验返工：${(validation?.errors || [validationResult]).join('；')}`.slice(0, 800);
+      this._log('sys', `整套校验返工 ${attempt + 1}/2 · 第 ${repairPages.join('、')} 页`);
+      for (const page of repairPages) {
+        const planSlide = (plan.slides || []).find(slide => Number(slide.page) === page);
+        if (!planSlide) continue;
+        state.summaries[page] = await this._runHarnessPage(plan, planSlide, state.summaries, guidance, counters);
+      }
+      await this._persistHarnessExecution(plan, {
+        status: 'repairing', nextPage: null, completedPages: state.completedPages,
+        summaries: state.summaries, stageReviews: state.stageReviews, userInstruction: state.userInstruction,
+      });
+    }
+    return { passed: false, errors: ['整套校验返工未完成'] };
+  },
+
+  async _resumePlannedHarness(plan, input) {
+    this.busy = true;
+    this._setBusy(true);
+    this._stopRequested = false;
+    this._activeTask = {
+      deckLevel: true,
+      requiresPlan: true,
+      planSaved: true,
+      deckValidated: false,
+      plan,
+      harnessEnabled: true,
+      userInstruction: plan.execution?.userInstruction || input,
+    };
+    try {
+      await this._runPlannedHarness(plan, this._activeTask.userInstruction);
+    } catch (error) {
+      if (!this._stopRequested) this._log('err', `恢复任务失败：${this._modelErrorMessage(error)}`);
+    } finally {
+      this.busy = false;
+      this._setBusy(false);
+    }
+  },
+
+  async _runPlannedHarness(plan, userInstruction) {
+    const startedAt = this._now();
+    const previous = plan.execution?.schemaVersion === 1 ? plan.execution : {};
+    const summaries = { ...(previous.summaries || {}) };
+    const completedPages = Array.isArray(previous.completedPages) ? [...new Set(previous.completedPages.map(Number))] : [];
+    const stageReviews = Array.isArray(previous.stageReviews) ? [...previous.stageReviews] : [];
+    const counters = { rounds: 0, tools: 0 };
+    this._activeTask.userInstruction = userInstruction;
+    this._log('sys', `分页 Harness 已启动 · ${plan.targetSlideCount} 页 · 每页独立上下文`);
+    try {
+      for (const planSlide of plan.slides || []) {
+        const page = Number(planSlide.page);
+        if (completedPages.includes(page)) continue;
+        if (this._stopRequested) throw new Error('用户取消了当前任务');
+        const latestGuidance = stageReviews[stageReviews.length - 1]?.guidance || '';
+        this._log('sys', `页面任务 ${page}/${plan.targetSlideCount} · 仅加载前后两页规划`);
+        summaries[page] = await this._runHarnessPage(plan, planSlide, summaries, latestGuidance, counters);
+        completedPages.push(page);
+        await this._persistHarnessExecution(plan, {
+          status: 'running', nextPage: page + 1, completedPages, summaries, stageReviews, userInstruction,
+        });
+        if (completedPages.length % 5 === 0 && page < Number(plan.targetSlideCount)) {
+          const guidance = await this._runHarnessStageReview(plan, completedPages, summaries);
+          stageReviews.push({ throughPage: page, guidance });
+          this._log('sys', `阶段审查 · 完成至第 ${page} 页 · ${guidance}`);
+          await this._persistHarnessExecution(plan, {
+            status: 'running', nextPage: page + 1, completedPages, summaries, stageReviews, userInstruction,
+          });
+        }
+      }
+      const validation = await this._validateAndRepairHarness(plan, {
+        completedPages, summaries, stageReviews, userInstruction,
+      }, counters);
+      if (!validation?.passed) {
+        await this._persistHarnessExecution(plan, {
+          status: 'needs-repair', nextPage: null, completedPages, summaries, stageReviews,
+          validation, userInstruction,
+        });
+        const failure = new Error(`整套校验未通过：${(validation?.errors || []).join('；')}`);
+        failure.harnessStatus = 'needs-repair';
+        throw failure;
+      }
+      this._activeTask.deckValidated = true;
+      await this._persistHarnessExecution(plan, {
+        status: 'completed', nextPage: null, completedPages, summaries, stageReviews,
+        validation: { passed: true, metrics: validation.metrics || {} }, userInstruction,
+      });
+      this._appendAssistantMarkdown(`### 课件生成完成\n\n已按分页 Harness 完成 ${completedPages.length} 页。每页使用独立局部上下文，并在每 5 页后进行一次教学衔接审查；整套校验已通过。`);
+      this._log('sys', `分页 Harness 完成 · ${counters.rounds} 轮模型响应 · ${counters.tools} 次工具调用 · ${this._duration(startedAt)}`);
+    } catch (error) {
+      const status = this._stopRequested ? 'paused' : (error?.harnessStatus || 'failed');
+      try {
+        await this._persistHarnessExecution(plan, {
+          status, nextPage: (plan.slides || []).find(slide => !completedPages.includes(Number(slide.page)))?.page || null,
+          completedPages, summaries, stageReviews, error: this._modelErrorMessage(error), userInstruction,
+        });
+      } catch (_) { /* keep original failure */ }
+      if (this._stopRequested) {
+        const nextPage = (plan.slides || []).find(slide => !completedPages.includes(Number(slide.page)))?.page || null;
+        this._appendAssistantMarkdown(`### 任务已停止\n\n已保存 ${completedPages.length} 页及执行进度${nextPage ? `，下次可从第 ${nextPage} 页继续` : ''}。`);
+        return;
+      }
+      throw error;
+    }
+  },
+
   // ---- streaming AI call ----
-  async _callAI(messages) {
+  async _callAI(messages, contextMode = 'deck-plan', contextTemplateIds = []) {
     const cfg = this.selectedConfig || this.aiConfig || {};
     const maxAttempts = cfg.aiProvider === 'lectureai' ? 2 : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await this._callAIOnce(messages, attempt);
+        return await this._callAIOnce(messages, attempt, contextMode, contextTemplateIds);
       } catch (error) {
         const message = this._modelErrorMessage(error);
         if (attempt < maxAttempts && this._isRetryableModelError(message)) {
@@ -798,7 +1255,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     throw new Error('模型请求未返回结果');
   },
 
-  _callAIOnce(messages, attempt = 1) {
+  _callAIOnce(messages, attempt = 1, contextMode = 'deck-plan', contextTemplateIds = []) {
     return new Promise((resolve, reject) => {
       this._streamFull = '';
       this._streamResolve = resolve;
@@ -817,6 +1274,8 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         baseUrl: cfg.aiBaseUrl,
         model: cfg.aiModel,
         messages,
+        contextMode,
+        contextTemplateIds,
       }).catch((e) => {
         // Surface the real backend error (quota / auth / format) instead of a
         // silent "empty" - reject so _runTurn's catch shows it.
@@ -838,7 +1297,6 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     this._streamResolve = null;
     if (request?.reject) request.reject(new Error('用户取消了当前任务'));
     if (this._modelStatusEl) this._modelStatusEl.textContent = '任务已停止 · 不再等待当前模型响应';
-    this._setBusy(false);
   },
 
   _wait(milliseconds) {
@@ -927,7 +1385,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
 
   _isTerminalToolFailure(result) {
     const text = String(result || '');
-    return /(?:write_slide|insert_slide|reorder_slides|set_deck_plan) 保存失败|已恢复执行前状态|文件冲突/.test(text);
+    return /(?:write_slide|insert_slide|apply_role_template|reorder_slides|set_deck_plan) 保存失败|已恢复执行前状态|文件冲突/.test(text);
   },
 
   // ---- terminal log ----

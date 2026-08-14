@@ -1091,6 +1091,16 @@ fn validate_agent_plan_value(plan: &serde_json::Value) -> Result<(), String> {
     if slides.len() != target as usize {
         return Err(format!("targetSlideCount={} 与 slides 数量 {} 不一致", target, slides.len()));
     }
+    let section_policy = object.get("sectionPolicy").and_then(|value| value.as_object());
+    let explicit_sections = section_policy.and_then(|policy| policy.get("explicit")).and_then(|value| value.as_bool());
+    let section_mode = section_policy.and_then(|policy| policy.get("mode")).and_then(|value| value.as_str());
+    let mut chapter_count = 0usize;
+    let mut catalog_count = 0usize;
+    let strict_quality = object.get("qualityPolicy")
+        .and_then(|value| value.get("schemaVersion"))
+        .and_then(|value| value.as_u64()) == Some(2);
+    let mut content_templates: Vec<String> = Vec::new();
+    let mut previous_leads_to: Option<(u64, String)> = None;
     for (index, slide) in slides.iter().enumerate() {
         let page = slide.get("page").and_then(|value| value.as_u64()).unwrap_or_default();
         if page != (index + 1) as u64 {
@@ -1113,6 +1123,63 @@ fn validate_agent_plan_value(plan: &serde_json::Value) -> Result<(), String> {
         }
         if !slide.get("componentIds").map(|value| value.is_array()).unwrap_or(false) {
             return Err(format!("第 {} 项的 componentIds 必须是数组", index + 1));
+        }
+        let role = slide.get("role").and_then(|value| value.as_str()).unwrap_or("").trim().to_lowercase();
+        let layout = layout.trim().to_lowercase();
+        if role == "chapter" || layout == "immersive-chapter" { chapter_count += 1; }
+        if role == "catalog" || role == "toc" || layout == "catalog" || layout == "toc" { catalog_count += 1; }
+        if strict_quality && role == "content" {
+            let narrative = slide.get("narrative").and_then(|value| value.as_object())
+                .ok_or_else(|| format!("第 {} 项缺少 narrative 教学叙事", index + 1))?;
+            for field in ["buildsOn", "learningGoal", "keyTakeaway", "leadsTo"] {
+                if narrative.get(field).and_then(|value| value.as_str()).unwrap_or("").trim().is_empty() {
+                    return Err(format!("第 {} 项的 narrative 缺少 {}", index + 1, field));
+                }
+            }
+            let builds_on = narrative.get("buildsOn").and_then(|value| value.as_str()).unwrap_or("").trim();
+            if let Some((previous_page, expected)) = &previous_leads_to {
+                if expected != builds_on {
+                    return Err(format!("第 {} 页 leadsTo 必须与第 {} 页 buildsOn 完全一致", previous_page, page));
+                }
+            }
+            previous_leads_to = Some((page, narrative.get("leadsTo").and_then(|value| value.as_str()).unwrap_or("").trim().to_string()));
+            let template_id = slide.get("templateId").or_else(|| slide.get("template_id"))
+                .and_then(|value| value.as_str()).unwrap_or("").trim().to_string();
+            if template_id.is_empty() {
+                let custom_mode = slide.get("renderMode").and_then(|value| value.as_str()).unwrap_or("").eq_ignore_ascii_case("custom");
+                let custom_reason = slide.get("customLayoutReason").and_then(|value| value.as_str()).unwrap_or("").trim();
+                if !custom_mode || custom_reason.is_empty() {
+                    return Err(format!("第 {} 项正文页必须指定 templateId，或声明 renderMode=custom 及 customLayoutReason", index + 1));
+                }
+                content_templates.push(String::new());
+                continue;
+            }
+            if content_templates.iter().rev().take(2).any(|existing| existing == &template_id) {
+                return Err(format!("第 {} 页在三页窗口内重复使用模板 {}", page, template_id));
+            }
+            content_templates.push(template_id);
+        }
+    }
+    if strict_quality {
+        let template_limit = std::cmp::max(2, (content_templates.len() + 3) / 4);
+        let mut counts = std::collections::HashMap::<&str, usize>::new();
+        for template_id in &content_templates { if !template_id.is_empty() { *counts.entry(template_id.as_str()).or_default() += 1; } }
+        if let Some((template_id, count)) = counts.into_iter().find(|(_, count)| *count > template_limit) {
+            return Err(format!("模板 {} 使用 {} 次，超过本套正文上限 {} 次", template_id, count, template_limit));
+        }
+    }
+    if section_mode == Some("continuous") && (chapter_count > 0 || catalog_count > 0) {
+        return Err(format!("用户明确要求不分章，不能包含目录页或章节过渡页（当前目录 {} 页、章节过渡 {} 页）", catalog_count, chapter_count));
+    }
+    if section_mode != Some("continuous") && explicit_sections == Some(false) && target <= 30 && (chapter_count > 0 || catalog_count > 0) {
+        return Err(format!("{} 页课件默认不分章，不能包含目录页或章节过渡页（当前目录 {} 页、章节过渡 {} 页）", target, catalog_count, chapter_count));
+    }
+    if section_mode != Some("continuous") && explicit_sections == Some(false) && target > 30 {
+        if chapter_count != 2 {
+            return Err(format!("{} 页课件默认必须恰好包含 2 个章节过渡页，当前为 {} 个", target, chapter_count));
+        }
+        if catalog_count > 1 {
+            return Err(format!("{} 页课件默认最多包含 1 个目录页，当前为 {} 个", target, catalog_count));
         }
     }
     Ok(())
@@ -1220,6 +1287,38 @@ async fn lectureai_design_examples(auth_token: String, query: serde_json::Value)
         return Err(format!("设计案例服务错误（{}）：{}", status.as_u16(), text));
     }
     serde_json::from_str(&text).map_err(|e| format!("设计案例响应格式错误：{}", e))
+}
+
+#[tauri::command]
+async fn lectureai_render_template(
+    app_handle: tauri::AppHandle,
+    auth_token: String,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if auth_token.trim().is_empty() {
+        return Err("使用 LectureAI 私有模板需要先登录".to_string());
+    }
+    let config = read_app_config(app_handle)?;
+    let server = config
+        .auth_server
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("https://design.hz-study-system.com")
+        .trim_end_matches('/');
+    let response = direct_client()
+        .post(format!("{}/api/web/ai/templates/render", server))
+        .header("Content-Type", "application/json")
+        .bearer_auth(auth_token)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("模板渲染服务连接失败：{}", e))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| format!("模板渲染响应读取失败：{}", e))?;
+    if !status.is_success() {
+        return Err(format!("模板渲染服务错误（{}）：{}", status.as_u16(), text));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("模板渲染响应格式错误：{}", e))
 }
 
 #[tauri::command]
@@ -5447,7 +5546,12 @@ async fn call_lectureai(auth_token: String, system_prompt: String, user_msg: Str
 }
 
 /// True multi-turn chat for the workbench agent: sends the full messages array.
-async fn call_lectureai_chat(auth_token: String, messages: Vec<ChatMessage>) -> Result<String, String> {
+async fn call_lectureai_chat(
+    auth_token: String,
+    messages: Vec<ChatMessage>,
+    context_mode: Option<String>,
+    context_template_ids: Option<Vec<String>>,
+) -> Result<String, String> {
     if auth_token.is_empty() {
         return Err("请先登录后才能使用 LectureAI".to_string());
     }
@@ -5455,15 +5559,28 @@ async fn call_lectureai_chat(auth_token: String, messages: Vec<ChatMessage>) -> 
         .iter()
         .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
         .collect();
-    call_lectureai_chat_request(auth_token, messages).await
+    call_lectureai_chat_request_with_mode(auth_token, messages, context_mode, context_template_ids).await
 }
 
 async fn call_lectureai_chat_request(
     auth_token: String,
     messages: Vec<serde_json::Value>,
 ) -> Result<String, String> {
+    call_lectureai_chat_request_with_mode(auth_token, messages, None, None).await
+}
+
+async fn call_lectureai_chat_request_with_mode(
+    auth_token: String,
+    messages: Vec<serde_json::Value>,
+    context_mode: Option<String>,
+    context_template_ids: Option<Vec<String>>,
+) -> Result<String, String> {
     let client = direct_client();
-    let body = serde_json::json!({ "messages": messages });
+    let body = serde_json::json!({
+        "messages": messages,
+        "context_mode": context_mode.unwrap_or_else(|| "full".to_string()),
+        "context_template_ids": context_template_ids.unwrap_or_default(),
+    });
 
     let response = client
         .post("https://design.hz-study-system.com/api/web/ai/chat")
@@ -5988,7 +6105,7 @@ async fn call_ai_messages(
     match provider.as_str() {
         "deepseek" => call_deepseek_messages(api_key, messages).await,
         "minimax" => call_minimax_messages(api_key, messages).await,
-        "lectureai" => call_lectureai_chat(api_key, messages).await,
+        "lectureai" => call_lectureai_chat(api_key, messages, None, None).await,
         "custom" => call_custom_messages(api_key, api_type, base_url, model, messages).await,
         _ => Err("不支持的AI提供商".to_string()),
     }
@@ -6003,6 +6120,8 @@ async fn call_ai_messages_stream(
     base_url: Option<String>,
     model: Option<String>,
     messages: Vec<ChatMessage>,
+    context_mode: Option<String>,
+    context_template_ids: Option<Vec<String>>,
 ) -> Result<(), String> {
     let messages = prepend_protocol_prompt(&app_handle, &provider, messages);
     match provider.as_str() {
@@ -6014,7 +6133,7 @@ async fn call_ai_messages_stream(
             Ok(())
         }
         "lectureai" => {
-            let result = call_lectureai_chat(api_key, messages).await?;
+            let result = call_lectureai_chat(api_key, messages, context_mode, context_template_ids).await?;
             let _ = app_handle.emit("ai-stream-chunk", result);
             let _ = app_handle.emit("ai-stream-done", ());
             Ok(())
@@ -7048,6 +7167,7 @@ pub fn run() {
             ppte_agent_plan_write,
             ppte_agent_plan_refresh,
             lectureai_design_examples,
+            lectureai_render_template,
             save_pptx_file,
             list_ppt_templates,
             get_template_files,

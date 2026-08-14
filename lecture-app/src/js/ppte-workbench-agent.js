@@ -333,6 +333,8 @@ window.PpteWorkbenchAgent = {
       switch (a.tool) {
         case 'set_deck_plan': return await this._toolSetDeckPlan(pb, a);
         case 'search_design_examples': return await this._toolSearchDesignExamples(a);
+        case 'render_template': return await this._toolRenderTemplate(pb, a);
+        case 'apply_role_template': return await this._toolApplyRoleTemplate(pb, a);
         case 'write_slide': return await this._toolWriteSlide(pb, a);
         case 'insert_slide': return await this._toolInsertSlide(pb, a);
         case 'reorder_slides': return await this._toolReorderSlides(pb, a);
@@ -356,6 +358,7 @@ window.PpteWorkbenchAgent = {
       folderPath: pb.folderPath,
       plan: a.plan,
     });
+    this._activeDeckPlan = { folderPath: pb.folderPath, plan: saved };
     const count = Number(saved?.targetSlideCount || 0);
     return `set_deck_plan 已保存课件蓝图${count ? `（目标 ${count} 页）` : ''}。`;
   },
@@ -372,6 +375,61 @@ window.PpteWorkbenchAgent = {
     };
     const result = await window.__TAURI__.core.invoke('lectureai_design_examples', { authToken: token, query });
     return `search_design_examples 匹配 ${result?.count || 0} 个案例：\n${JSON.stringify(result, null, 2)}`;
+  },
+
+  async _toolRenderTemplate(pb, a) {
+    if (!a.template_id || !a.payload || typeof a.payload !== 'object') {
+      return 'render_template 失败：缺少 template_id 或结构化 payload';
+    }
+    const mode = a.mode || (Number.isInteger(a.page) ? 'replace' : 'insert');
+    const page = Number(a.page || 0);
+    if (mode === 'replace' && (!Number.isInteger(page) || page < 1 || page > pb.slides.length)) {
+      return `render_template 失败：页码 ${page} 超出范围（共 ${pb.slides.length} 页）`;
+    }
+    if (mode !== 'replace' && mode !== 'insert') return 'render_template 失败：mode 必须是 insert 或 replace';
+    const token = window.Auth?.getToken() || '';
+    const resources = await window.__TAURI__.core.invoke('list_ppte_resources', { folderPath: pb.folderPath });
+    const availableAssets = (Array.isArray(resources) ? resources : [])
+      .filter(item => !['manifest', 'slide', 'note'].includes(item.kind))
+      .map(item => item.path);
+    const hostStylesheets = (Array.isArray(resources) ? resources : [])
+      .filter(item => item.kind === 'style' && item.path === 'content.css')
+      .map(item => item.path);
+    const rendered = await window.__TAURI__.core.invoke('lectureai_render_template', {
+      authToken: token,
+      request: {
+        template_id: a.template_id,
+        template_version: a.template_version || null,
+        payload: a.payload,
+        role: a.role || 'content',
+        available_assets: availableAssets,
+        host_stylesheets: hostStylesheets,
+      },
+    });
+    if (!rendered?.html || rendered?.validation?.passed !== true) {
+      return 'render_template 失败：服务端没有返回通过校验的最终页面';
+    }
+    const title = String(a.title || a.payload.title || '模板页面').trim() || '模板页面';
+    if (mode === 'replace') {
+      return this._toolWriteSlide(pb, {
+        tool: 'write_slide',
+        page,
+        html: rendered.html,
+        title,
+        slide_type: a.slide_type || 'content',
+        note: a.note,
+        _templateId: rendered.template_id,
+      }).then(result => result.replace(/^write_slide/, `render_template(${rendered.template_id})`));
+    }
+    return this._toolInsertSlide(pb, {
+      tool: 'insert_slide',
+      after: Number(a.after || 0),
+      title,
+      html: rendered.html,
+      slide_type: a.slide_type || 'content',
+      note: a.note,
+      _templateId: rendered.template_id,
+    }).then(result => result.replace(/^insert_slide/, `render_template(${rendered.template_id})`));
   },
 
   async _refreshAgentPlanRevision(pb) {
@@ -436,6 +494,22 @@ window.PpteWorkbenchAgent = {
     const page = (a.page | 0);
     const i = page - 1;
     if (i < 0 || i >= pb.slides.length) return `write_slide 失败：页码 ${page} 超出范围（共 ${pb.slides.length} 页）`;
+    const existingRole = pb.slides[i].slide_type || 'content';
+    const targetRole = a.slide_type || existingRole;
+    const plannedRole = this._plannedRoleForPage(pb, page);
+    const plannedPlaceholderConversion = ['catalog', 'chapter'].includes(existingRole)
+      && targetRole === 'content'
+      && plannedRole === 'content';
+    const protectedRole = ['cover', 'catalog', 'chapter', 'finish'].includes(existingRole) && !plannedPlaceholderConversion
+      ? existingRole
+      : targetRole;
+    const roleError = this._protectedRoleWriteError(
+      protectedRole,
+      a.html || '',
+      this._roleStylesheets(pb, protectedRole),
+      this._roleTemplateHtml(pb, protectedRole),
+    );
+    if (roleError) return `write_slide 失败：${roleError}`;
     const commit = await this._commitAgentMutation(pb, () => {
       this._markTemplateInitialized(pb);
       pb.slides[i].html = a.html || '';
@@ -461,6 +535,81 @@ window.PpteWorkbenchAgent = {
     await this._refreshAgentPlanRevision(pb);
     const lint = window.PpteRules ? await window.PpteRules.lintSummary(pb.slides[i].html) : '';
     return `write_slide(第${page}页「${pb.slides[i].title}」) 已保存，主窗口已刷新预览。\n规范检查：\n${lint}`;
+  },
+
+  async _toolApplyRoleTemplate(pb, a) {
+    const page = Number(a.page || 0);
+    const index = page - 1;
+    const role = String(a.role || '').trim().toLowerCase();
+    if (index < 0 || index >= pb.slides.length) return `apply_role_template 失败：页码 ${page} 超出范围`;
+    if (!['cover', 'catalog', 'chapter', 'content', 'finish'].includes(role)) return `apply_role_template 失败：不支持角色 ${role || '空值'}`;
+    const html = this._roleTemplateHtml(pb, role);
+    if (!html) return `apply_role_template 失败：未找到 ${role} 角色母版`;
+    const commit = await this._commitAgentMutation(pb, () => {
+      this._markTemplateInitialized(pb);
+      pb.slides[index].html = html;
+      pb.slides[index].slide_type = role;
+      pb.slides[index].title = String(a.title || pb.slides[index].title || '').trim();
+      pb.slides[index].dirty = true;
+      pb.manifestDirty = true;
+      return { requiredFiles: [pb.slides[index].file] };
+    });
+    if (!commit.ok) return `apply_role_template 保存失败：${commit.error}。已恢复执行前状态，本轮必须停止。`;
+    await this._refreshAgentPlanRevision(pb);
+    return `apply_role_template 已将第${page}页初始化为 ${role} 角色母版。`;
+  },
+
+  _plannedRoleForPage(pb, page) {
+    const active = this._activeDeckPlan;
+    if (!active || active.folderPath !== pb?.folderPath || !Array.isArray(active.plan?.slides)) return '';
+    const planned = active.plan.slides.find(slide => Number(slide?.page) === Number(page));
+    const role = String(planned?.role || planned?.slide_type || '').trim().toLowerCase();
+    return role === 'toc' ? 'catalog' : role === 'finish' || role === 'ending' ? 'finish' : role;
+  },
+
+  _roleStylesheets(pb, role) {
+    const roleFile = pb?.manifest?.agentTemplate?.roles?.find(item => item.slideType === role)?.file;
+    const source = roleFile
+      ? pb?.slides?.find(slide => slide.file === roleFile)
+      : pb?.slides?.find(slide => slide.slide_type === role);
+    return this._stylesheetRefs(source?.html);
+  },
+
+  _roleTemplateHtml(pb, role) {
+    const roleFile = pb?.manifest?.agentTemplate?.roles?.find(item => item.slideType === role)?.file;
+    const source = roleFile
+      ? pb?.slides?.find(slide => slide.file === roleFile)
+      : pb?.slides?.find(slide => slide.slide_type === role);
+    return String(source?.html || '');
+  },
+
+  _protectedRoleWriteError(role, html, expectedStylesheets = [], originalHtml = '') {
+    const source = String(html || '');
+    if (['cover', 'catalog', 'chapter', 'finish'].includes(role)) {
+      for (const stylesheet of expectedStylesheets) {
+        const escaped = String(stylesheet).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (!new RegExp(`<link\\b[^>]*href=["']${escaped}["']`, 'i').test(source)) {
+          return `${role} 页面必须保留角色母版样式 ${stylesheet}`;
+        }
+      }
+      const styleBlocks = value => [...String(value || '').matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)]
+        .map(match => match[1].replace(/\s+/g, ' ').trim());
+      if (JSON.stringify(styleBlocks(source)) !== JSON.stringify(styleBlocks(originalHtml))) {
+        return `${role} 页面不能新增或修改角色母版的内联样式`;
+      }
+    }
+    if (role === 'finish') {
+      const visibleText = value => String(value || '')
+        .replace(/<!--([\s\S]*?)-->/g, '')
+        .replace(/<(?:script|style)\b[\s\S]*?<\/(?:script|style)>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (visibleText(source) !== visibleText(originalHtml)) {
+        return '结束页必须保留角色母版的可见内容，背景已有文字时不能叠加正文';
+      }
+    }
+    return '';
   },
 
   async _toolInsertSlide(pb, a) {
@@ -505,6 +654,13 @@ window.PpteWorkbenchAgent = {
       dirty: true,
       created: true,
     };
+    const roleError = this._protectedRoleWriteError(
+      slideType,
+      newSlide.html,
+      this._roleStylesheets(pb, slideType),
+      this._roleTemplateHtml(pb, slideType),
+    );
+    if (roleError) return `insert_slide 失败：${roleError}`;
     const commit = await this._commitAgentMutation(pb, () => {
       this._markTemplateInitialized(pb);
       pb.slides.splice(idx, 0, newSlide);
@@ -957,6 +1113,8 @@ window.PpteWorkbenchAgent = {
       const html = String(slide.html || '').toLowerCase();
       const role = String(slide.slide_type || '').toLowerCase();
       if (structural.has(role)) return role;
+      const templateId = html.match(/\bdata-template\s*=\s*["']([^"']+)["']/i)?.[1];
+      if (templateId) return `template:${templateId}`;
       const tagged = html.match(/data-layout-family=["']([^"']+)["']/)?.[1];
       if (tagged) return tagged.trim();
       if (/<(?:table)\b|class=["'][^"']*(?:data-table|comparison-table)/.test(html)) return 'data-table';
@@ -977,6 +1135,14 @@ window.PpteWorkbenchAgent = {
       if (layouts[index] && layouts[index] === layouts[index - 1]) adjacentDuplicateLayouts.push(index + 1);
     }
     const motionCount = pb.slides.filter(slide => /@keyframes|\banimation\s*:|\btransition\s*:|requestanimationframe|setinterval\s*\(|data-motion=/i.test(String(slide.html || ''))).length;
+    for (let index = 0; index < Math.min(plannedSlides.length, pb.slides.length); index++) {
+      const expectedTemplate = String(plannedSlides[index]?.templateId || plannedSlides[index]?.template_id || '').trim();
+      if (!expectedTemplate) continue;
+      const actualTemplate = String(pb.slides[index]?.html || '').match(/\bdata-template\s*=\s*["']([^"']+)["']/i)?.[1] || '';
+      if (actualTemplate !== expectedTemplate) {
+        errors.push(`第 ${index + 1} 页实际模板 ${actualTemplate || '未标记'} 与规划 ${expectedTemplate} 不一致`);
+      }
+    }
     for (let index = 0; index < Math.min(plannedLayouts.length, actualLayouts.length); index++) {
       if (!structural.has(actualLayouts[index]) && actualLayouts[index] !== 'unclassified' && plannedLayouts[index] && plannedLayouts[index] !== actualLayouts[index]) {
         warnings.push(`第 ${index + 1} 页实际布局 ${actualLayouts[index]} 与规划 ${plannedLayouts[index]} 不一致`);

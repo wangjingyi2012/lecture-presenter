@@ -94,6 +94,9 @@ assert.equal(wb._resultIsError('set_deck_plan 失败：缺少完整 plan 对象'
 assert.equal(wb._hasUnexecutedToolIntent('先读取第 1 页，确认封面风格。'), true);
 assert.equal(wb._hasUnexecutedToolIntent('现在校验第 3 页。'), true);
 assert.equal(wb._hasUnexecutedToolIntent('检查结果：课件结构完整，无需修改。'), false);
+assert.equal(wb._isHarnessResumeRequest('继续'), true);
+assert.equal(wb._isHarnessResumeRequest('继续生成课件'), true);
+assert.equal(wb._isHarnessResumeRequest('继续修改第3页'), false);
 
 const starterSlides = [
   { file: 'slide01.html', title: '封面', slide_type: 'cover', html: '<link rel="stylesheet" href="style.css"><h1>PPT主标题</h1>' },
@@ -118,16 +121,73 @@ wb.manifest = {
     })),
   },
 };
+const harnessPlan = {
+  targetSlideCount: 5,
+  visualSystem: { colors: { text: '#0f172a' } },
+  slides: Array.from({ length: 5 }, (_, index) => ({
+    page: index + 1,
+    role: index === 0 ? 'cover' : 'content',
+    title: `主题${index + 1}`,
+    contentKind: 'concept',
+    layoutFamily: 'test',
+    componentIds: [],
+    motion: 'none',
+    visualIntent: `意图${index + 1}`,
+    templateId: index ? `template-${index + 1}` : undefined,
+    narrative: index ? { buildsOn: `衔接${index}`, learningGoal: `目标${index + 1}`, keyTakeaway: `结论${index + 1}`, leadsTo: `衔接${index + 1}` } : undefined,
+  })),
+};
+wb._activeTask = { userInstruction: '创建五页课件' };
+const pageContext = wb._harnessPageContext(harnessPlan, harnessPlan.slides[2], { 2: '第二页摘要' }, '保持术语一致');
+assert.match(pageContext, /主题1/);
+assert.match(pageContext, /主题5/);
+assert.match(pageContext, /第二页摘要/);
+assert.match(pageContext, /保持术语一致/);
+assert.doesNotMatch(pageContext, /<!doctype|```html/i, 'page harness context must never carry slide HTML');
+const fixedDirective = { mode: 'replace', page: 3, after: null };
+assert.equal(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 3, template_id: 'template-3' }, harnessPlan.slides[2], fixedDirective, false), '');
+assert.match(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 4, template_id: 'template-3' }, harnessPlan.slides[2], fixedDirective, false), /第 3 页/);
+assert.match(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 3, template_id: 'template-4' }, harnessPlan.slides[2], fixedDirective, false), /规划模板 template-3/);
 assert.match(wb._systemPrompt(), /五页母版/);
 assert.match(wb._systemPrompt(), /template_role/);
 assert.match(wb._systemPrompt(), /chapter\.css/);
 assert.match(wb._systemPrompt(), /结束页必须是最后一页/);
 assert.match(wb._systemPrompt(), /set_deck_plan/);
 assert.match(wb._systemPrompt(), /search_design_examples/);
+assert.match(wb._systemPrompt(), /render_template/);
 assert.match(wb._systemPrompt(), /validate_deck/);
 assert.equal(wb._requestedSlideCount('创建一个15页的关于 AI 发展史的课件'), 15);
+assert.equal(wb._explicitSectionRequest('创建一个20页的 AI 发展史课件'), false);
+assert.equal(wb._explicitSectionRequest('创建一个20页课件，分成5章'), true);
+assert.equal(wb._explicitSectionRequest('创建一个40页课件，不分章节'), false);
+assert.equal(wb._explicitSectionRequest('重写课件，修复章节衔接问题'), false);
+assert.equal(wb._explicitSectionRequest('重写课件，增加一个目录页'), true);
+assert.equal(wb._continuousSectionRequest('创建一个40页课件，不分章节'), true);
+assert.match(wb._deckPlanGateError({ targetSlideCount: 21, slides: Array(21).fill({ role: 'content' }) }, 20), /最终 20 页/);
+assert.match(wb._deckPlanGateError({ targetSlideCount: 20, slides: Array.from({ length: 20 }, (_, i) => ({ role: i === 1 ? 'catalog' : 'content' })) }, 20), /默认不分章/);
+assert.match(wb._deckPlanGateError({ targetSlideCount: 20, slides: Array.from({ length: 20 }, (_, i) => ({ role: i === 2 ? 'chapter' : 'content' })) }, 20), /默认不分章/);
+assert.equal(wb._deckPlanGateError({ targetSlideCount: 20, slides: Array.from({ length: 20 }, () => ({ role: 'content' })) }, 20), '');
+assert.equal(wb._deckPlanGateError({ targetSlideCount: 20, slides: Array.from({ length: 20 }, (_, i) => ({ role: [2, 5, 9, 13, 16].includes(i) ? 'chapter' : 'content' })) }, 20, true), '');
+assert.match(wb._deckPlanGateError({ targetSlideCount: 31, slides: Array.from({ length: 31 }, (_, i) => ({ role: i === 2 ? 'chapter' : 'content' })) }, 31), /恰好包含 2 个/);
+assert.equal(wb._deckPlanGateError({ targetSlideCount: 31, slides: Array.from({ length: 31 }, (_, i) => ({ role: [2, 17].includes(i) ? 'chapter' : 'content' })) }, 31), '');
+assert.equal(wb._deckPlanGateError({ targetSlideCount: 31, slides: Array.from({ length: 31 }, () => ({ role: 'content' })) }, 31, false, true), '');
+const strictNarrativeSlides = [
+  { page: 1, role: 'cover' },
+  {
+    page: 2, role: 'content', templateId: 'concept-definition-boundary',
+    narrative: { buildsOn: '主题', learningGoal: '理解定义', keyTakeaway: '定义结论', leadsTo: '进入案例' },
+  },
+  {
+    page: 3, role: 'content', templateId: 'case-facts-conclusion',
+    narrative: { buildsOn: '进入案例', learningGoal: '理解案例', keyTakeaway: '案例结论', leadsTo: '进入机制' },
+  },
+];
+assert.equal(wb._deckPlanGateError({ targetSlideCount: 3, qualityPolicy: { schemaVersion: 2 }, slides: strictNarrativeSlides }, 3), '');
+assert.match(wb._deckPlanGateError({ targetSlideCount: 3, qualityPolicy: { schemaVersion: 2 }, slides: strictNarrativeSlides.map((slide, index) => index === 2 ? { ...slide, narrative: { ...slide.narrative, buildsOn: '无关主题' } } : slide) }, 3), /leadsTo 必须/);
+assert.match(wb._deckPlanGateError({ targetSlideCount: 4, qualityPolicy: { schemaVersion: 2 }, slides: [...strictNarrativeSlides, { page: 4, role: 'content', templateId: 'concept-definition-boundary', narrative: { buildsOn: '进入机制', learningGoal: '理解机制', keyTakeaway: '机制结论', leadsTo: '收束' } }] }, 4), /三页窗口内重复/);
 assert.match(wb._taskInitialization('创建一个15页的关于 AI 发展史的课件'), /只需净新增 10 页/);
 assert.match(wb._taskInitialization('创建一个15页的关于 AI 发展史的课件'), /总页数恰好为 15/);
+assert.match(wb._taskInitialization('创建一个15页的关于 AI 发展史的课件'), /默认不分章/);
 assert.equal(wb._isDeckLevelTask('检查一下课件'), true);
 assert.equal(wb._requiresDeckPlan('检查一下课件'), false);
 assert.equal(wb._requiresDeckPlan('创建一个15页的课件'), true);
@@ -345,6 +405,11 @@ const agentContext = {
 vm.createContext(agentContext);
 vm.runInContext(`${agentSource}\nglobalThis.PpteWorkbenchAgent = window.PpteWorkbenchAgent;`, agentContext);
 const agent = agentContext.PpteWorkbenchAgent;
+assert.match(agent._protectedRoleWriteError('catalog', '<link rel="stylesheet" href="brand-catalog.css"><style>.catalog-item{color:#000}</style>', ['brand-catalog.css']), /不能新增或修改/);
+assert.equal(agent._protectedRoleWriteError('catalog', '<style>.catalog-item { color: white; }</style>', [], '<style> .catalog-item { color: white; } </style>'), '');
+assert.match(agent._protectedRoleWriteError('finish', '<link rel="stylesheet" href="brand-ending.css"><main class="slide"><h1>谢谢</h1></main>', ['brand-ending.css']), /不能叠加正文/);
+assert.equal(agent._protectedRoleWriteError('finish', '<link rel="stylesheet" href="brand-ending.css"><main class="slide"><!-- background has text --></main>', ['brand-ending.css']), '');
+assert.match(agent._protectedRoleWriteError('chapter', '<link rel="stylesheet" href="content.css"><h1>章节</h1>', ['chapter.css']), /保留角色母版样式 chapter\.css/);
 const pb = {
   manifest: { title: 'AI发展史' },
   slides: starterSlides.map((s, i) => ({ ...s, id: `s${i + 1}` })),
@@ -755,6 +820,147 @@ async function testOptionalPlanToolsUseSeparateTauriStorage() {
   assert.deepEqual(calls.map(call => call.command), ['ppte_agent_plan_write', 'lectureai_design_examples']);
 }
 
+async function testPlannedPlaceholderRoleConversion() {
+  const deck = {
+    folderPath: '/tmp/planned-conversion',
+    manifest: { title: '短课件', slides: [] },
+    slides: starterSlides.map((slide, index) => ({ ...slide, id: `planned-${index + 1}`, dirty: false, created: false })),
+    currentSlideIndex: 0,
+    manifestDirty: false,
+    templateFilesDirty: false,
+    fileStats: {},
+  };
+  deck.manifest.slides = deck.slides;
+  agentContext.window.Settings._pptBuilder = deck;
+  agentContext.window.Settings._savePptBuilderData = successfulSave;
+  agent._activeDeckPlan = {
+    folderPath: deck.folderPath,
+    plan: { slides: deck.slides.map((_, index) => ({ page: index + 1, role: index === 0 ? 'cover' : index === 4 ? 'finish' : 'content' })) },
+  };
+
+  const catalogResult = await agent._toolWriteSlide(deck, {
+    tool: 'write_slide', page: 2, title: '正文 A', slide_type: 'content',
+    html: '<link rel="stylesheet" href="content.css"><main class="content-area"><h1>正文 A</h1></main>',
+  });
+  const chapterResult = await agent._toolWriteSlide(deck, {
+    tool: 'write_slide', page: 3, title: '正文 B', slide_type: 'content',
+    html: '<link rel="stylesheet" href="content.css"><main class="content-area"><h1>正文 B</h1></main>',
+  });
+  const coverResult = await agent._toolWriteSlide(deck, {
+    tool: 'write_slide', page: 1, title: '错误正文', slide_type: 'content',
+    html: '<link rel="stylesheet" href="content.css"><main class="content-area"><h1>错误正文</h1></main>',
+  });
+  const finishResult = await agent._toolWriteSlide(deck, {
+    tool: 'write_slide', page: 5, title: '错误正文', slide_type: 'content',
+    html: '<link rel="stylesheet" href="content.css"><main class="content-area"><h1>错误正文</h1></main>',
+  });
+
+  assert.match(catalogResult, /已保存/);
+  assert.match(chapterResult, /已保存/);
+  assert.equal(deck.slides[1].slide_type, 'content');
+  assert.equal(deck.slides[2].slide_type, 'content');
+  assert.match(coverResult, /失败/);
+  assert.match(finishResult, /失败/);
+}
+
+async function testPrivateTemplateRenderUsesServerHtmlAndSafeSave() {
+  const deck = {
+    folderPath: '/tmp/template-render',
+    manifest: { title: '模板渲染', slides: [] },
+    slides: [{
+      id: 'slide-1', file: 'slide01.html', title: '原页面', slide_type: 'content',
+      html: '<h1>原页面</h1>', dirty: false, created: false,
+    }],
+    currentSlideIndex: 0,
+    manifestDirty: false,
+    templateFilesDirty: false,
+    fileStats: {},
+  };
+  deck.manifest.slides = deck.slides;
+  agentContext.window.Settings._pptBuilder = deck;
+  agentContext.window.Settings._savePptBuilderData = successfulSave;
+  const calls = [];
+  agentContext.window.Auth.getToken = () => 'template-token';
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    calls.push({ command, payload });
+    if (command === 'lectureai_render_template') {
+      return {
+        template_id: 'key-message-evidence',
+        template_version: '0.1.0',
+        html: '<!doctype html><html><head></head><body><main class="content-area" data-template="key-message-evidence"></main></body></html>',
+        validation: { passed: true, warnings: [], errors: [] },
+      };
+    }
+    if (command === 'list_ppte_resources') return [{ path: 'images/demo.png', kind: 'image', size: 10 }];
+    return true;
+  };
+  const result = await agent._toolRenderTemplate(deck, {
+    tool: 'render_template',
+    mode: 'replace',
+    page: 1,
+    template_id: 'key-message-evidence',
+    template_version: '0.1.0',
+    payload: { title: '灰度发布', message: '降低风险', evidence: [{}, {}] },
+  });
+  assert.match(result, /render_template\(key-message-evidence\)/);
+  assert.match(deck.slides[0].html, /data-template="key-message-evidence"/);
+  assert.equal(deck.slides[0].title, '灰度发布');
+  assert.equal(calls[0].command, 'list_ppte_resources');
+  assert.equal(calls[1].command, 'lectureai_render_template');
+  assert.deepEqual(Object.keys(calls[1].payload.request).sort(), ['available_assets', 'host_stylesheets', 'payload', 'role', 'template_id', 'template_version']);
+  assert.deepEqual(Array.from(calls[1].payload.request.available_assets), ['images/demo.png']);
+  assert.deepEqual(Array.from(calls[1].payload.request.host_stylesheets), []);
+  assert.equal('skeleton' in calls[1].payload.request, false);
+}
+
+async function testPageHarnessResetsMessagesBetweenSlides() {
+  const plan = {
+    targetSlideCount: 2,
+    visualSystem: { colors: { text: '#0f172a' } },
+    slides: [1, 2].map((page) => ({
+      page, role: 'content', title: `第${page}页`, contentKind: 'concept', layoutFamily: 'test',
+      componentIds: [], motion: 'none', visualIntent: `意图${page}`,
+      templateId: `template-${page}`, templateVersion: '0.1.0',
+      narrative: { buildsOn: `承接${page}`, learningGoal: `目标${page}`, keyTakeaway: `结论${page}`, leadsTo: `后续${page}` },
+    })),
+  };
+  wb.manifest = { title: 'Harness', slides: [
+    { title: '旧页1', slideType: 'content', file: 'slide01.html' },
+    { title: '旧页2', slideType: 'content', file: 'slide02.html' },
+  ] };
+  wb._activeTask = { userInstruction: '生成两页', plan };
+  wb._stopRequested = false;
+  const calls = [];
+  const replies = [
+    '```action\n{"tool":"render_template","mode":"replace","page":1,"template_id":"template-1","payload":{"title":"一"}}\n```',
+    '```action\n{"tool":"validate_slide","page":1}\n```',
+    '第一页完成',
+    '```action\n{"tool":"render_template","mode":"replace","page":2,"template_id":"template-2","payload":{"title":"二"}}\n```',
+    '```action\n{"tool":"validate_slide","page":2}\n```',
+    '第二页完成',
+  ];
+  wb._callAI = async (messages, mode, templateIds) => {
+    calls.push({ messages: JSON.parse(JSON.stringify(messages)), mode, templateIds: [...templateIds] });
+    return replies.shift();
+  };
+  wb._rpc = async (type, payload) => {
+    if (type === 'execute-action' && payload.action.tool === 'validate_slide') return JSON.stringify({ passed: true });
+    return '操作成功';
+  };
+  wb._refreshContext = async () => {};
+  wb._logAction = () => null;
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  const counters = { rounds: 0, tools: 0 };
+  const summaries = {};
+  summaries[1] = await wb._runHarnessPage(plan, plan.slides[0], summaries, '', counters);
+  summaries[2] = await wb._runHarnessPage(plan, plan.slides[1], summaries, '', counters);
+  assert.deepEqual(calls.map((call) => call.messages.length), [2, 4, 6, 2, 4, 6]);
+  assert.equal(calls[3].messages.some((message) => String(message.content).includes('当前页工具回执')), false, 'second page must not inherit first page tool receipts');
+  assert.deepEqual(calls[0].templateIds, ['template-1']);
+  assert.deepEqual(calls[3].templateIds, ['template-2']);
+}
+
 async function testAgentImportsSelectedExternalSkillFolder() {
   const calls = [];
   agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
@@ -787,6 +993,9 @@ async function testAgentImportsSelectedExternalSkillFolder() {
   await testSlashCommandRequiresInspectionAndReinspection();
   await testSlashCommandKeepsPageScope();
   await testOptionalPlanToolsUseSeparateTauriStorage();
+  await testPlannedPlaceholderRoleConversion();
+  await testPrivateTemplateRenderUsesServerHtmlAndSafeSave();
+  await testPageHarnessResetsMessagesBetweenSlides();
   await testAgentImportsSelectedExternalSkillFolder();
 })()
   .then(() => console.log('test-workbench-window: all assertions passed'))
