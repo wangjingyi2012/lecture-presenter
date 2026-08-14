@@ -41,3 +41,10 @@
 - 密码哈希：`app/core/security.py`，bcrypt（rounds=12），先 SHA-256 预哈希规避 bcrypt 72 字节限制。
 - 登录需验证码 + 限流（`app/services/security/`）；注册/登录/改密均写审计日志（`create_audit_log`，action 形如 `auth.login` / `auth.change_password`）。
 - 会话：JWT（HS256），经 `Authorization: Bearer`、`?token=` 或 `lecture_web_token` cookie 传递，见 `app/api/deps.py:get_current_user`。
+
+### Pi WebSocket 特例（2026-08-14）
+
+- 桌面 LectureAI 工作台使用 `/api/web/ai/pi/bridge`，不把 JWT 放入 URL。
+- 握手协议为 `lectureai.pi.v1` + `lectureai.auth.<JWT>`，FastAPI 只回选公开协议名 `lectureai.pi.v1`；这样 Nginx/Uvicorn 访问日志不会记录令牌。
+- FastAPI 负责登录、Deck Plan/page/directive 门禁和完成页配额，随后代理到 loopback Node Pi Runtime `127.0.0.1:8765/bridge`。
+- Pi 的工具调用由桌面执行，必须使用相同 `request_id` 回传 `tool_result`；客户端断线或 stop 时 Runtime 必须 abort。

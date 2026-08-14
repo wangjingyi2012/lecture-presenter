@@ -11,7 +11,7 @@ The desktop app is the open-source half of a two-repo product split:
 - **This repo (desktop, open source)** = editor + presenter shell. It is the landing container for content generated elsewhere.
 - **Lecture Web / LectureAI (separate closed-source repo)** = generation backend (FastAPI). Only operational notes about it live here, in `memory/2026-07-24-lecture-web-backend.md`; its code is NOT in this repo. The empty `backend/app/{api,models,schemas,services}/` directories at this repo's root are unused placeholders — do not put code there.
 
-The desktop app talks to the cloud server (`https://design.hz-study-system.com`, configurable via `app-config.json`) for auth/membership, update checks, notifications, and login-only analytics.
+The desktop app talks to the cloud server (`https://design.hz-study-system.com`, configurable via `app-config.json`) for auth/membership, LectureAI generation, update checks, notifications, and login-only analytics.
 
 ## Commands
 
@@ -31,6 +31,7 @@ npm run test:resource-center # scripts/test-resource-center.js (resource center 
 npm run test:captions        # scripts/test-live-caption.js (caption transcript logic)
 npm run test:course-manager  # scripts/test-course-manager.js (course grouping/switcher logic)
 node scripts/test-auth.js    # auth UI logic (no npm script alias)
+npm run test:workbench       # scripts/test-workbench-window.js (AI workbench, deck Harness, Pi bridge)
 
 cargo check            # run inside src-tauri/ to type-check Rust
 cargo test             # run inside src-tauri/ — unit tests in lib.rs plus tests/info_plist.rs
@@ -58,7 +59,30 @@ Key frontend modules:
 - `auth.js` / `auth.css` — login/membership against the cloud server; token persisted in localStorage; admin gating (`Auth.isAdmin()`) controls the local PPTE agent entry.
 - `live-caption.js` / `caption-settings.js` / `live-caption.css` — microphone capture and streaming captions via Alibaba Cloud Fun-ASR; the websocket lives in Rust (`caption_*` commands), frontend renders final/partial transcript lines.
 - `local-ppte-agent.js` — admin-only bridge to a private local PPTE generation agent (job start/poll/read via `local_ppte_agent_*` commands).
+- `workbench-window.js` — the separate LectureAI workbench window. It owns conversation state, slash commands, Deck Plan orchestration, paged generation, Pi WebSocket sessions, progress rendering, stop/resume, and the RPC client used to ask the main window to execute PPTE tools.
+- `ppte-workbench-agent.js` — the main-window side of the workbench RPC bridge. It exposes current deck context and executes the local PPTE tool allowlist (`set_deck_plan`, design search, template render, read/write/insert/validate, etc.) against the open editor with its existing anti-overwrite save path.
+- `ppte-slash-commands.js` — registry and parser for built-in `/` commands. `/clear` and `/compact` are workbench context controls; page-scoped commands continue to use `@N`.
 - `updater.js`, `notification-center.js`, `tracker.js` — update checks, server notifications, and login-only fire-and-forget analytics. All endpoints default to `design.hz-study-system.com` and are overridden from `app-config.json`.
+
+### LectureAI deck Harness and Pi WebSocket
+
+Whole-deck generation is deliberately split into planning and bounded page execution:
+
+1. The desktop first obtains and persists an authoritative Deck Plan in `.lectureai/deck-plan.json`. It contains page order, roles, narrative links, layout/template choices, visual policy, and a deck revision.
+2. `workbench-window.js:_runPlannedHarness` dispatches one page at a time. A page sees the full compact outline, the current page plus two neighbors on either side, nearby completed summaries, and the latest five-page stage review. Full HTML and prior tool receipts do not roll into the next page.
+3. When the selected provider is **LectureAI**, `_runPiHarnessPage` opens `wss://design.hz-study-system.com/api/web/ai/pi/bridge`. FastAPI authenticates and validates the plan/directive, then proxies to the loopback Node Pi Runtime. Pi owns the Agent loop, JSONL session, context compaction, resume state, and model abort.
+4. Pi emits `tool_call`; the desktop executes only the current PPTE's local allowlisted tool through `ppte-workbench-agent.js`, then returns the matching `tool_result`. The server keeps private template contracts and prompts; the desktop receives only search results and rendered artifacts.
+5. `progress`, `tool_call`, `page_complete`, `paused`, and `error` travel on the same socket. The stop button sends `stop`, closes the socket immediately, aborts the Pi/model request, and prevents the next page from starting.
+
+The bridge has two independent trust gates. The Node runtime enforces the planned page, `templateId`, write mode, and insertion point before a tool call; the desktop repeats those checks before touching local files. A `request_id` must be copied unchanged from every `tool_call` into its `tool_result`, or Pi will remain blocked waiting for that exact result.
+
+Execution progress is stored inside `plan.execution`, including `piSessionId`, `piDeckId`, `completedPages`, `summaries`, `stageReviews`, `nextPage`, `status`, and the original user instruction. A plain “继续” resumes incomplete pages without regenerating completed pages. Every five completed pages triggers a short teaching-progression review; final `validate_deck` can schedule bounded repairs for only the affected pages.
+
+Authentication is intentionally not in the WebSocket URL. The browser offers `lectureai.pi.v1` plus `lectureai.auth.<JWT>` through `Sec-WebSocket-Protocol`; FastAPI selects only the public `lectureai.pi.v1` protocol. Never revert to `?token=...`: request URLs are written to access logs. The Tauri CSP must continue to allow `wss://design.hz-study-system.com`.
+
+Selecting a user-configured non-LectureAI provider keeps the legacy client-side page worker path. Users never install Node or Pi separately; Pi runs only inside the Lecture Web server image.
+
+The current cross-repo handoff, deployed commits, production verification, rollback points, and remaining manual trial are recorded in `memory/2026-08-14-lectureai-pi-websocket.md`.
 
 ### Backend (lecture-app/src-tauri/src/lib.rs)
 

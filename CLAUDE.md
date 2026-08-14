@@ -1,76 +1,57 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides Claude Code-specific handoff context for this repository.
 
-## Overview
+@AGENTS.md
 
-Lecture Presenter（演讲宝）is a Tauri 2 desktop app for presenting course materials: PDF, video, Markdown, source code, and **PPTE (PPT-EXTRA)** — HTML files that simulate PowerPoint slides. All app code lives in `lecture-app/`.
+`AGENTS.md` is the canonical architecture, commands, testing, safety, and repository-boundary document. Read it before changing code. If this file and `AGENTS.md` ever disagree, follow `AGENTS.md` and repair this handoff rather than preserving duplicate instructions.
 
-## Commands
+## Current Handoff (2026-08-14)
 
-All commands run from `lecture-app/`:
+LectureAI whole-deck generation now uses the cloud Pi Agent runtime for bounded per-page execution when the desktop workbench model selector is set to **LectureAI**.
 
-```bash
-npm install            # install deps (also requires Rust stable + Tauri 2 system deps)
-npm run dev            # tauri dev — launches the desktop app with live frontend
-npm run build          # tauri build — bundles to src-tauri/target/release/bundle/
-npm run build:release  # obfuscated production build (scripts/build-obfuscated.js)
-npm run test:ppte      # node scripts/test-ppt-extra-viewer.js (slide URL/platform logic)
-npm run test:annotator # node scripts/test-ppte-annotator.js (annotation overlay)
-cargo check            # run inside src-tauri/ to type-check Rust
+```text
+Desktop workbench
+  <-> authenticated WebSocket
+FastAPI /api/web/ai/pi/bridge
+  <-> loopback WebSocket
+Node Pi Runtime
 ```
 
-There is no bundler, framework, or lint step: the frontend is plain HTML/CSS/JS loaded directly from `lecture-app/src/` (`frontendDist: ../src`). `npm run build:release` copies `src/` to `dist/`, obfuscates non-vendor JS, temporarily patches `tauri.conf.json`, then restores it.
+The server owns the model loop, private page-worker rules, JSONL sessions, compaction, resume state, and abort. The desktop owns the open PPTE and executes only local allowlisted tools. Do not move private template contracts into this public repository, and do not make Pi or Node a separate desktop installation requirement.
 
-## Architecture
+Important implementation points:
 
-### Frontend (lecture-app/src/)
+- Desktop orchestration: `lecture-app/src/js/workbench-window.js` (`_runPlannedHarness`, `_runPiHarnessPage`, `_executePiTool`, `_requestStop`).
+- Local PPTE execution bridge: `lecture-app/src/js/ppte-workbench-agent.js`.
+- Workbench regression coverage: `lecture-app/scripts/test-workbench-window.js`, run with `npm run test:workbench`.
+- Web implementation lives in the separate private repository `/Users/jingyi.wang/Documents/workspace/lecture-presenter-public-web`, branch `codex/lectureai-planning`.
+- Web bridge implementation: `backend/app/api/chat.py`, `backend/app/api/deps.py`, `backend/app/services/ai/pi_runtime.py`, and `pi-runtime/src/server.js` in that repository.
+- WebSocket authentication uses subprotocols `lectureai.pi.v1` and `lectureai.auth.<JWT>`. Never put the JWT in the WebSocket query string because access logs record URLs.
+- Every Pi `tool_call.request_id` must be returned unchanged as `tool_result.request_id`.
+- Stop must send `stop`, close the active socket, reject the current page promise, and prevent the next planned page from starting.
+- Resume identity and progress live in Deck Plan `execution`: `piSessionId`, `piDeckId`, `completedPages`, `summaries`, `stageReviews`, `nextPage`, and `status`.
+- Non-LectureAI provider selection intentionally retains the prior client-side worker path.
 
-- `index.html` — single page containing ALL UI: sidebar, content area, and every modal (PDF/video/code/HTML/PPTE viewers, course creator, settings). Modals are `.hidden`-toggled divs.
-- `audience.html` — separate Tauri window shown to the audience in speaker mode; receives `slide-change` events and emits `audience-navigate` events back.
-- `js/*.js` — plain scripts, each defining one global object (e.g. `PptExtraViewer`, `CourseLoader`, `Content`). No modules/imports; load order is set by `<script>` tags in `index.html`. `app.js` calls each component's `init()` on DOMContentLoaded.
-- Frontend ↔ backend via `window.__TAURI__.core.invoke(...)` and `window.__TAURI__.event` — guarded by `if (window.__TAURI__)` so browser dev mode degrades to `fetch`.
+Current shipped commits:
 
-### Backend (lecture-app/src-tauri/src/lib.rs)
+- Desktop `main`: `6d2a9ef` (Pi WebSocket execution), `9cc5e87` (subprotocol authentication).
+- Web `codex/lectureai-planning`: `c36207d` (desktop tool bridge), `186ad1a` (keep tokens out of URLs).
 
-Single ~2000-line file with all `#[tauri::command]` handlers: file I/O (`read_text_file`, `write_text_file`), course config management, file/folder pickers, PPTE folder creation, AI calls (DeepSeek/MiniMax/LectureAI), audience window management (`open_audience_window`, `emit_slide_change`), and two custom URI scheme protocols:
+Production and packaging status:
 
-- `slide://` — serves slide files preserving real path slashes (the built-in asset protocol encodes `/` as `%2F`, breaking relative URLs in slide HTML). HTML responses get `src-tauri/src/ppte-slide-bridge.js` appended: slide frames are cross-origin to the app window on macOS, so this in-frame script forwards navigation keys/shortcuts and editable-focus state to the parent via `postMessage` (`slide-navigate` / `slide-shortcut` / `slide-edit-focus`). Clicks are never forwarded as navigation — slides own their click-driven animations; page navigation is keyboard-only.
-- `media://` — serves video with HTTP Range support.
+- `https://design.hz-study-system.com/healthz/ready` is healthy.
+- Production image verified after deployment: `sha256:de726a2396e358dcefaa775c6f37921ea7b96f2f82d3570a8d334f019e720593`.
+- Public WebSocket smoke passed through Nginx with the log-safe URL `/api/web/ai/pi/bridge`.
+- `/Applications/Lecture Presenter.app` is the signed arm64 `2.1.0` build containing the subprotocol-auth fix.
+- Original application backup: `/Applications/Lecture Presenter.app.backup-20260814-150737`.
+- Server rollback source/image: `/opt/lecture-web.pre-ws-20260814-150118` and `lecture-web:pre-ws-20260814-150118`.
 
-### PPTE slide loading is platform-split (critical, easy to regress)
+Last full verification:
 
-- **macOS WebKit**: iframe loads `slide://localhost/<abs-path>` directly.
-- **Windows WebView2**: cannot reliably load `slide://` in iframes; instead the HTML is read via `read_text_file`, a `<base href="http://slide.localhost/...">` is injected (`_injectBaseHref` replaces any existing `<base>`), and assigned via `srcdoc`.
+- Web backend: `69 passed`.
+- Pi Runtime: `9 passed`.
+- Desktop frontend suites, auth, and workbench: passed.
+- Rust: `37 passed`, `2 ignored` live-caption tests requiring cloud credentials; Info.plist test passed.
 
-Platform detection is `_usesCustomProtocolHost()` in `ppt-extra-viewer.js`. `npm run test:ppte` covers both paths plus `<base>` replacement and Chinese-path URL encoding — run it after touching slide-loading logic. See `memory/2026-06-10-ppte-animation-blank.md` for the debugging history.
-
-### PPTE viewer (js/ppt-extra-viewer.js)
-
-`PptExtraViewer` handles three display states inside `#ppt-extra-modal`:
-
-1. **Normal**: TOC sidebar + slide iframe.
-2. **Play mode** (`F`): `playing-mode` class fullscreens the iframe.
-3. **Speaker mode** (`S`): hides normal view, shows `#speaker-view` (current/next slide previews, Markdown notes with edit/preview toggle, timer), and opens the separate audience window via Tauri command. Notes are stored per-slide as `.note` files next to the slide HTML.
-
-Navigation events flow from slide iframes via `postMessage({type:'slide-navigate'})` to the parent (`_installFrameNavigation` injects key/click listeners into each frame's document), and from the audience window via the Tauri `audience-navigate` event.
-
-### Annotation overlay (js/ppte-annotator.js)
-
-`PpteAnnotator.create({container, ...})` mounts a transparent canvas + toolbar over a container without touching slide HTML or the platform-split loading. Annotations (pen/highlighter/text/eraser) are memory-only and per-page (`setPage`), discarded on `reset()`. Two instances exist: one over `#ppt-extra-container` (toggled by the header button or `P`), one in `audience.html` (corner floating button) — they are independent, with no cross-window sync by design. When inactive the canvas is `pointer-events:none` so click-to-advance still works.
-
-Annotator styles live in `css/ppte-annotator.css` and must be loaded via `<link>`, not runtime `<style>` injection: the production CSP blocks inline styles on pages that already have them. `npm run test:annotator` covers the overlay logic.
-
-### PPTX export (js/ppte-ppt-exporter.js)
-
-`PptePptExporter.export(viewer)` converts the loaded PPTE HTML slides into an editable `.pptx` via the `pptxgenjs` dependency (`LAYOUT_WIDE`, 13.33×7.5in / 1920×1080 render basis). It reads the live DOM of each slide iframe, so it depends on slides being loaded through `PptExtraViewer`. This is the only feature using `pptxgenjs`; there is no test script for it.
-
-### Course data model
-
-A course is a folder with `course.json` (schema in `COURSE_FORMAT.md`): `weeks[]` → `resources` (slides/videos/readings/assignments/sourceCode/ppt-extra). A PPTE resource is a directory containing `manifest.json` (`{title, slides:[{file, title}]}`) plus one HTML file per slide. App config (imported course list, settings, API keys) is stored in the OS app-data directory.
-
-## Conventions
-
-- UI strings are Chinese; code comments are English.
-- Repo docs: `COURSE_FORMAT.md` (course/PPTE format spec), `PUBLISHING.md` (release process: tag `v*` triggers GitHub Actions builds), `memory/` (debugging reports — append new reports there).
-- This is the public GitHub repo; never commit personal courses, API keys, or `.db` files.
+No implementation work is currently left open. The next step is a real user trial in the installed desktop app, especially a long 20-50 page LectureAI deck, observing page quality, teaching progression, progress visibility, stop latency, and resume behavior. See `memory/2026-08-14-lectureai-pi-websocket.md` for the durable session record.
