@@ -1027,7 +1027,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     if (!token || typeof WebSocket === 'undefined') return null;
     const base = String(this.lectureAiServerUrl || 'https://design.hz-study-system.com').replace(/\/+$/, '');
     const socketBase = base.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
-    return { token, url: `${socketBase}/api/web/ai/pi/bridge?token=${encodeURIComponent(token)}` };
+    return { token, url: `${socketBase}/api/web/ai/pi/bridge` };
   },
 
   _newPiId(prefix) {
@@ -1090,7 +1090,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     }
     this._log('sys', `Pi Agent 已连接 · 第 ${page} 页 · 等待工具计划`);
     return new Promise((resolve, reject) => {
-      const socket = new WebSocket(piConfig.url);
+      const socket = new WebSocket(piConfig.url, ['lectureai.pi.v1', `lectureai.auth.${piConfig.token}`]);
       this._piSocket = socket;
       this._piReject = reject;
       let settled = false;

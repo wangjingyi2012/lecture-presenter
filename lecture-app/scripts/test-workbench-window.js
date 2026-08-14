@@ -972,8 +972,10 @@ async function testPiWebSocketReturnsMatchingToolResult() {
   class FakeWebSocket {
     static CONNECTING = 0;
     static OPEN = 1;
-    constructor(url) {
+    constructor(url, protocols) {
       this.url = url;
+      this.protocols = protocols;
+      FakeWebSocket.last = this;
       this.readyState = FakeWebSocket.CONNECTING;
       setTimeout(() => {
         this.readyState = FakeWebSocket.OPEN;
@@ -1002,9 +1004,11 @@ async function testPiWebSocketReturnsMatchingToolResult() {
   wb._activeTask = { userInstruction: '测试 Pi', piSessionId: 'session-test-1', piDeckId: 'deck-test-1' };
   const planSlide = { page: 1, role: 'content', title: '正文', templateId: 'concept-definition-boundary' };
   const result = await wb._runPiHarnessPage(
-    { targetSlideCount: 1, slides: [planSlide], execution: {} }, planSlide, {}, '', { rounds: 0, tools: 0 }, { url: 'wss://example.test/pi' },
+    { targetSlideCount: 1, slides: [planSlide], execution: {} }, planSlide, {}, '', { rounds: 0, tools: 0 }, { url: 'wss://example.test/pi', token: 'test-token' },
   );
   assert.equal(result, 'Pi 完成');
+  assert.equal(FakeWebSocket.last.url, 'wss://example.test/pi');
+  assert.deepEqual(Array.from(FakeWebSocket.last.protocols), ['lectureai.pi.v1', 'lectureai.auth.test-token']);
   assert.equal(sent[1].type, 'tool_result');
   assert.equal(sent[1].request_id, 'request-7');
   assert.equal(sent[1].ok, true);
