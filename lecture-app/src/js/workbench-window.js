@@ -24,6 +24,8 @@ window.WorkbenchWindow = {
   _stopRequested: false,
   _turnGeneration: 0,
   _activeStreamRequest: null,
+  _piSocket: null,
+  _piReject: null,
   _slashItems: [],
   _slashIndex: 0,
   _pickerMode: null,
@@ -157,6 +159,7 @@ window.WorkbenchWindow = {
     this.skills = Array.isArray(ctx?.skills) ? ctx.skills : [];
     this.currentPage = Number(ctx?.currentPage || ctx?.prefillPage || 0) || null;
     this.aiConfig = ctx?.aiConfig || null;
+    this.lectureAiServerUrl = ctx?.lectureAiServerUrl || 'https://design.hz-study-system.com';
     this.providers = ctx?.providers || [];
     // populate model selector
     const sel = document.getElementById('wb-model');
@@ -955,7 +958,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   _harnessAllowedAction(action, planSlide, directive, mutated) {
     const page = Number(planSlide.page);
     const tool = String(action?.tool || '');
-    if (!['read_slide', 'search_design_examples', 'render_template', 'write_slide', 'validate_slide'].includes(tool)) {
+    if (!['read_slide', 'search_design_examples', 'render_template', 'write_slide', 'insert_slide', 'validate_slide'].includes(tool)) {
       return `分页 Worker 不允许调用 ${tool || '空工具'}`;
     }
     if (['read_slide', 'write_slide', 'validate_slide'].includes(tool) && Number(action.page) !== page) {
@@ -969,6 +972,9 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
       if (directive.mode === 'insert' && Number(action.after) !== directive.after) return `模板必须在第 ${directive.after} 页后插入`;
     }
     if (tool === 'write_slide' && directive.mode === 'insert') return '当前页需要插入，不能用 write_slide 覆盖结束页';
+    if (tool === 'insert_slide' && (directive.mode !== 'insert' || Number(action.after) !== directive.after)) {
+      return `当前页只能插入到第 ${directive.after} 页之后`;
+    }
     if (tool === 'search_design_examples' && mutated) return '页面写入后不能再切换设计方向';
     return '';
   },
@@ -1013,7 +1019,157 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     return this._harnessMutationDirective(planSlide);
   },
 
+  _lecturePiConfig() {
+    const selected = this.selectedConfig || this.aiConfig || {};
+    if (selected.aiProvider !== 'lectureai') return null;
+    const provider = (this.providers || []).find(item => item.id === 'lectureai');
+    const token = String(provider?.config?.aiApiKey || '').trim();
+    if (!token || typeof WebSocket === 'undefined') return null;
+    const base = String(this.lectureAiServerUrl || 'https://design.hz-study-system.com').replace(/\/+$/, '');
+    const socketBase = base.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
+    return { token, url: `${socketBase}/api/web/ai/pi/bridge?token=${encodeURIComponent(token)}` };
+  },
+
+  _newPiId(prefix) {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    if (uuid) return `${prefix}-${uuid}`;
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  },
+
+  _piDeckId(plan) {
+    const existing = String(plan?.execution?.piDeckId || '').trim();
+    if (/^[a-zA-Z0-9._-]{8,120}$/.test(existing)) return existing;
+    const revision = String(plan?.baseRevision?.deckHash || '').replace(/^sha256:/, '');
+    return /^[a-zA-Z0-9._-]{8,120}$/.test(revision) ? revision : this._newPiId('deck');
+  },
+
+  _piToolDetails(action, result) {
+    const text = String(result || '');
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch (_) { /* text tools are normalized below */ }
+    const details = parsed && typeof parsed === 'object' ? parsed : { message: text.slice(0, 12000) };
+    details.label = details.label || text.split('\n')[0].slice(0, 160) || action.tool;
+    if (action.page != null) details.page = Number(action.page);
+    if (action.tool === 'render_template') {
+      details.template_id = action.template_id;
+      details.page = Number(action.page || action.after + 1);
+    }
+    if (action.tool === 'insert_slide') details.page = Number(action.after) + 1;
+    if (action.tool === 'validate_slide') {
+      details.passed = details.passed === true || /合规：未发现|校验通过|"passed"\s*:\s*true/.test(text);
+    }
+    return details;
+  },
+
+  async _executePiTool(message, planSlide, directive, counters) {
+    const action = { ...(message.args || {}), tool: message.tool };
+    const gateError = this._harnessAllowedAction(action, planSlide, directive, false);
+    if (gateError) throw new Error(gateError);
+    counters.tools += 1;
+    const startedAt = this._now();
+    const actionEl = this._logAction(action, counters.tools);
+    const result = await this._rpc('execute-action', { action });
+    this._finishAction(actionEl, startedAt, result);
+    this._logResult(result);
+    if (this._isTerminalToolFailure(result) || this._resultIsError(result)) throw new Error(String(result));
+    if (['render_template', 'write_slide', 'insert_slide'].includes(action.tool)) await this._refreshContext();
+    return this._piToolDetails(action, result);
+  },
+
+  async _runPiHarnessPage(plan, planSlide, summaries, stageGuidance, counters, piConfig) {
+    const page = Number(planSlide.page);
+    const directive = await this._prepareHarnessTarget(planSlide, counters);
+    const sessionId = this._activeTask?.piSessionId || plan.execution?.piSessionId || this._newPiId('session');
+    const deckId = this._activeTask?.piDeckId || this._piDeckId(plan);
+    counters.rounds += 1;
+    this._activeRound = counters.rounds;
+    this._startModelStatus(this._activeRound, 1);
+    if (this._modelStatusEl) {
+      this._modelStatusEl.dataset.summary = `Pi Agent 正在规划第 ${page} 页`;
+      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · Pi Agent 正在规划第 ${page} 页`;
+    }
+    this._log('sys', `Pi Agent 已连接 · 第 ${page} 页 · 等待工具计划`);
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(piConfig.url);
+      this._piSocket = socket;
+      this._piReject = reject;
+      let settled = false;
+      let queue = Promise.resolve();
+      const finish = (error, value) => {
+        if (settled) return;
+        settled = true;
+        if (this._piSocket === socket) this._piSocket = null;
+        if (this._piReject === reject) this._piReject = null;
+        if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'page complete');
+        this._finishModelStatus(error ? 'Pi Agent 执行失败' : `第 ${page} 页完成`);
+        if (error) reject(error); else resolve(value);
+      };
+      socket.onopen = () => {
+        socket.send(JSON.stringify({
+          type: 'start_page', session_id: sessionId, deck_id: deckId,
+          plan, page, directive: {
+            page, templateId: planSlide.templateId || planSlide.template_id || '',
+            mode: directive.mode, after: directive.after,
+          },
+          user_instruction: this._activeTask?.userInstruction || '生成整套课件',
+          stage_guidance: stageGuidance || '',
+        }));
+      };
+      socket.onmessage = event => {
+        queue = queue.then(async () => {
+          const message = JSON.parse(String(event.data || '{}'));
+          if (message.type === 'tool_call') {
+            if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 正在执行 ${message.tool} · ${this._duration(this._modelStartedAt)}`;
+            this._log('sys', `Pi 工具计划 · 第 ${page} 页 · ${message.tool}`);
+            try {
+              const result = await this._executePiTool(message, planSlide, directive, counters);
+              if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
+                type: 'tool_result',
+                ['request_id']: message.request_id,
+                ok: true,
+                result,
+              }));
+            } catch (error) {
+              if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
+                type: 'tool_result',
+                ['request_id']: message.request_id,
+                ok: false,
+                error: this._modelErrorMessage(error),
+              }));
+            }
+            return;
+          }
+          if (message.type === 'progress' || message.type === 'session_started') {
+            const label = message.label || `Pi 会话已启动 · 第 ${page} 页`;
+            this._log('sys', label);
+            return;
+          }
+          if (message.type === 'page_complete') {
+            const narrative = planSlide.narrative || {};
+            finish(null, String(message.summary || narrative.keyTakeaway || planSlide.visualIntent || planSlide.title).slice(0, 1200));
+            return;
+          }
+          if (message.type === 'paused') {
+            finish(new Error('用户取消了当前任务'));
+            return;
+          }
+          if (message.type === 'error') finish(new Error(message.error || `第 ${page} 页 Pi Agent 执行失败`));
+        }).catch(error => finish(error));
+      };
+      socket.onerror = () => finish(new Error('无法连接 LectureAI Pi WebSocket'));
+      socket.onclose = event => {
+        if (!settled) finish(new Error(this._stopRequested ? '用户取消了当前任务' : `LectureAI Pi 连接已关闭（${event.code}）`));
+      };
+    });
+  },
+
   async _runHarnessPage(plan, planSlide, summaries, stageGuidance, counters) {
+    const piConfig = this._lecturePiConfig();
+    if (piConfig) return this._runPiHarnessPage(plan, planSlide, summaries, stageGuidance, counters, piConfig);
+    return this._runLegacyHarnessPage(plan, planSlide, summaries, stageGuidance, counters);
+  },
+
+  async _runLegacyHarnessPage(plan, planSlide, summaries, stageGuidance, counters) {
     const page = Number(planSlide.page);
     const directive = await this._prepareHarnessTarget(planSlide, counters);
     const messages = [
@@ -1062,7 +1218,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
       this._finishAction(actionEl, actionStartedAt, result);
       this._logResult(result);
       if (this._isTerminalToolFailure(result) || this._resultIsError(result)) throw new Error(String(result));
-      if (['render_template', 'write_slide'].includes(action.tool)) {
+      if (['render_template', 'write_slide', 'insert_slide'].includes(action.tool)) {
         mutated = true;
         validated = false;
         await this._refreshContext();
@@ -1093,7 +1249,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   },
 
   async _persistHarnessExecution(plan, execution) {
-    plan.execution = { schemaVersion: 1, ...execution, updatedAt: new Date().toISOString() };
+    plan.execution = { ...(plan.execution || {}), schemaVersion: 1, ...execution, updatedAt: new Date().toISOString() };
     const result = await this._rpc('execute-action', { action: { tool: 'set_deck_plan', plan } });
     if (this._resultIsError(result)) throw new Error(String(result));
   },
@@ -1172,8 +1328,13 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     const summaries = { ...(previous.summaries || {}) };
     const completedPages = Array.isArray(previous.completedPages) ? [...new Set(previous.completedPages.map(Number))] : [];
     const stageReviews = Array.isArray(previous.stageReviews) ? [...previous.stageReviews] : [];
+    const piSessionId = previous.piSessionId || this._newPiId('session');
+    const piDeckId = this._piDeckId(plan);
+    plan.execution = { ...previous, schemaVersion: 1, piSessionId, piDeckId };
     const counters = { rounds: 0, tools: 0 };
     this._activeTask.userInstruction = userInstruction;
+    this._activeTask.piSessionId = piSessionId;
+    this._activeTask.piDeckId = piDeckId;
     this._log('sys', `分页 Harness 已启动 · ${plan.targetSlideCount} 页 · 每页独立上下文`);
     try {
       for (const planSlide of plan.slides || []) {
@@ -1290,6 +1451,17 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   _requestStop() {
     if (!this.busy) return;
     this._stopRequested = true;
+    const piSocket = this._piSocket;
+    this._piSocket = null;
+    const piReject = this._piReject;
+    this._piReject = null;
+    if (piSocket?.readyState === 1) {
+      try { piSocket.send(JSON.stringify({ type: 'stop' })); } catch (_) { /* closing below is authoritative */ }
+      piSocket.close(1000, 'user stop');
+    } else if (piSocket?.readyState === 0) {
+      piSocket.close();
+    }
+    if (piReject) piReject(new Error('用户取消了当前任务'));
     this._turnGeneration += 1;
     this._stopModelStatusTimer();
     const request = this._activeStreamRequest;

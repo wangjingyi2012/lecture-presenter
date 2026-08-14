@@ -961,6 +961,61 @@ async function testPageHarnessResetsMessagesBetweenSlides() {
   assert.deepEqual(calls[3].templateIds, ['template-2']);
 }
 
+async function testPiWebSocketReturnsMatchingToolResult() {
+  const OriginalWebSocket = context.WebSocket;
+  const originalPrepare = wb._prepareHarnessTarget;
+  const originalExecute = wb._executePiTool;
+  const originalLog = wb._log;
+  const originalStartStatus = wb._startModelStatus;
+  const originalFinishStatus = wb._finishModelStatus;
+  const sent = [];
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    constructor(url) {
+      this.url = url;
+      this.readyState = FakeWebSocket.CONNECTING;
+      setTimeout(() => {
+        this.readyState = FakeWebSocket.OPEN;
+        this.onopen();
+      }, 0);
+    }
+    send(raw) {
+      const message = JSON.parse(raw);
+      sent.push(message);
+      if (message.type === 'start_page') {
+        setTimeout(() => this.onmessage({ data: JSON.stringify({
+          type: 'tool_call', ['request' + '_id']: 'request-7', tool: 'validate_slide', args: { page: 1 },
+        }) }), 0);
+      } else if (message.type === 'tool_result') {
+        setTimeout(() => this.onmessage({ data: JSON.stringify({ type: 'page_complete', page: 1, summary: 'Pi 完成' }) }), 0);
+      }
+    }
+    close() { this.readyState = 3; }
+  }
+  context.WebSocket = FakeWebSocket;
+  wb._prepareHarnessTarget = async () => ({ mode: 'replace', after: null });
+  wb._executePiTool = async () => ({ passed: true });
+  wb._log = () => {};
+  wb._startModelStatus = () => {};
+  wb._finishModelStatus = () => {};
+  wb._activeTask = { userInstruction: '测试 Pi', piSessionId: 'session-test-1', piDeckId: 'deck-test-1' };
+  const planSlide = { page: 1, role: 'content', title: '正文', templateId: 'concept-definition-boundary' };
+  const result = await wb._runPiHarnessPage(
+    { targetSlideCount: 1, slides: [planSlide], execution: {} }, planSlide, {}, '', { rounds: 0, tools: 0 }, { url: 'wss://example.test/pi' },
+  );
+  assert.equal(result, 'Pi 完成');
+  assert.equal(sent[1].type, 'tool_result');
+  assert.equal(sent[1].request_id, 'request-7');
+  assert.equal(sent[1].ok, true);
+  context.WebSocket = OriginalWebSocket;
+  wb._prepareHarnessTarget = originalPrepare;
+  wb._executePiTool = originalExecute;
+  wb._log = originalLog;
+  wb._startModelStatus = originalStartStatus;
+  wb._finishModelStatus = originalFinishStatus;
+}
+
 async function testAgentImportsSelectedExternalSkillFolder() {
   const calls = [];
   agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
@@ -996,6 +1051,7 @@ async function testAgentImportsSelectedExternalSkillFolder() {
   await testPlannedPlaceholderRoleConversion();
   await testPrivateTemplateRenderUsesServerHtmlAndSafeSave();
   await testPageHarnessResetsMessagesBetweenSlides();
+  await testPiWebSocketReturnsMatchingToolResult();
   await testAgentImportsSelectedExternalSkillFolder();
 })()
   .then(() => console.log('test-workbench-window: all assertions passed'))
