@@ -564,9 +564,10 @@
         <div class="ppt-export-wrap">
           <button id="ppt-extra-export" title="导出为 PowerPoint" aria-expanded="false"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>
           <div id="ppt-export-menu" class="ppt-export-menu hidden">
-            <button type="button" data-export-mode="animate">动画导出<span class="ppt-export-menu-desc">一页一幻灯片，原生点击淡入淡出（Beta）</span></button>
-            <button type="button" data-export-mode="steps">分步展开导出<span class="ppt-export-menu-desc">每个动画步骤一页，可编辑</span></button>
-            <button type="button" data-export-mode="static">静态导出<span class="ppt-export-menu-desc">每页保留最终画面</span></button>
+            <button type="button" data-export-mode="image">图片版导出<span class="ppt-export-menu-desc">图片版 · 免费不限次</span></button>
+            <button type="button" data-export-mode="animate" data-export-editable>动画导出<span class="ppt-export-menu-desc">可编辑 · 原生点击动画</span></button>
+            <button type="button" data-export-mode="steps" data-export-editable>分步展开导出<span class="ppt-export-menu-desc">可编辑 · 每个动画步骤一页</span></button>
+            <button type="button" data-export-mode="static" data-export-editable>静态导出<span class="ppt-export-menu-desc">可编辑 · 每页保留最终画面</span></button>
           </div>
         </div>
         <button id="ppt-extra-speaker" title="演讲者模式 (S)" style="display:none"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg></button>
@@ -728,6 +729,7 @@
 
   <script src="vendor/pdf.min.js"></script>
   <script src="vendor/pptxgen.bundle.js"></script>
+  <script src="vendor/html-to-image.js"></script>
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/highlight.min.js"></script>
   <script src="js/tracker.js"></script>
@@ -738,7 +740,7 @@
   <script src="js/video-player.js"></script>
   <script src="js/md-viewer.js"></script>
   <script src="js/html-viewer.js"></script>
-  <script src="js/ppte-ppt-exporter.js"></script>
+  <script src="js/ppte-image-exporter.js"></script>
   <script src="js/ppte-annotator.js"></script>
   <script src="js/live-caption.js"></script>
   <script src="js/ppt-extra-viewer.js"></script>

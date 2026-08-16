@@ -1,6 +1,6 @@
 {
   "name": "lecture-app",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "private": true,
   "scripts": {
     "tauri": "tauri",
@@ -13,8 +13,7 @@
     "test:captions": "node scripts/test-live-caption.js",
     "test:course-manager": "node scripts/test-course-manager.js",
     "test:workbench": "node scripts/test-workbench-window.js",
-    "test:ppt-export": "node scripts/test-ppt-exporter-steps.js",
-    "test:ppt-export-animate": "node scripts/test-ppt-exporter-animate.js",
+    "test:ppt-export-gating": "node scripts/test-ppt-export-gating.js",
     "build:release": "node scripts/build-obfuscated.js",
     "encrypt-prompts": "node scripts/encrypt-prompts.js"
   },

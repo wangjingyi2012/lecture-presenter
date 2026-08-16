@@ -32,8 +32,7 @@ npm run test:captions        # scripts/test-live-caption.js (caption transcript 
 npm run test:course-manager  # scripts/test-course-manager.js (course grouping/switcher logic)
 node scripts/test-auth.js    # auth UI logic (no npm script alias)
 npm run test:workbench       # scripts/test-workbench-window.js (AI workbench, deck Harness, Pi bridge)
-npm run test:ppt-export      # scripts/test-ppt-exporter-steps.js (PPTX export step driving)
-npm run test:ppt-export-animate # scripts/test-ppt-exporter-animate.js (PPTX animation plan)
+npm run test:ppt-export-gating # scripts/test-ppt-export-gating.js (PPTX export login/quota gating)
 
 cargo check            # run inside src-tauri/ to type-check Rust
 cargo test             # run inside src-tauri/ — unit tests in lib.rs plus tests/info_plist.rs
@@ -51,7 +50,7 @@ There is no bundler, framework, or lint step: the frontend is plain HTML/CSS/JS 
 - `audience.html` — separate Tauri window shown to the audience in speaker mode; receives `slide-change` events and emits `audience-navigate` events back.
 - `js/*.js` — plain scripts, each defining one global object (e.g. `PptExtraViewer`, `CourseLoader`, `Content`). No modules/imports; load order is set by `<script>` tags in `index.html`. `app.js` installs global error logging (`window.errorLogs`) and calls each component's `init()` on DOMContentLoaded.
 - Frontend ↔ backend via `window.__TAURI__.core.invoke(...)` and `window.__TAURI__.event` — guarded by `if (window.__TAURI__)` so browser dev mode degrades to `fetch`.
-- `vendor/` holds third-party browser libs (pdf.js, marked, highlight.js, pptxgenjs bundle) loaded via `<script>`/`<link>`; these are not obfuscated.
+- `vendor/` holds third-party browser libs (pdf.js, marked, highlight.js, pptxgenjs bundle, html-to-image) loaded via `<script>`/`<link>`; these are not obfuscated.
 
 Key frontend modules:
 
@@ -126,9 +125,14 @@ Navigation events flow from slide iframes via `postMessage({type:'slide-navigate
 
 Annotator styles live in `css/ppte-annotator.css` and must be loaded via `<link>`, not runtime `<style>` injection: the production CSP blocks inline styles on pages that already have them. `npm run test:annotator` covers the overlay logic.
 
-### PPTX export (js/ppte-ppt-exporter.js)
+### PPTX export (js/ppte-image-exporter.js + Rust `export_pptx_editable`)
 
-`PptePptExporter.export(viewer, {mode, onProgress})` converts the loaded PPTE HTML slides into an editable `.pptx` via the `pptxgenjs` dependency (`LAYOUT_WIDE`, 13.33×7.5in / 1920×1080 render basis). It loads each slide in a hidden iframe and extracts native elements (text boxes, autoshapes, embedded images) — no rasterization. Three modes, chosen from the dropdown next to `#ppt-extra-export`: `static` drives stepped templates to their final state and exports one page per slide; `steps` dispatches `ArrowRight` keydowns into the slide document (templates consume them via `preventDefault` per the `data-step`/`data-max-step` contract) and exports one page per animation step; `animate` exports one PPTX page per source slide and binds elements to native on-click fade in/out animations — elements are stamped with `data-ppt-export-id` in the iframe DOM, `_buildAnimationPlan` tracks per-element visibility/signature runs across steps (content changes become exit+enter variants), animated objects get `objectName: "pptr<N>"`, and the Rust `save_pptx_file` command patches a `<p:timing>` tree (fade = presetID 10 entr/exit) into each slide XML via the `zip` crate. The injected export stylesheet kills CSS transitions/animations (snapshots only need end states) and hides viewer chrome (`.step-rail`/`.term-rail`/`.progress`/`.scene-progress`, scoped to `[data-template]` pages). This is the only feature using `pptxgenjs`; the step-driving and animation-plan logic are covered by `npm run test:ppt-export` and `npm run test:ppt-export-animate`, the zip/XML patching by `cargo test` (`pptx_animation_tests`).
+The dropdown next to `#ppt-extra-export` offers four modes. All modes require login (`Auth.isLoggedIn()`, enforced in `PptExtraViewer.exportToPpt`); the three editable modes additionally consume the monthly membership quota.
+
+- `image` (免费不限次): `PpteImageExporter.export(viewer, {onProgress})` renders each slide in a hidden srcdoc iframe (1920×1080 render basis), drives stepped templates to their final state via ArrowRight keydowns (the `data-step`/`data-max-step` `preventDefault` contract), inlines local `slide://`/`slide.localhost` images as data URIs (the SVG foreignObject used by the `html-to-image` vendor lib cannot fetch them), rasterizes at `pixelRatio: 2`, and places one full-bleed picture per page via the `pptxgenjs` vendor bundle (`LAYOUT_WIDE`, 13.33×7.5in). Saved through `save_pptx_file`.
+- `static`/`steps`/`animate` (可编辑): the viewer fetches `GET {serverUrl}/api/web/desktop/pptx-export/quota` (Bearer) — 401 opens the login modal, `remaining<=0` alerts and offers the membership page. With quota, the Rust `export_pptx_editable` command zips the whole PPTE directory (excluding `.DS_Store`), multipart-POSTs it (`file`=zip, `mode`) to `{serverUrl}/api/web/desktop/pptx-export` with a 300s timeout, and saves the returned pptx via the shared save-dialog tail of `save_pptx_file`. Non-200 `{"detail"}` bodies pass through as the error; 401 is prefixed `unauthorized: ` so the frontend pops the login modal. Menu descriptions show `可编辑 · 本月剩 N 次`, refreshed from the quota endpoint each time the menu opens.
+
+The injected export stylesheet kills CSS transitions/animations (snapshots only need end states) and hides viewer chrome (`.step-rail`/`.term-rail`/`.progress`/`.scene-progress`, scoped to `[data-template]` pages). `pptxgenjs` and `html-to-image` are only used by the image exporter; the login/quota gating is covered by `npm run test:ppt-export-gating`.
 
 ### Page reuse: shared groups (js/ppte-shared-groups.js) and resource center (js/resource-center.js)
 

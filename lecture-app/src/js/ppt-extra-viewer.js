@@ -751,21 +751,59 @@ const PptExtraViewer = {
     if (menu) menu.classList.toggle('hidden', !this.isExportMenuOpen);
     const btn = document.getElementById('ppt-extra-export');
     if (btn) btn.setAttribute('aria-expanded', this.isExportMenuOpen ? 'true' : 'false');
+    if (this.isExportMenuOpen) this._refreshExportMenuQuota();
+  },
+
+  // Refreshes the editable-mode menu descriptions with the live quota.
+  async _refreshExportMenuQuota() {
+    const descs = document.querySelectorAll('#ppt-export-menu [data-export-editable] .ppt-export-menu-desc');
+    if (!descs.length) return;
+    const setText = text => descs.forEach(desc => { desc.textContent = text; });
+    if (!window.Auth?.isLoggedIn?.()) {
+      setText('登录后可用');
+      return;
+    }
+    try {
+      const quota = await this._fetchPptxExportQuota();
+      if (quota.unauthorized) {
+        setText('登录后可用');
+        return;
+      }
+      const remaining = Number.isFinite(quota.remaining) ? quota.remaining : '?';
+      setText(`可编辑 · 本月剩 ${remaining} 次`);
+    } catch (e) {
+      setText('可编辑导出');
+    }
+  },
+
+  async _fetchPptxExportQuota() {
+    const serverUrl = (window.Auth?.serverUrl || 'https://design.hz-study-system.com').replace(/\/+$/, '');
+    const token = window.Auth?.getToken?.() || '';
+    const response = await fetch(`${serverUrl}/api/web/desktop/pptx-export/quota`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (response.status === 401) return { unauthorized: true };
+    if (!response.ok) throw new Error(`导出额度查询失败（${response.status}）`);
+    return response.json();
   },
 
   async exportToPpt(mode) {
+    // Every PPTX export requires an account; the editable modes additionally
+    // consume the monthly quota checked in _exportEditablePptx.
+    if (!window.Auth?.isLoggedIn?.()) {
+      window.Auth?.showLoginModal?.();
+      return;
+    }
+
     const btn = document.getElementById('ppt-extra-export');
     const originalHtml = btn.innerHTML;
     btn.disabled = true;
     btn.textContent = '导出中...';
 
     try {
-      const savedPath = await PptePptExporter.export(this, {
-        mode,
-        onProgress: (done, total) => {
-          btn.textContent = `导出中 ${done}/${total}`;
-        }
-      });
+      const savedPath = mode === 'image'
+        ? await this._exportImagePptx(btn)
+        : await this._exportEditablePptx(mode, btn);
       if (savedPath) {
         alert(`PPT 导出完成：\n${savedPath}`);
       }
@@ -776,6 +814,58 @@ const PptExtraViewer = {
     } finally {
       btn.disabled = false;
       btn.innerHTML = originalHtml;
+    }
+  },
+
+  _exportImagePptx(btn) {
+    return PpteImageExporter.export(this, {
+      onProgress: (done, total) => {
+        btn.textContent = `导出中 ${done}/${total}`;
+      }
+    });
+  },
+
+  // Editable export renders on the server: check quota, then hand the PPTE
+  // directory to the export_pptx_editable command which packs, uploads and
+  // saves the returned pptx through a save dialog.
+  async _exportEditablePptx(mode, btn) {
+    const quota = await this._fetchPptxExportQuota();
+    if (quota.unauthorized) {
+      window.Auth?.showLoginModal?.();
+      return null;
+    }
+    if (!(quota.remaining > 0)) {
+      const used = Number.isFinite(quota.used) ? quota.used : '?';
+      const limit = Number.isFinite(quota.limit) ? quota.limit : '?';
+      alert(`本月可编辑导出额度已用完（${used}/${limit}），升级会员可获得更多额度。`);
+      const membershipUrl = window.Auth?.membershipUrl || 'https://design.hz-study-system.com/membership';
+      if (confirm('是否前往会员页面了解详情？')) {
+        if (window.__TAURI__?.shell?.open) window.__TAURI__.shell.open(membershipUrl);
+        else window.open(membershipUrl, '_blank', 'noopener');
+      }
+      return null;
+    }
+
+    btn.textContent = '上传并生成中…';
+    const baseName = this.manifest?.title || this.title || 'PPTE导出';
+    const suffix = mode === 'steps' ? '-分步版' : mode === 'animate' ? '-动画版' : '';
+    const defaultName = `${String(`${baseName}${suffix}`).replace(/[\\/:*?"<>|]/g, '_').trim() || 'PPTE导出'}.pptx`;
+    const serverUrl = (window.Auth?.serverUrl || 'https://design.hz-study-system.com').replace(/\/+$/, '');
+    try {
+      return await window.__TAURI__.core.invoke('export_pptx_editable', {
+        dirPath: this.basePath,
+        mode,
+        token: window.Auth?.getToken?.() || '',
+        serverUrl,
+        defaultName
+      });
+    } catch (e) {
+      const message = String(e && e.message ? e.message : e);
+      if (message.startsWith('unauthorized:')) {
+        window.Auth?.showLoginModal?.();
+        return null;
+      }
+      throw e;
     }
   },
 
