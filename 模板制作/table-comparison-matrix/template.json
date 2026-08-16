@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "table-comparison-matrix",
+  "version": "0.1.0",
+  "name": "横向方案对比表",
+  "family": "table",
+  "roles": ["content", "reference"],
+  "contentKinds": ["comparison", "selection", "tradeoff", "protocol-comparison", "version-difference"],
+  "density": ["medium", "high"],
+  "motionModes": ["none"],
+  "maxItems": 6,
+  "slots": {
+    "title": {"type": "text", "required": true, "maxChars": 36},
+    "lead": {"type": "text", "required": false, "maxChars": 110},
+    "dimensionLabel": {"type": "text", "required": true, "maxChars": 12},
+    "options": {"type": "option-list", "required": true, "minItems": 2, "maxItems": 5},
+    "rows": {"type": "comparison-row-list", "required": true, "minItems": 3, "maxItems": 8}
+  },
+  "themeTokens": ["text", "muted", "primary", "line", "surface", "headerText", "positive", "caution"],
+  "constraints": {
+    "rootSelector": "[data-template=table-comparison-matrix]",
+    "requiredSelectors": [".content-area", ".comparison-table", "[data-comparison-row]"],
+    "maxOptions": 5,
+    "maxRows": 8,
+    "hostNavigation": "page-only",
+    "reducedMotion": "not-applicable",
+    "fontUnit": "vw"
+  },
+  "avoid": ["对象数量超过5个的复杂矩阵", "需要按时间顺序讲解的流程", "每格超过两行的长篇论证"],
+  "source": {
+    "originalPage": "slide22.html",
+    "sourceCourse": "MCP协议",
+    "analysis": "首列是统一对比维度，后续列是多个候选方案；适合并列比较状态、形态、范围、认证和适用场景。"
+  }
+}

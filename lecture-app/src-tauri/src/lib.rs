@@ -888,6 +888,33 @@ fn inject_slide_bridge(file_path: &str, mut content: Vec<u8>) -> Vec<u8> {
     content
 }
 
+fn extract_html_script_body(content: &[u8], requested_index: usize) -> Option<Vec<u8>> {
+    let source = String::from_utf8_lossy(content);
+    let lower = source.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    let mut script_index = 0usize;
+
+    while let Some(relative_start) = lower[cursor..].find("<script") {
+        let start = cursor + relative_start;
+        let name_end = start + "<script".len();
+        let boundary = lower.as_bytes().get(name_end).copied();
+        if !matches!(boundary, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')) {
+            cursor = name_end;
+            continue;
+        }
+        let open_end = lower[name_end..].find('>')? + name_end;
+        let body_start = open_end + 1;
+        let close_start = lower[body_start..].find("</script")? + body_start;
+        let close_end = lower[close_start..].find('>')? + close_start + 1;
+        if script_index == requested_index {
+            return Some(source.as_bytes()[body_start..close_start].to_vec());
+        }
+        script_index += 1;
+        cursor = close_end;
+    }
+    None
+}
+
 fn parse_range_header(range: &str, total_len: u64) -> Option<(u64, u64)> {
     let value = range.strip_prefix("bytes=")?;
     let (start_raw, end_raw) = value.split_once('-')?;
@@ -1321,8 +1348,28 @@ async fn lectureai_render_template(
     serde_json::from_str(&text).map_err(|e| format!("模板渲染响应格式错误：{}", e))
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PptxClickGroup {
+    #[serde(default)]
+    pub enter: Vec<String>,
+    #[serde(default)]
+    pub exit: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PptxSlideAnimation {
+    pub slide: u32,
+    pub clicks: Vec<PptxClickGroup>,
+}
+
 #[tauri::command]
-async fn save_pptx_file(app_handle: tauri::AppHandle, default_name: String, bytes: Vec<u8>) -> Result<String, String> {
+async fn save_pptx_file(
+    app_handle: tauri::AppHandle,
+    default_name: String,
+    bytes: Vec<u8>,
+    animation: Option<Vec<PptxSlideAnimation>>,
+) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let file_name = if default_name.trim().is_empty() {
@@ -1331,6 +1378,11 @@ async fn save_pptx_file(app_handle: tauri::AppHandle, default_name: String, byte
         default_name
     } else {
         format!("{}.pptx", default_name)
+    };
+
+    let bytes = match animation {
+        Some(ref manifest) if !manifest.is_empty() => patch_pptx_animations(&bytes, manifest)?,
+        _ => bytes,
     };
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1350,6 +1402,287 @@ async fn save_pptx_file(app_handle: tauri::AppHandle, default_name: String, byte
 
     fs::write(&path, bytes).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Rewrites a pptx package, injecting a `<p:timing>` animation tree into every
+/// slide listed in the manifest. Shapes are located by the `pptr<N>` objectName
+/// the exporter stamps via pptxgenjs `objectName`.
+pub fn patch_pptx_animations(bytes: &[u8], manifest: &[PptxSlideAnimation]) -> Result<Vec<u8>, String> {
+    use std::io::{Cursor, Read, Write};
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let anim_by_slide: std::collections::HashMap<u32, &PptxSlideAnimation> =
+        manifest.iter().map(|a| (a.slide, a)).collect();
+
+    let mut out = Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(&mut out);
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(entry.compression());
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).map_err(|e| e.to_string())?;
+        writer.start_file(&name, options).map_err(|e| e.to_string())?;
+
+        let slide_num = name
+            .strip_prefix("ppt/slides/slide")
+            .and_then(|s| s.strip_suffix(".xml"))
+            .and_then(|s| s.parse::<u32>().ok());
+        if let Some(num) = slide_num {
+            if let Some(anim) = anim_by_slide.get(&num) {
+                let xml = String::from_utf8(data).map_err(|e| e.to_string())?;
+                let patched = patch_slide_xml(&xml, &anim.clicks);
+                writer.write_all(patched.as_bytes()).map_err(|e| e.to_string())?;
+                continue;
+            }
+        }
+        writer.write_all(&data).map_err(|e| e.to_string())?;
+    }
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(out.into_inner())
+}
+
+/// Maps `pptr<N>` shape names to their `p:cNvPr` ids and injects the timing tree.
+/// Unknown names are skipped so a single missing shape never fails the export.
+fn patch_slide_xml(xml: &str, clicks: &[PptxClickGroup]) -> String {
+    let name_to_spid = scan_pptr_shape_ids(xml);
+
+    let mut resolved: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+    for group in clicks {
+        let resolve = |names: &[String]| -> Vec<u32> {
+            names
+                .iter()
+                .filter_map(|n| match name_to_spid.get(n) {
+                    Some(&id) => Some(id),
+                    None => {
+                        eprintln!("pptx animation: shape {} not found in slide xml", n);
+                        None
+                    }
+                })
+                .collect()
+        };
+        let exits = resolve(&group.exit);
+        let enters = resolve(&group.enter);
+        if !exits.is_empty() || !enters.is_empty() {
+            resolved.push((exits, enters));
+        }
+    }
+    if resolved.is_empty() {
+        return xml.to_string();
+    }
+
+    let timing = build_timing_xml(&resolved);
+    match xml.rfind("</p:sld>") {
+        Some(pos) => format!("{}{}</p:sld>", &xml[..pos], timing),
+        None => xml.to_string(),
+    }
+}
+
+/// Scans `<p:cNvPr id="N" name="pptrM"` attributes (pptxgenjs always emits id first).
+fn scan_pptr_shape_ids(xml: &str) -> std::collections::HashMap<String, u32> {
+    let mut map = std::collections::HashMap::new();
+    let mut rest = xml;
+    while let Some(pos) = rest.find("<p:cNvPr id=\"") {
+        let after = &rest[pos + "<p:cNvPr id=\"".len()..];
+        let Some(id_end) = after.find('"') else { break };
+        let Ok(id) = after[..id_end].parse::<u32>() else {
+            rest = &after[id_end..];
+            continue;
+        };
+        let Some(tag_end) = after.find('>') else { break };
+        let tag = &after[..tag_end];
+        if let Some(name_pos) = tag.find("name=\"") {
+            let name_rest = &tag[name_pos + 6..];
+            if let Some(name_end) = name_rest.find('"') {
+                let name = &name_rest[..name_end];
+                if name.starts_with("pptr") {
+                    map.insert(name.to_string(), id);
+                }
+            }
+        }
+        rest = &after[tag_end..];
+    }
+    map
+}
+
+/// Builds a `<p:timing>` mainSeq with one click group per click. Exits run before
+/// enters within a click; the first effect of a group is clickEffect, the rest
+/// withEffect. Structure follows the ECMA-376 §19.5.70 PowerPoint envelope:
+/// fade = presetID 10, presetClass entr/exit, presetSubtype 0.
+fn build_timing_xml(click_groups: &[(Vec<u32>, Vec<u32>)]) -> String {
+    let mut next_id: u32 = 3; // 1 = tmRoot, 2 = mainSeq
+    let mut groups_xml = String::new();
+    let mut bld_xml = String::new();
+
+    for (exits, enters) in click_groups {
+        let click_par_id = next_id;
+        next_id += 1;
+        let group_par_id = next_id;
+        next_id += 1;
+
+        let mut effects_xml = String::new();
+        let mut first_effect = true;
+        for (spid, is_exit) in exits.iter().map(|s| (s, true)).chain(enters.iter().map(|s| (s, false))) {
+            let effect_id = next_id;
+            next_id += 1;
+            let set_id = next_id;
+            next_id += 1;
+            let anim_id = next_id;
+            next_id += 1;
+            let node_type = if first_effect { "clickEffect" } else { "withEffect" };
+            first_effect = false;
+            let (preset_class, transition, visibility, visibility_delay) = if is_exit {
+                // Let the fade-out remain visible for its full duration, then
+                // hide the object. Hiding at delay=0 makes the exit fade vanish.
+                ("exit", "out", "hidden", 500)
+            } else {
+                ("entr", "in", "visible", 0)
+            };
+            effects_xml.push_str(&format!(
+                "<p:par><p:cTn id=\"{effect_id}\" presetID=\"10\" presetClass=\"{preset_class}\" presetSubtype=\"0\" fill=\"hold\" grpId=\"0\" nodeType=\"{node_type}\">\
+                 <p:stCondLst><p:cond delay=\"0\"/></p:stCondLst><p:childTnLst>\
+                 <p:set><p:cBhvr><p:cTn id=\"{set_id}\" dur=\"1\" fill=\"hold\"><p:stCondLst><p:cond delay=\"{visibility_delay}\"/></p:stCondLst></p:cTn>\
+                 <p:tgtEl><p:spTgt spid=\"{spid}\"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr>\
+                 <p:to><p:strVal val=\"{visibility}\"/></p:to></p:set>\
+                 <p:animEffect transition=\"{transition}\" filter=\"fade\"><p:cBhvr><p:cTn id=\"{anim_id}\" dur=\"500\"/>\
+                 <p:tgtEl><p:spTgt spid=\"{spid}\"/></p:tgtEl></p:cBhvr></p:animEffect>\
+                 </p:childTnLst></p:cTn></p:par>"
+            ));
+            bld_xml.push_str(&format!("<p:bldP spid=\"{spid}\" grpId=\"0\"/>"));
+        }
+
+        groups_xml.push_str(&format!(
+            "<p:par><p:cTn id=\"{click_par_id}\" fill=\"hold\"><p:stCondLst><p:cond delay=\"indefinite\"/></p:stCondLst><p:childTnLst>\
+             <p:par><p:cTn id=\"{group_par_id}\" fill=\"hold\"><p:stCondLst><p:cond delay=\"0\"/></p:stCondLst><p:childTnLst>\
+             {effects_xml}</p:childTnLst></p:cTn></p:par>\
+             </p:childTnLst></p:cTn></p:par>"
+        ));
+    }
+
+    format!(
+        "<p:timing><p:tnLst><p:par><p:cTn id=\"1\" dur=\"indefinite\" restart=\"never\" nodeType=\"tmRoot\"><p:childTnLst>\
+         <p:seq concurrent=\"1\" nextAc=\"seek\"><p:cTn id=\"2\" dur=\"indefinite\" nodeType=\"mainSeq\"><p:childTnLst>\
+         {groups_xml}</p:childTnLst></p:cTn>\
+         <p:prevCondLst><p:cond evt=\"onPrev\" delay=\"0\"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst>\
+         <p:nextCondLst><p:cond evt=\"onNext\" delay=\"0\"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst>\
+         </p:seq></p:childTnLst></p:cTn></p:par></p:tnLst>\
+         <p:bldLst>{bld_xml}</p:bldLst></p:timing>"
+    )
+}
+
+#[cfg(test)]
+mod pptx_animation_tests {
+    use super::*;
+
+    fn slide_xml() -> String {
+        "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld><p:spTree>\
+         <p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\
+         <p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"pptr1\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>\
+         <p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"pptr2\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>\
+         <p:sp><p:nvSpPr><p:cNvPr id=\"4\" name=\"Title 1\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>\
+         </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"/></p:clrMapOvr></p:sld>"
+            .to_string()
+    }
+
+    fn group(enter: &[&str], exit: &[&str]) -> PptxClickGroup {
+        PptxClickGroup {
+            enter: enter.iter().map(|s| s.to_string()).collect(),
+            exit: exit.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn scan_finds_only_pptr_names() {
+        let map = scan_pptr_shape_ids(&slide_xml());
+        assert_eq!(map.get("pptr1"), Some(&2));
+        assert_eq!(map.get("pptr2"), Some(&3));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn patch_injects_timing_before_sld_close() {
+        let clicks = vec![group(&["pptr2"], &["pptr1"])];
+        let patched = patch_slide_xml(&slide_xml(), &clicks);
+        assert!(patched.contains("<p:timing>"));
+        let timing_pos = patched.find("<p:timing>").unwrap();
+        let close_pos = patched.find("</p:sld>").unwrap();
+        assert!(timing_pos < close_pos);
+        assert!(patched.contains("presetClass=\"entr\""));
+        assert!(patched.contains("presetClass=\"exit\""));
+        assert!(patched.contains("spid=\"3\""));
+        assert!(patched.contains("spid=\"2\""));
+        assert!(patched.contains("<p:bldP spid=\"3\" grpId=\"0\"/>"));
+        // exit runs first within the click group
+        let exit_pos = patched.find("presetClass=\"exit\"").unwrap();
+        let entr_pos = patched.find("presetClass=\"entr\"").unwrap();
+        assert!(exit_pos < entr_pos);
+    }
+
+    #[test]
+    fn patch_skips_unknown_shapes_and_empty_groups() {
+        let clicks = vec![group(&["pptr999"], &[])];
+        let patched = patch_slide_xml(&slide_xml(), &clicks);
+        assert!(!patched.contains("<p:timing>"));
+        assert_eq!(patched, slide_xml());
+    }
+
+    #[test]
+    fn multi_click_groups_use_click_then_with_effects() {
+        let clicks = vec![group(&["pptr1", "pptr2"], &[]), group(&["pptr2"], &["pptr1"])];
+        let patched = patch_slide_xml(&slide_xml(), &clicks);
+        assert_eq!(patched.matches("nodeType=\"clickEffect\"").count(), 2);
+        assert_eq!(patched.matches("nodeType=\"withEffect\"").count(), 2);
+        assert!(patched.contains("nodeType=\"mainSeq\""));
+        assert!(patched.contains("evt=\"onNext\""));
+    }
+
+    #[test]
+    fn exit_visibility_waits_until_fade_finishes() {
+        let clicks = vec![group(&[], &["pptr1"]), group(&["pptr2"], &[])];
+        let patched = patch_slide_xml(&slide_xml(), &clicks);
+        assert!(patched.contains(
+            "dur=\"1\" fill=\"hold\"><p:stCondLst><p:cond delay=\"500\"/></p:stCondLst>"
+        ));
+        assert!(patched.contains(
+            "dur=\"1\" fill=\"hold\"><p:stCondLst><p:cond delay=\"0\"/></p:stCondLst>"
+        ));
+    }
+
+    #[test]
+    fn zip_roundtrip_patches_only_target_slides() {
+        use std::io::{Cursor, Read, Write};
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("[Content_Types].xml", options).unwrap();
+            writer.write_all(b"<Types/>").unwrap();
+            writer.start_file("ppt/slides/slide1.xml", options).unwrap();
+            writer.write_all(slide_xml().as_bytes()).unwrap();
+            writer.start_file("ppt/slides/slide2.xml", options).unwrap();
+            writer.write_all(slide_xml().as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let manifest = vec![PptxSlideAnimation {
+            slide: 2,
+            clicks: vec![group(&["pptr1"], &[])],
+        }];
+        let patched = patch_pptx_animations(&buf.into_inner(), &manifest).unwrap();
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(patched)).unwrap();
+        let mut slide1 = String::new();
+        archive.by_name("ppt/slides/slide1.xml").unwrap().read_to_string(&mut slide1).unwrap();
+        assert_eq!(slide1, slide_xml());
+        let mut slide2 = String::new();
+        archive.by_name("ppt/slides/slide2.xml").unwrap().read_to_string(&mut slide2).unwrap();
+        assert!(slide2.contains("<p:timing>"));
+        let mut types = String::new();
+        archive.by_name("[Content_Types].xml").unwrap().read_to_string(&mut types).unwrap();
+        assert_eq!(types, "<Types/>");
+    }
 }
 
 #[tauri::command]
@@ -4211,6 +4544,26 @@ mod slide_bridge_tests {
         let html = b"<html></html>".to_vec();
         let out = inject_slide_bridge("C:\\课件\\slide.HTM", html);
         assert!(String::from_utf8(out).unwrap().contains("__ppteSlideBridgeInstalled"));
+    }
+
+    #[test]
+    fn extracts_inline_scripts_by_document_order() {
+        let html = br#"<script>window.first = 1;</script>
+            <script type="application/json">{"data":true}</script>
+            <SCRIPT type="module">window.third = 3;</SCRIPT >"#;
+        assert_eq!(
+            extract_html_script_body(html, 0).unwrap(),
+            b"window.first = 1;"
+        );
+        assert_eq!(
+            extract_html_script_body(html, 1).unwrap(),
+            br#"{"data":true}"#
+        );
+        assert_eq!(
+            extract_html_script_body(html, 2).unwrap(),
+            b"window.third = 3;"
+        );
+        assert!(extract_html_script_body(html, 3).is_none());
     }
 }
 
@@ -7116,9 +7469,30 @@ pub fn run() {
                 .to_string();
 
             let file_path = normalize_protocol_path(&decoded);
+            let export_script_index = url.query().and_then(|query| {
+                query.split('&').find_map(|pair| {
+                    pair.strip_prefix("ppte-export-script=")
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+            });
 
             match fs::read(&file_path) {
                 Ok(content) => {
+                    if let Some(index) = export_script_index {
+                        return match extract_html_script_body(&content, index) {
+                            Some(script) => http::Response::builder()
+                                .status(200)
+                                .header("Content-Type", "text/javascript; charset=utf-8")
+                                .header("Access-Control-Allow-Origin", "*")
+                                .body(script)
+                                .unwrap(),
+                            None => http::Response::builder()
+                                .status(404)
+                                .header("Content-Type", "text/plain")
+                                .body(format!("Script {} not found in {}", index, file_path).into_bytes())
+                                .unwrap(),
+                        };
+                    }
                     let mime = mime_guess::from_path(&file_path)
                         .first_or_octet_stream()
                         .to_string();

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "templateId": "table-comparison-matrix",
+  "checks": [
+    {"id": "root", "selector": "[data-template=table-comparison-matrix]", "required": true},
+    {"id": "content-area", "selector": ".content-area", "required": true},
+    {"id": "table", "selector": ".comparison-table", "required": true},
+    {"id": "option-count", "expression": "options.length >= 2 && options.length <= 5", "required": true},
+    {"id": "row-count", "selector": "[data-comparison-row]", "min": 3, "max": 8},
+    {"id": "font-units", "expression": "visible-font-size-units-use-vw-or-vh", "required": true},
+    {"id": "no-hidden-overflow", "expression": "template-does-not-use-overflow-hidden", "required": true}
+  ],
+  "manualReview": [
+    "每列方案名称清楚且长度接近",
+    "关键状态使用有限的语义色，不依赖颜色表达唯一含义",
+    "对比维度保持同一语法层级",
+    "长文本拆成新的比较页，而不是缩小表格字号"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "templateId": "image-attention-focus",
+  "checks": [
+    {"id": "root", "selector": "[data-template=image-attention-focus]", "required": true},
+    {"id": "query", "selector": "[data-query]", "required": true},
+    {"id": "image-count", "selector": "[data-image-item]", "min": 4, "max": 8},
+    {"id": "weights", "expression": "every image item has a numeric weight between 0 and 1", "required": true},
+    {"id": "selected-value", "expression": "selectedValue is absent or has image, weight, and detail fields", "required": true},
+    {"id": "image-zoom", "expression": "every content image has zoom interaction and Escape closes overlay", "required": true},
+    {"id": "step-limit", "expression": "Number(root.dataset.maxStep) <= 4", "required": true},
+    {"id": "reduced-motion", "expression": "source.includes('prefers-reduced-motion')", "required": true},
+    {"id": "host-navigation", "expression": "final-step-does-not-prevent-host-navigation", "required": true},
+    {"id": "no-autoplay", "expression": "no-setInterval-and-no-unbounded-animation-loop", "required": true},
+    {"id": "font-units", "expression": "visible-font-size-units-use-vw-or-vh", "required": true}
+  ],
+  "manualReview": [
+    "图片在默认状态下可辨认且不被文字遮挡",
+    "高权重图片与 Value 详情卡使用同一张图片",
+    "低权重图片不会被完全隐藏，仍保留比较背景",
+    "图片资源可由服务端替换，不依赖课程原目录"
+  ]
+}

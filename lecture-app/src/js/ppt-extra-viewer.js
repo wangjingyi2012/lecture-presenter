@@ -9,6 +9,7 @@ const PptExtraViewer = {
   currentIndex: 0,
   isPlaying: false,
   isPlayMenuOpen: false,
+  isExportMenuOpen: false,
   _slideEditableFocus: false,
   _watchUnlisten: null,
   _reloadSeq: 0,
@@ -32,7 +33,22 @@ const PptExtraViewer = {
 
     document.getElementById('ppt-extra-close').addEventListener('click', () => this.close());
     document.getElementById('ppt-extra-refresh').addEventListener('click', () => this.refreshCurrentSlide());
-    document.getElementById('ppt-extra-export').addEventListener('click', () => this.exportToPpt());
+    document.getElementById('ppt-extra-export').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setExportMenuOpen(!this.isExportMenuOpen);
+    });
+    document.querySelectorAll('#ppt-export-menu [data-export-mode]').forEach(item => {
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.setExportMenuOpen(false);
+        this.exportToPpt(item.dataset.exportMode);
+      });
+    });
+    document.addEventListener('click', (e) => {
+      if (this.isExportMenuOpen && !(e.target.closest && e.target.closest('.ppt-export-wrap'))) {
+        this.setExportMenuOpen(false);
+      }
+    });
     document.getElementById('ppt-extra-play').addEventListener('click', () => this.togglePlayMode());
     document.getElementById('ppt-extra-speaker').addEventListener('click', () => this.toggleSpeakerMode());
     document.getElementById('ppt-extra-annotate').addEventListener('click', () => {
@@ -103,6 +119,7 @@ const PptExtraViewer = {
       const isEditing = e.target.isContentEditable || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA';
       if (e.key === 'Escape') {
         if (this.isSpeakerMode) this.exitSpeakerMode();
+        else if (this.isExportMenuOpen) this.setExportMenuOpen(false);
         else if (this.isPlayMenuOpen) this.setPlayMenuOpen(false);
         else if (this.isPlaying) this.togglePlayMode();
         else this.close();
@@ -135,11 +152,13 @@ const PptExtraViewer = {
     this.isPlaying = false;
     this.isSpeakerMode = false;
     this.isPlayMenuOpen = false;
+    this.isExportMenuOpen = false;
     this._slideEditableFocus = false;
     this._reloadSeq = 0;
     if (this.annotator) this.annotator.reset();
     this.modal.classList.remove('playing-mode', 'speaker-mode');
     this.setPlayMenuOpen(false);
+    this.setExportMenuOpen(false);
     document.getElementById('ppt-extra-speaker').style.display = '';
     document.getElementById('speaker-view').classList.add('hidden');
     document.getElementById('ppt-extra-toc').style.display = '';
@@ -726,14 +745,27 @@ const PptExtraViewer = {
     return !!target.closest('a, button, input, textarea, select, label, [contenteditable="true"], [data-no-slide-nav]');
   },
 
-  async exportToPpt() {
+  setExportMenuOpen(open) {
+    this.isExportMenuOpen = !!open;
+    const menu = document.getElementById('ppt-export-menu');
+    if (menu) menu.classList.toggle('hidden', !this.isExportMenuOpen);
+    const btn = document.getElementById('ppt-extra-export');
+    if (btn) btn.setAttribute('aria-expanded', this.isExportMenuOpen ? 'true' : 'false');
+  },
+
+  async exportToPpt(mode) {
     const btn = document.getElementById('ppt-extra-export');
     const originalHtml = btn.innerHTML;
     btn.disabled = true;
     btn.textContent = '导出中...';
 
     try {
-      const savedPath = await PptePptExporter.export(this);
+      const savedPath = await PptePptExporter.export(this, {
+        mode,
+        onProgress: (done, total) => {
+          btn.textContent = `导出中 ${done}/${total}`;
+        }
+      });
       if (savedPath) {
         alert(`PPT 导出完成：\n${savedPath}`);
       }
@@ -987,6 +1019,7 @@ const PptExtraViewer = {
     this.isPlaying = false;
     this.modal.classList.remove('playing-mode');
     this.setPlayMenuOpen(false);
+    this.setExportMenuOpen(false);
     document.getElementById('ppt-extra-play').innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
 
     if (this.isSpeakerMode) {

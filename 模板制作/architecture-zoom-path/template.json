@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "architecture-zoom-path",
+  "version": "0.1.0",
+  "name": "架构总览到局部路径",
+  "family": "architecture",
+  "roles": ["content", "reference"],
+  "contentKinds": ["system-architecture", "model-architecture", "data-path", "module-boundary", "layered-system"],
+  "density": ["medium", "high"],
+  "motionModes": ["progressive-reveal", "focus-path", "none"],
+  "maxItems": 12,
+  "slots": {
+    "title": {"type": "text", "required": true, "maxChars": 36},
+    "lead": {"type": "text", "required": false, "maxChars": 110},
+    "input": {"type": "architecture-endpoint", "required": true},
+    "layers": {"type": "architecture-layer-list", "required": true, "minItems": 2, "maxItems": 4},
+    "output": {"type": "architecture-endpoint", "required": true},
+    "path": {"type": "module-id-list", "required": true, "minItems": 3, "maxItems": 7},
+    "takeaway": {"type": "text", "required": false, "maxChars": 90}
+  },
+  "themeTokens": ["text", "muted", "primary", "input", "runtime", "data", "control", "output", "line", "surface"],
+  "constraints": {
+    "rootSelector": "[data-template=architecture-zoom-path]",
+    "requiredSelectors": [".content-area", ".architecture-stage", "[data-layer]", "[data-module]", "[data-path-node]"],
+    "maxLayers": 4,
+    "maxModulesPerLayer": 4,
+    "layerRoles": ["context", "core", "support"],
+    "maxSteps": 4,
+    "hostNavigation": "allow-after-final-step",
+    "reducedMotion": "required",
+    "fontUnit": "vw"
+  },
+  "avoid": ["没有明确层级或边界的普通流程", "超过4层或单层超过4个模块", "需要精确网络拓扑坐标", "只展示一张不可拆解的架构截图"],
+  "source": {
+    "originalPages": ["AI大模型原理_安恒/slide24.html", "Agent概念及基础开发/slide033.html", "Agent概念及基础开发/slide035.html"],
+    "analysis": "先建立系统边界，再逐层聚焦模块，随后高亮一条端到端路径并解释输出。"
+  }
+}

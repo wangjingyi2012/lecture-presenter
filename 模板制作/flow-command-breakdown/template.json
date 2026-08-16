@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "flow-command-breakdown",
+  "version": "0.1.0",
+  "name": "复合命令拆解流程",
+  "family": "flow",
+  "roles": ["content", "reference"],
+  "contentKinds": ["command-breakdown", "pipeline", "tool-internal-flow", "automation"],
+  "density": ["medium", "high"],
+  "motionModes": ["progressive-reveal", "focus-path", "none"],
+  "maxItems": 3,
+  "slots": {
+    "title": {"type": "text", "required": true, "maxChars": 42},
+    "lead": {"type": "text", "required": false, "maxChars": 120},
+    "outerFlow": {"type": "flow-node-list", "required": true, "minItems": 2, "maxItems": 4},
+    "command": {"type": "command-pipeline", "required": true, "minParts": 2, "maxParts": 4},
+    "takeaway": {"type": "text", "required": false, "maxChars": 90}
+  },
+  "themeTokens": ["text", "muted", "primary", "tool", "result", "emphasis", "line", "surface", "codeSurface"],
+  "constraints": {
+    "rootSelector": "[data-template=flow-command-breakdown]",
+    "requiredSelectors": [".content-area", ".command-detail", "[data-command-part]", "[data-outer-flow]"],
+    "maxCommandParts": 4,
+    "maxSteps": 12,
+    "hostNavigation": "allow-after-final-step",
+    "reducedMotion": "required",
+    "fontUnit": "vw"
+  },
+  "avoid": ["不需要解释内部子步骤的普通命令页", "超过4段的超长命令", "多个并行命令分支"],
+  "source": {
+    "originalPage": "slide35.html",
+    "sourceCourse": "MCP协议",
+    "analysis": "外层流程先展示调用工具，随后固定在同一位置拆解一条复合命令的多个部分，完成后回到最终结果。"
+  }
+}

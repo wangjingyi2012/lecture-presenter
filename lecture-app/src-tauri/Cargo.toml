@@ -28,6 +28,7 @@ scraper = "0.20"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lib]
 name = "lecture_app_lib"

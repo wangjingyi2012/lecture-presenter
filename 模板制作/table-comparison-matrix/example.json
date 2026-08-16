@@ -1,0 +1,15 @@
+{
+  "title": "传输方式对比",
+  "lead": "同一组评价维度下比较不同传输方案，突出适用边界和迁移成本。",
+  "dimensionLabel": "对比项",
+  "options": ["本地标准 IO", "流式 HTTP", "旧版 HTTP+SSE"],
+  "rows": [
+    {"label": "当前状态", "cells": [{"text": "正式标准", "tone": "positive"}, {"text": "正式标准", "tone": "positive"}, {"text": "旧版兼容", "tone": "caution"}]},
+    {"label": "服务形态", "cells": ["Client 启动的本地子进程", "独立 HTTP 服务", "独立 HTTP 服务"]},
+    {"label": "通信范围", "cells": ["本机进程间", "本机或远程网络", "远程网络"]},
+    {"label": "多客户端", "cells": ["通常一进程一连接", "支持多 Client", "支持，架构较旧"]},
+    {"label": "身份认证", "cells": ["依赖本机权限", "API Key、OAuth 等", "自行实现"]},
+    {"label": "适用场景", "cells": ["本地工具、课堂实验", "企业服务、云端部署", "旧系统兼容"]}
+  ],
+  "theme": {"text": "#1e293b", "muted": "#475569", "primary": "#002855", "line": "#cbd5e1", "surface": "#ffffff", "headerText": "#ffffff", "positive": "#166534", "caution": "#92400e"}
+}

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "templateId": "concept-definition-boundary",
+  "checks": [
+    {"id": "root", "selector": "[data-template=concept-definition-boundary]", "required": true},
+    {"id": "term", "selector": "[data-term]", "required": true},
+    {"id": "attributes", "selector": "[data-attribute]", "min": 2, "max": 4},
+    {"id": "boundary", "selector": "[data-boundary]", "required": true},
+    {"id": "no-autoplay", "expression": "no-timers-and-no-animation-loop", "required": true}
+  ],
+  "manualReview": ["定义不循环使用未解释术语", "属性描述回答概念如何识别或使用", "边界说明概念不包含什么"]
+}

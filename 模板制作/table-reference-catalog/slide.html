@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>参考目录型表格</title>
+  <style>
+    :root { --text:#1e293b; --muted:#475569; --primary:#002855; --line:#cbd5e1; --surface:#fff; --header-text:#fff; --code-surface:#f1f5f9; }
+    * { box-sizing: border-box; }
+    body { margin:0; width:100vw; height:100vh; background:#fff; color:var(--text); font-family:"Microsoft YaHei","Noto Sans SC","PingFang SC",sans-serif; }
+    .ppt-container, .slide { width:100%; height:100%; }
+    .slide { position:relative; background:var(--surface); border-top:0.7vh solid var(--primary); }
+    .page-header { position:absolute; top:4vh; left:6vw; right:6vw; padding-bottom:1.4vh; border-bottom:0.35vh solid var(--primary); }
+    .page-title { margin:0; font-size:2.5vw; line-height:1.15; font-weight:900; letter-spacing:0; }
+    .content-area { position:absolute; top:14vh; bottom:9vh; left:6vw; right:6vw; display:flex; flex-direction:column; font-size:1.8vw; }
+    .lead-statement { margin:0 0 2.2vh; padding:1.4vh 1.6vw; border:1px solid var(--line); border-radius:8px; background:#f8fafc; font-size:1.75vw; line-height:1.35; font-weight:600; }
+    .table-scroll { flex:1; min-height:0; overflow-y:auto; padding-right:0.5vw; display:flex; align-items:center; scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
+    .catalog-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:1.65vw; line-height:1.35; }
+    .catalog-table th, .catalog-table td { border:1px solid var(--line); padding:1.05vh 0.9vw; text-align:left; vertical-align:top; overflow-wrap:anywhere; }
+    .catalog-table th { background:var(--primary); color:var(--header-text); font-size:1.7vw; font-weight:700; }
+    .catalog-table tbody tr:nth-child(even) { background:#f8fafc; }
+    .catalog-table .name { display:block; margin-bottom:0.35vh; color:var(--primary); font-size:1.7vw; font-weight:700; }
+    .catalog-table .desc { display:block; color:var(--muted); font-size:1.5vw; }
+    .catalog-table code { padding:0.1em 0.25em; border-radius:4px; background:var(--code-surface); color:var(--text); font-family:"SF Mono",Consolas,monospace; font-size:1.5vw; }
+    .catalog-table .empty { color:#94a3b8; text-align:center; font-weight:700; }
+    @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+  </style>
+</head>
+<body>
+  <div class="ppt-container"><div class="slide">
+    <header class="page-header"><h1 class="page-title" data-slot="title">常见工具能力目录</h1></header>
+    <main class="content-area" data-template="table-reference-catalog">
+      <div class="lead-statement" data-slot="lead">把同一类对象的能力按统一字段并列，便于快速定位可用接口。</div>
+      <div class="table-scroll"><table class="catalog-table"><colgroup></colgroup><thead><tr data-columns></tr></thead><tbody data-rows></tbody></table></div>
+    </main>
+  </div></div>
+  <script type="application/json" id="template-data">
+    {"title":"常见工具能力目录","lead":"把同一类对象的能力按统一字段并列，便于快速定位可用接口。","columns":["组件","能力","数据入口","提示"],"rows":[{"name":"文件服务","description":"受控读写授权目录","cells":["read_file · write_file · list_directory","文件 URI","—"]},{"name":"网页获取","description":"HTTP 内容转 Markdown","cells":["fetch","—","—"]},{"name":"代码仓库","description":"状态、提交与历史读取","cells":["git_status · git_commit · git_log","Git URI","—"]},{"name":"时间服务","description":"时间查询与时区换算","cells":["get_current_time · convert_time","—","—"]},{"name":"数据库","description":"表结构读取与 SQL 查询","cells":["list_tables · describe_table · execute_sql","数据库 URI","—"]}]}
+  </script>
+  <script>
+    (() => {
+      const data = JSON.parse(document.getElementById('template-data').textContent);
+      const root = document.querySelector('[data-template="table-reference-catalog"]');
+      const scope = root.closest('.slide') || document;
+      const setText = (selector, value, parent = root) => { const node = parent.querySelector(selector); if (node && value != null) node.textContent = value; };
+      setText('[data-slot="title"]', data.title, scope); setText('[data-slot="lead"]', data.lead);
+      const columns = Array.isArray(data.columns) ? data.columns.slice(0, 5) : [];
+      const colgroup = root.querySelector('colgroup'); const header = root.querySelector('[data-columns]');
+      columns.forEach((column, index) => { const col = document.createElement('col'); col.style.width = index === 0 ? '24%' : `${76 / Math.max(1, columns.length - 1)}%`; colgroup.appendChild(col); const th = document.createElement('th'); th.textContent = column; header.appendChild(th); });
+      const tbody = root.querySelector('[data-rows]');
+      (Array.isArray(data.rows) ? data.rows.slice(0, 8) : []).forEach(row => { const tr = document.createElement('tr'); tr.dataset.catalogRow = ''; const first = document.createElement('td'); first.innerHTML = `<span class="name"></span><span class="desc"></span>`; first.querySelector('.name').textContent = row.name || ''; first.querySelector('.desc').textContent = row.description || ''; tr.appendChild(first); (row.cells || []).forEach(value => { const td = document.createElement('td'); td.textContent = value; tr.appendChild(td); }); tbody.appendChild(tr); });
+    })();
+  </script>
+</body>
+</html>

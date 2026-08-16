@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "structured-paragraph-aside",
+  "version": "0.1.0",
+  "name": "结构化段落与侧栏摘要",
+  "family": "basic-content",
+  "roles": ["content", "explanation"],
+  "contentKinds": ["paragraph", "background", "analysis"],
+  "density": ["medium"],
+  "motionModes": ["none"],
+  "slots": {
+    "title": {"type": "text", "required": true, "maxChars": 32},
+    "lead": {"type": "text", "required": false, "maxChars": 72},
+    "sections": {"type": "object-list", "required": true, "minItems": 2, "maxItems": 3},
+    "summary": {"type": "object-list", "required": true, "minItems": 2, "maxItems": 4},
+    "takeaway": {"type": "text", "required": false, "maxChars": 80}
+  },
+  "constraints": {"rootSelector": "[data-template=structured-paragraph-aside]", "maxSections": 3, "maxSectionChars": 150, "defaultMotion": "none", "fontUnit": "vw"},
+  "avoid": ["逐项对比", "超过三段正文", "单段超过150字", "需要图表证明"]
+}

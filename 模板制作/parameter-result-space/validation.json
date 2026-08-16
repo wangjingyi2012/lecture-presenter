@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "templateId": "parameter-result-space",
+  "checks": [
+    {"id": "root", "selector": "[data-template=parameter-result-space]", "required": true},
+    {"id": "controls", "selector": "[data-control]", "min": 1, "max": 2},
+    {"id": "points", "selector": "[data-point]", "min": 6, "max": 12},
+    {"id": "result-list", "selector": "[data-result-list]", "required": true},
+    {"id": "point-layout", "expression": "rendered-points-occupy-distinct-screen-coordinates", "required": true},
+    {"id": "result-boundary", "expression": "last-result-item-does-not-overlap-takeaway", "required": true},
+    {"id": "deterministic", "expression": "control-change-uses-local-deterministic-data", "required": true},
+    {"id": "reduced-motion", "expression": "source.includes('prefers-reduced-motion')", "required": true},
+    {"id": "no-autoplay", "expression": "no-setInterval-and-no-unbounded-animation-loop", "required": true},
+    {"id": "font-units", "expression": "visible-font-size-units-use-vw-or-vh", "required": true}
+  ],
+  "manualReview": [
+    "控件变化后空间与结果列表同步更新",
+    "选中和未选中状态在投影中可辨认",
+    "结果数量变化不会推动整体布局",
+    "页面明确解释参数变化带来的代价"
+  ]
+}

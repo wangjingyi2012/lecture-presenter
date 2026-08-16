@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "templateId": "image-filter-upload",
+  "checks": [
+    {"id": "root", "selector": "[data-template=image-filter-upload]", "required": true},
+    {"id": "image-pool", "selector": ".image-pool", "required": true},
+    {"id": "source-images", "selector": "[data-source-image]", "min": 4, "max": 10},
+    {"id": "selected-images", "selector": "[data-selected-image]", "min": 1, "max": 6},
+    {"id": "destination", "selector": ".destination-card", "required": true},
+    {"id": "step-limit", "expression": "Number(root.dataset.maxStep) <= 4", "required": true},
+    {"id": "stable-canvas", "expression": "image-pool-and-result-stage-share-fixed-stage", "required": true},
+    {"id": "image-zoom", "expression": "all-content-images-have-zoom-handler", "required": true},
+    {"id": "reduced-motion", "expression": "source.includes('prefers-reduced-motion')", "required": true},
+    {"id": "host-navigation", "expression": "final-step-does-not-prevent-host-navigation", "required": true},
+    {"id": "no-autoplay", "expression": "no-setInterval-and-no-unbounded-animation-loop", "required": true},
+    {"id": "font-units", "expression": "visible-font-size-units-use-vw-or-vh", "required": true}
+  ],
+  "manualReview": [
+    "筛选、处理、整理和交付四个状态的含义一眼可区分",
+    "不同数量的目标图片仍能在目标集合中保持稳定网格",
+    "处理标签和上传结果不会遮挡图片主体",
+    "图片仅承担视觉证据，不把具体业务名称写死"
+  ]
+}

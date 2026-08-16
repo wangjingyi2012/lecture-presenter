@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "image-filter-upload",
+  "version": "0.1.0",
+  "name": "图片资产处理流水线",
+  "family": "image-workflow",
+  "roles": ["content", "reference"],
+  "contentKinds": ["image-filtering", "asset-processing", "media-pipeline", "batch-upload", "visual-workflow"],
+  "density": ["medium"],
+  "motionModes": ["progressive-reveal", "focus-path", "none"],
+  "maxItems": 10,
+  "slots": {
+    "title": {"type": "text", "required": true, "maxChars": 36},
+    "lead": {"type": "text", "required": false, "maxChars": 120},
+    "sourceImages": {"type": "image-state-list", "required": true, "minItems": 4, "maxItems": 10},
+    "filterLabel": {"type": "text", "required": true, "maxChars": 18},
+    "transformLabel": {"type": "text", "required": false, "maxChars": 18},
+    "destination": {"type": "text", "required": true, "maxChars": 20},
+    "successLabel": {"type": "text", "required": false, "maxChars": 18},
+    "destinationUrl": {"type": "text", "required": false, "maxChars": 42},
+    "takeaway": {"type": "text", "required": false, "maxChars": 90}
+  },
+  "themeTokens": ["text", "muted", "primary", "selected", "processed", "success", "line", "surface", "resultSurface"],
+  "constraints": {
+    "rootSelector": "[data-template=image-filter-upload]",
+    "requiredSelectors": [".content-area", ".image-pool", "[data-source-image]", ".destination-card"],
+    "maxImages": 10,
+    "maxSelectedImages": 6,
+    "maxSteps": 4,
+    "hostNavigation": "allow-after-final-step",
+    "reducedMotion": "required",
+    "imageZoom": "required",
+    "fontUnit": "vw"
+  },
+  "avoid": ["需要比较图片内容细节的页面", "超过10张且无法分批的资产池", "筛选结果超过6张且无法分组", "没有筛选条件或处理结果的图片罗列"],
+  "source": {
+    "originalPage": "slide33.html",
+    "sourceCourse": "MCP协议",
+    "analysis": "混合图片池经过筛选、统一处理、目标集合整理后提交到存储端；抽象为通用图片资产处理流水线。"
+  }
+}

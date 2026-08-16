@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "agent-bridge-reveal",
+  "version": "0.1.0",
+  "name": "中心执行者桥接图",
+  "family": "concept-bridge",
+  "roles": ["content", "chapter"],
+  "contentKinds": ["system-boundary", "architecture", "agent", "concept-explanation", "mediation"],
+  "density": ["low", "medium"],
+  "motionModes": ["progressive-reveal", "none"],
+  "maxItems": 4,
+  "slots": {
+    "title": {"type": "text", "required": true, "maxChars": 42},
+    "lead": {"type": "rich-text", "required": false, "maxChars": 150},
+    "leftActor": {"type": "actor", "required": true, "maxChars": 18},
+    "rightActor": {"type": "actor", "required": true, "maxChars": 18},
+    "bridge": {"type": "bridge", "required": true, "maxChars": 18},
+    "bridgeItems": {"type": "actor-list", "required": false, "minItems": 1, "maxItems": 4},
+    "relationship": {"type": "text", "required": false, "maxChars": 28}
+  },
+  "themeTokens": ["backgroundImage", "text", "muted", "primary", "line", "surface", "accent"],
+  "constraints": {
+    "rootSelector": "[data-template=agent-bridge-reveal]",
+    "requiredSelectors": [".content-area", ".scene", "[data-left-actor]", "[data-right-actor]", "[data-bridge]"],
+    "maxSteps": 3,
+    "hostNavigation": "allow-after-final-step",
+    "reducedMotion": "required",
+    "fontUnit": "vw"
+  },
+  "avoid": ["超过4个桥接实现", "复杂二维分类", "长段落论证", "需要滚动阅读的表格"],
+  "source": {
+    "originalPage": "slide05.html",
+    "sourceCourse": "MCP协议",
+    "analysis": "两端角色先分离，中间桥接执行者出现，再逐步展示多个实现。"
+  }
+}

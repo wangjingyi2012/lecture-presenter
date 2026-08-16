@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "templateId": "concept-story-progression",
+  "checks": [
+    {"id": "root", "selector": "[data-template=concept-story-progression]", "required": true},
+    {"id": "scenes", "selector": "[data-scene]", "min": 4, "max": 5},
+    {"id": "examples", "selector": "[data-example]", "min": 2, "max": 4},
+    {"id": "features", "selector": "[data-feature]", "min": 2, "max": 4},
+    {"id": "mechanism", "selector": "[data-mechanism-node]", "min": 3, "max": 5},
+    {"id": "stable-stage", "expression": "all-scenes-share-fixed-story-stage", "required": true},
+    {"id": "reduced-motion", "expression": "source.includes('prefers-reduced-motion')", "required": true},
+    {"id": "host-navigation", "expression": "final-step-does-not-prevent-host-navigation", "required": true},
+    {"id": "no-autoplay", "expression": "no-setInterval-and-no-unbounded-animation-loop", "required": true},
+    {"id": "font-units", "expression": "visible-font-size-units-use-vw-or-vh", "required": true}
+  ],
+  "manualReview": [
+    "每一幕只增加一个认知层级",
+    "样例、特征和机制之间存在明确对应关系",
+    "最终结论可脱离动画独立记忆",
+    "边界不是泛泛的注意事项，而是概念失效条件"
+  ]
+}

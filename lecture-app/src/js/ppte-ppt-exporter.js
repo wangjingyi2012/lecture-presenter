@@ -4,8 +4,11 @@ const PptePptExporter = {
   slideHeight: 7.5,
   renderWidth: 1920,
   renderHeight: 1080,
+  maxStepGuard: 40,
 
-  async export(viewer) {
+  async export(viewer, options = {}) {
+    const mode = ['steps', 'animate'].includes(options.mode) ? options.mode : 'static';
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
     const PptxGen = await this._ensurePptxGen();
     if (!viewer || !viewer.slides || viewer.slides.length === 0) {
       throw new Error('没有可导出的 PPTE 幻灯片');
@@ -19,20 +22,39 @@ const PptePptExporter = {
     pptx.title = viewer.title || 'PPTE Export';
     pptx.lang = 'zh-CN';
 
+    let processed = 0;
+    let pptxSlideCount = 0;
+    const animationSlides = [];
     for (const slideMeta of viewer.slides) {
-      const rendered = await this._renderSlide(viewer, slideMeta);
-      await this._addRenderedSlide(pptx, rendered);
-      rendered.cleanup();
+      const result = await this._renderSlides(viewer, slideMeta, mode);
+      for (const rendered of result.snapshots) {
+        await this._addRenderedSlide(pptx, rendered);
+        pptxSlideCount += 1;
+      }
+      if (result.clicks && result.clicks.length > 0) {
+        animationSlides.push({ slide: pptxSlideCount, clicks: result.clicks });
+      }
+      processed += 1;
+      if (onProgress) onProgress(processed, viewer.slides.length);
     }
 
     const output = await pptx.write({ outputType: 'arraybuffer', compression: true });
     const bytes = Array.from(new Uint8Array(output));
-    const defaultName = `${this._safeFileName(viewer.title || 'PPTE导出')}.pptx`;
+    const baseName = viewer.manifest?.title || viewer.title || 'PPTE导出';
+    const suffix = mode === 'steps' ? '-分步版' : mode === 'animate' ? '-动画版' : '';
+    const defaultName = `${this._safeFileName(`${baseName}${suffix}`)}.pptx`;
 
     if (window.__TAURI__ && window.__TAURI__.core) {
-      return window.__TAURI__.core.invoke('save_pptx_file', { defaultName, bytes });
+      const payload = { defaultName, bytes };
+      if (mode === 'animate' && animationSlides.length > 0) {
+        payload.animation = animationSlides;
+      }
+      return window.__TAURI__.core.invoke('save_pptx_file', payload);
     }
 
+    if (mode === 'animate') {
+      console.warn('PPT export: 浏览器模式不支持动画注入，已导出静态内容');
+    }
     const blob = new Blob([output], {
       type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
     });
@@ -81,7 +103,8 @@ const PptePptExporter = {
         ...item.box,
         fill: item.fill,
         line: item.line,
-        transparency: item.transparency
+        transparency: item.transparency,
+        objectName: item.name
       });
     }
 
@@ -92,7 +115,8 @@ const PptePptExporter = {
         data,
         ...item.box,
         rotate: item.rotate || 0,
-        altText: item.alt || ''
+        altText: item.alt || '',
+        objectName: item.name
       });
     }
 
@@ -111,18 +135,155 @@ const PptePptExporter = {
         align: item.align,
         valign: 'top',
         lineSpacingMultiple: item.lineHeightMultiple,
-        wrap: true
+        wrap: true,
+        objectName: item.name
       });
     }
   },
 
-  async _renderSlide(viewer, slideMeta) {
+  // Renders one source slide into native snapshots.
+  // Stepped templates expose data-step/data-max-step on their [data-template] root and
+  // consume ArrowRight keydowns (preventDefault) until the final step, which is the
+  // same contract the viewer navigation and template audits rely on.
+  // Returns { snapshots, clicks } — clicks is only set in animate mode and describes
+  // per-click enter/exit shape groups for the native PPTX timing injection.
+  async _renderSlides(viewer, slideMeta, mode) {
     const slidePath = viewer.basePath
       ? this._joinPath(viewer.basePath, slideMeta.file)
       : '';
     const html = await this._readSlideHtml(viewer, slideMeta, slidePath);
     const baseHref = this._baseHref(viewer, slideMeta, slidePath);
+    const scriptSourceUrl = viewer.basePath && slidePath && viewer._assetUrl
+      ? viewer._assetUrl(slidePath)
+      : '';
+    const loaded = await this._loadSlideIframe(html, baseHref, slideMeta.file, scriptSourceUrl);
+    const basePath = slidePath ? this._dirname(slidePath) : '';
 
+    try {
+      const { doc, win } = loaded;
+      const capture = () => this._extractSnapshot(loaded, basePath);
+
+      if (mode === 'animate') {
+        const stepSnapshots = await this._collectStepSnapshots(doc, win, capture);
+        const plan = this._buildAnimationPlan(stepSnapshots);
+        return { snapshots: [this._mergeAnimatedSnapshot(stepSnapshots, plan)], clicks: plan.clicks };
+      }
+
+      if (mode === 'steps') {
+        return { snapshots: await this._collectStepSnapshots(doc, win, capture), clicks: null };
+      }
+
+      // Static export keeps the final state, so stepped templates do not lose
+      // everything except their first scene.
+      await this._driveToFinalStep(doc, win);
+      await this._waitForImages(doc);
+      await this._settleFrames(win);
+      return { snapshots: [await capture()], clicks: null };
+    } finally {
+      loaded.cleanup();
+    }
+  },
+
+  // Merges per-step snapshots into one object list with per-click enter/exit groups.
+  // Object identity is the stamped data-ppt-export-id; the content signature ignores
+  // the box so pure位移 does not split an object, while text/color changes produce
+  // exit+enter variant pairs. Pure function — covered by test-ppt-exporter-animate.js.
+  _buildAnimationPlan(stepSnapshots) {
+    const kinds = ['shapes', 'images', 'texts'];
+    const lastStep = stepSnapshots.length - 1;
+    const byKey = new Map();
+
+    stepSnapshots.forEach((snap, step) => {
+      for (const kind of kinds) {
+        for (const item of snap[kind] || []) {
+          if (item.exportId == null) continue;
+          const key = `${kind}:${item.exportId}`;
+          let entry = byKey.get(key);
+          if (!entry) {
+            entry = { kind, exportId: Number(item.exportId) || 0, runs: [] };
+            byKey.set(key, entry);
+          }
+          const sig = this._animationSignature(item);
+          const lastRun = entry.runs[entry.runs.length - 1];
+          if (lastRun && lastRun.end === step - 1 && lastRun.sig === sig) {
+            lastRun.end = step;
+            lastRun.item = item; // keep the latest (most settled) box
+          } else {
+            entry.runs.push({ sig, start: step, end: step, item });
+          }
+        }
+      }
+    });
+
+    const kindRank = { shapes: 0, images: 1, texts: 2 };
+    const entries = Array.from(byKey.values())
+      .sort((a, b) => kindRank[a.kind] - kindRank[b.kind] || a.exportId - b.exportId);
+
+    const objects = [];
+    const clicks = Array.from({ length: Math.max(lastStep, 0) }, () => ({ enter: [], exit: [] }));
+    let nameSeq = 0;
+
+    for (const entry of entries) {
+      for (const run of entry.runs) {
+        const enterStep = run.start > 0 ? run.start : null;
+        const exitStep = run.end < lastStep ? run.end + 1 : null;
+        const animated = enterStep !== null || exitStep !== null;
+        const name = animated ? `pptr${++nameSeq}` : undefined;
+        objects.push({ kind: entry.kind, name, item: { ...run.item, name } });
+        if (exitStep !== null) clicks[exitStep - 1].exit.push(name);
+        if (enterStep !== null) clicks[enterStep - 1].enter.push(name);
+      }
+    }
+
+    return { objects, clicks };
+  },
+
+  // Identity fields per kind, excluding box (position shifts must not split objects).
+  _animationSignature(item) {
+    const { box, exportId, name, ...rest } = item;
+    return JSON.stringify(rest);
+  },
+
+  _mergeAnimatedSnapshot(stepSnapshots, plan) {
+    const last = stepSnapshots[stepSnapshots.length - 1];
+    const merged = {
+      basePath: last.basePath,
+      backgroundColor: last.backgroundColor,
+      backgroundImage: last.backgroundImage,
+      shapes: [],
+      images: [],
+      texts: []
+    };
+    for (const obj of plan.objects) {
+      merged[obj.kind].push(obj.item);
+    }
+    return merged;
+  },
+
+  async _collectStepSnapshots(doc, win, capture) {
+    const snapshots = [await capture()];
+    let lastStep = this._getStepState(doc).step;
+    let stalls = 0;
+    while (snapshots.length < this.maxStepGuard) {
+      if (!this._advanceStep(doc, win)) break;
+      const step = this._getStepState(doc).step;
+      stalls = step === lastStep ? stalls + 1 : 0;
+      lastStep = step;
+      if (stalls >= 2) break;
+      await this._waitForImages(doc);
+      await this._settleFrames(win);
+      snapshots.push(await capture());
+    }
+    return snapshots;
+  },
+
+  async _driveToFinalStep(doc, win) {
+    for (let i = 0; i < this.maxStepGuard; i += 1) {
+      if (!this._advanceStep(doc, win)) break;
+    }
+  },
+
+  async _loadSlideIframe(html, baseHref, label, scriptSourceUrl = '') {
     const iframe = document.createElement('iframe');
     iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-popups');
     iframe.style.position = 'fixed';
@@ -135,30 +296,56 @@ const PptePptExporter = {
     iframe.style.pointerEvents = 'none';
     document.body.appendChild(iframe);
 
-    await new Promise((resolve, reject) => {
-      iframe.onload = resolve;
-      iframe.onerror = () => reject(new Error(`无法渲染 ${slideMeta.file}`));
-      iframe.srcdoc = this._withBaseTag(html, baseHref);
-    });
+    try {
+      // Keep the frame same-origin so native-object extraction can inspect its
+      // DOM, and explicitly allow PPTE scripts so stepped templates can install
+      // their keyboard handlers. srcdoc's load event fires after parsing and
+      // classic script execution, which is the state snapshotting needs.
+      // Tauri production CSP hashes the app's own inline scripts. srcdoc inherits
+      // that policy, so PPTE inline scripts must be served as external slide://
+      // resources instead of being silently blocked by WebKit.
+      const executableHtml = this._externalizeInlineScripts(html, scriptSourceUrl);
+      const frameHtml = this._withBaseTag(executableHtml, baseHref);
+      await new Promise((resolve, reject) => {
+        iframe.onload = resolve;
+        iframe.onerror = () => reject(new Error(`无法渲染 ${label || 'slide'}`));
+        iframe.srcdoc = frameHtml;
+      });
+    } catch (err) {
+      iframe.remove();
+      throw err;
+    }
 
     const doc = iframe.contentDocument;
     const win = iframe.contentWindow;
     if (!doc || !win) {
       iframe.remove();
-      throw new Error(`无法访问 ${slideMeta.file} 的页面内容`);
+      throw new Error(`无法访问 ${label || '导出页面'} 的内容`);
     }
 
     if (doc.fonts && doc.fonts.ready) {
       await doc.fonts.ready.catch(() => {});
     }
     await this._waitForImages(doc);
-    await new Promise(resolve => win.requestAnimationFrame(() => win.requestAnimationFrame(resolve)));
+    await this._settleFrames(win);
 
     const slideEl = doc.querySelector('.slide') || doc.body;
-    const slideRect = slideEl.getBoundingClientRect();
-    const basePath = slidePath ? this._dirname(slidePath) : '';
+    // Stamp every element so animate mode can track visibility across steps.
+    slideEl.querySelectorAll('*').forEach((el, index) => {
+      el.setAttribute('data-ppt-export-id', String(index));
+    });
+    return {
+      doc,
+      win,
+      slideEl,
+      slideRect: slideEl.getBoundingClientRect(),
+      cleanup: () => iframe.remove()
+    };
+  },
 
-    const rendered = {
+  async _extractSnapshot(loaded, basePath) {
+    const { doc, win, slideEl, slideRect } = loaded;
+    return {
       basePath,
       backgroundColor: this._firstOpaqueColor([
         win.getComputedStyle(slideEl).backgroundColor,
@@ -172,11 +359,41 @@ const PptePptExporter = {
       ]),
       shapes: this._extractShapes(doc, win, slideEl, slideRect),
       images: await this._extractImages(doc, win, slideEl, slideRect),
-      texts: this._extractTexts(doc, win, slideEl, slideRect),
-      cleanup: () => iframe.remove()
+      texts: this._extractTexts(doc, win, slideEl, slideRect)
     };
+  },
 
-    return rendered;
+  _getStepState(doc) {
+    if (!doc || typeof doc.querySelector !== 'function') return { step: 0, maxStep: 0 };
+    const root = doc.querySelector('[data-template],[data-ppte-concept-animation]');
+    if (!root || !root.dataset) return { step: 0, maxStep: 0 };
+    const parse = value => {
+      const num = parseInt(value, 10);
+      return Number.isFinite(num) && num > 0 ? num : 0;
+    };
+    return {
+      step: parse(root.dataset.step),
+      maxStep: parse(root.dataset.maxStep)
+    };
+  },
+
+  // Returns true when the slide consumed the key press (i.e. advanced one step).
+  _advanceStep(doc, win) {
+    const before = this._getStepState(doc).step;
+    const event = new win.KeyboardEvent('keydown', {
+      key: 'ArrowRight',
+      bubbles: true,
+      cancelable: true
+    });
+    doc.dispatchEvent(event);
+    return !!event.defaultPrevented || this._getStepState(doc).step !== before;
+  },
+
+  _settleFrames(win) {
+    const scheduler = typeof globalThis.requestAnimationFrame === 'function'
+      ? globalThis.requestAnimationFrame.bind(globalThis)
+      : win.requestAnimationFrame.bind(win);
+    return new Promise(resolve => scheduler(() => scheduler(resolve)));
   },
 
   async _readSlideHtml(viewer, slideMeta, slidePath) {
@@ -213,6 +430,7 @@ const PptePptExporter = {
       shapes.push({
         box,
         rounded: radius > 2,
+        exportId: el.getAttribute('data-ppt-export-id'),
         fill: hasFill
           ? { color: this._rgbToHex(fillColor), transparency: Math.round((1 - fillColor.a) * 100) }
           : { color: 'FFFFFF', transparency: 100 },
@@ -233,7 +451,8 @@ const PptePptExporter = {
       images.push({
         box,
         src: img.currentSrc || img.src,
-        alt: img.alt || ''
+        alt: img.alt || '',
+        exportId: img.getAttribute('data-ppt-export-id')
       });
     }
 
@@ -243,8 +462,9 @@ const PptePptExporter = {
       if (!box || box.w < 0.04 || box.h < 0.04) continue;
       images.push({
         box,
-        src: this._svgToDataUri(svg),
-        alt: svg.getAttribute('aria-label') || ''
+        src: this._svgToDataUri(svg, win),
+        alt: svg.getAttribute('aria-label') || '',
+        exportId: svg.getAttribute('data-ppt-export-id')
       });
     }
     return images;
@@ -283,6 +503,9 @@ const PptePptExporter = {
       if (['SCRIPT', 'STYLE', 'SVG'].includes(el.tagName)) continue;
       if (this._isIconOnly(el)) continue;
       if (!this._shouldExportTextElement(el)) continue;
+      // Root-most wins: when an ancestor was already exported (e.g. <p> wrapping
+      // inline <span>s), skip the descendant so texts never stack on each other.
+      if (this._hasExportedAncestor(el, slideEl, seen)) continue;
 
       const text = this._cleanText(el.innerText || el.textContent || '');
       if (!text) continue;
@@ -309,19 +532,32 @@ const PptePptExporter = {
         italic: style.fontStyle === 'italic' || style.fontStyle === 'oblique',
         underline: style.textDecorationLine.includes('underline'),
         align: this._textAlign(style.textAlign),
-        lineHeightMultiple
+        lineHeightMultiple,
+        exportId: el.getAttribute('data-ppt-export-id')
       });
       seen.add(el);
     }
     return texts;
   },
 
+  _hasExportedAncestor(el, slideEl, seen) {
+    let node = el.parentElement;
+    while (node && node !== slideEl) {
+      if (seen.has(node)) return true;
+      node = node.parentElement;
+    }
+    return false;
+  },
+
   _shouldExportTextElement(el) {
     if (el.dataset.pptRole === 'title' || el.dataset.pptRole === 'text') return true;
     if (/^(H[1-6]|P|LI|BLOCKQUOTE|PRE|CODE|TD|TH)$/i.test(el.tagName)) return true;
 
-    const className = String(el.className || '');
-    if (/(title|subtitle|heading|label|tag|desc|text|number|caption)/i.test(className)) return true;
+    // Class tokens must match as whole words (hyphen/underscore separated) —
+    // a plain substring match lets layout containers like "story-stage" (contains
+    // "tag") swallow their entire subtree as one giant duplicated text box.
+    const tokens = String(el.className || '').split(/\s+/);
+    if (tokens.some(token => /(^|[-_])(title|subtitle|heading|label|tag|desc|text|number|caption)([-_]|$)/i.test(token))) return true;
 
     const ownText = Array.from(el.childNodes)
       .filter(node => node.nodeType === Node.TEXT_NODE)
@@ -351,6 +587,8 @@ const PptePptExporter = {
     const className = String(el.className || '');
     if (/(icon|emoji)/i.test(className)) return true;
     const text = this._cleanText(el.innerText || el.textContent || '');
+    // Arrow glyphs are real content in flow templates, never treat them as icons.
+    if (/^[→←↑↓↔↕⇒⇐⇑⇓↗↘↙↖]+$/.test(text)) return false;
     return text.length <= 2 && /[^\p{L}\p{N}\s.,;:!?'"()[\]{}<>/\\|+-]/u.test(text);
   },
 
@@ -410,10 +648,41 @@ const PptePptExporter = {
 
   _withBaseTag(html, baseHref) {
     const safeBase = this._escapeHtmlAttr(baseHref);
+    const exportStyle = `<style data-ppt-export-style>${this._exportCss()}</style>`;
     if (/<head(\s[^>]*)?>/i.test(html)) {
-      return html.replace(/<head(\s[^>]*)?>/i, match => `${match}<base href="${safeBase}">`);
+      return html.replace(/<head(\s[^>]*)?>/i, match => `${match}<base href="${safeBase}">${exportStyle}`);
     }
-    return `<base href="${safeBase}">${html}`;
+    return `<base href="${safeBase}">${exportStyle}${html}`;
+  },
+
+  _externalizeInlineScripts(html, scriptSourceUrl) {
+    if (!scriptSourceUrl) return String(html || '');
+    const jsTypes = new Set([
+      '', 'module', 'text/javascript', 'application/javascript',
+      'text/ecmascript', 'application/ecmascript'
+    ]);
+    let scriptIndex = 0;
+    return String(html || '').replace(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi, (tag, attrs) => {
+      const index = scriptIndex++;
+      if (/\bsrc\s*=/i.test(attrs)) return tag;
+      const typeMatch = String(attrs).match(/\btype\s*=\s*(?:(["'])(.*?)\1|([^\s>]+))/i);
+      const type = (typeMatch ? (typeMatch[2] ?? typeMatch[3] ?? '') : '').trim().toLowerCase();
+      if (!jsTypes.has(type)) return tag;
+      const separator = scriptSourceUrl.includes('?') ? '&' : '?';
+      const src = `${scriptSourceUrl}${separator}ppte-export-script=${index}`;
+      return `<script${attrs} src="${this._escapeHtmlAttr(src)}"></script>`;
+    });
+  },
+
+  // Snapshots only need final states: kill transitions/animations so stepped
+  // captures settle immediately, and hide presentation chrome (step rails,
+  // progress dots) that only makes sense inside the interactive viewer.
+  // Chrome selectors are scoped under [data-template] so custom slides are untouched.
+  _exportCss() {
+    return [
+      '*,*::before,*::after{transition:none!important;animation:none!important}',
+      '[data-template] .step-rail,[data-template] .term-rail,[data-template] .progress,[data-template] .scene-progress,[data-ppte-concept-animation] .ppte-step-rail,[data-ppte-concept-animation] .ppte-step-dots{visibility:hidden!important}'
+    ].join('\n');
   },
 
   _baseHref(viewer, slideMeta, slidePath) {
@@ -509,9 +778,64 @@ const PptePptExporter = {
     return String(text || '').replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   },
 
-  _svgToDataUri(svg) {
+  // Serializes an SVG into a self-contained data URI. Two things break when an
+  // svg is lifted out of its document: class/var()-based styling (lost with the
+  // stylesheet) and url(#id) references to defs living in OTHER svg elements
+  // (e.g. shared arrow markers). Inline computed presentation attributes and
+  // copy referenced defs into the clone so arrows keep their look.
+  _svgToDataUri(svg, win) {
     const clone = svg.cloneNode(true);
     if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+    const PRESENTATION_PROPS = [
+      'fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width', 'stroke-linecap',
+      'stroke-linejoin', 'stroke-dasharray', 'stroke-opacity', 'opacity',
+      'marker-start', 'marker-mid', 'marker-end'
+    ];
+    const inlineInto = (srcRoot, dstRoot) => {
+      const srcEls = [srcRoot, ...Array.from(srcRoot.querySelectorAll('*'))];
+      const dstEls = [dstRoot, ...Array.from(dstRoot.querySelectorAll('*'))];
+      srcEls.forEach((srcEl, i) => {
+        const dstEl = dstEls[i];
+        if (!dstEl || !dstEl.setAttribute) return;
+        const style = win.getComputedStyle(srcEl);
+        for (const prop of PRESENTATION_PROPS) {
+          let value = style.getPropertyValue(prop);
+          if (value && value.toLowerCase() === 'currentcolor') {
+            value = style.getPropertyValue('color');
+          }
+          // Set explicit "none" too: an inlined ancestor value would otherwise
+          // cascade down and override the element's intended none.
+          if (value && value !== '') dstEl.setAttribute(prop, value);
+        }
+      });
+    };
+    inlineInto(svg, clone);
+
+    const referencedIds = new Set();
+    for (const el of [clone, ...Array.from(clone.querySelectorAll('*'))]) {
+      for (const attr of Array.from(el.attributes || [])) {
+        const match = String(attr.value).match(/url\(\s*["']?#([^)"'\s]+)["']?\s*\)/);
+        if (match) referencedIds.add(match[1]);
+      }
+    }
+    if (referencedIds.size > 0) {
+      const doc = svg.ownerDocument;
+      let defs = clone.querySelector('defs');
+      for (const id of referencedIds) {
+        if (clone.querySelector(`[id="${id}"]`)) continue;
+        const defEl = doc.getElementById(id);
+        if (!defEl) continue;
+        if (!defs) {
+          defs = doc.createElementNS('http://www.w3.org/2000/svg', 'defs');
+          clone.insertBefore(defs, clone.firstChild);
+        }
+        const defClone = defEl.cloneNode(true);
+        inlineInto(defEl, defClone);
+        defs.appendChild(defClone);
+      }
+    }
+
     const text = new XMLSerializer().serializeToString(clone);
     return `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(text)))}`;
   },

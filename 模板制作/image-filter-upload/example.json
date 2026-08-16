@@ -1,0 +1,23 @@
+{
+  "title": "图片资产处理流水线",
+  "lead": "图片池经过筛选与处理后，形成可交付的目标集合。",
+  "sourceImages": [
+    {"src": "assets/heng1.png", "alt": "宽屏素材一", "group": "宽屏素材", "target": false},
+    {"src": "assets/heng2.png", "alt": "宽屏素材二", "group": "宽屏素材", "target": false},
+    {"src": "assets/heng3.png", "alt": "宽屏素材三", "group": "宽屏素材", "target": false},
+    {"src": "assets/shu1.png", "alt": "竖版素材一", "group": "竖版素材", "target": true},
+    {"src": "assets/heng4.png", "alt": "宽屏素材四", "group": "宽屏素材", "target": false},
+    {"src": "assets/shu2.png", "alt": "竖版素材二", "group": "竖版素材", "target": true},
+    {"src": "assets/shu3.png", "alt": "竖版素材三", "group": "竖版素材", "target": true},
+    {"src": "assets/shu4.png", "alt": "竖版素材四", "group": "竖版素材", "target": true},
+    {"src": "assets/shu5.png", "alt": "竖版素材五", "group": "竖版素材", "target": true},
+    {"src": "assets/shu6.png", "alt": "竖版素材六", "group": "竖版素材", "target": true}
+  ],
+  "filterLabel": "保留竖版素材",
+  "transformLabel": "统一添加标记",
+  "destination": "对象存储",
+  "successLabel": "处理完成",
+  "destinationUrl": "storage.example.com/assets/2026",
+  "takeaway": "筛选条件、处理动作和交付位置共同组成一条可复用的资产流水线。",
+  "theme": {"text": "#0f172a", "muted": "#64748b", "primary": "#002855", "selected": "#16a34a", "processed": "#c2410c", "success": "#166534", "line": "#cbd5e1", "surface": "#ffffff", "resultSurface": "#ecfdf5"}
+}

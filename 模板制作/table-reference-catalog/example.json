@@ -1,0 +1,13 @@
+{
+  "title": "常见工具能力目录",
+  "lead": "把同一类对象的能力按统一字段并列，便于快速定位可用接口。",
+  "columns": ["组件", "能力", "数据入口", "提示"],
+  "rows": [
+    {"name": "文件服务", "description": "受控读写授权目录", "cells": ["read_file · write_file · list_directory", "file:// URI", "—"]},
+    {"name": "网页获取", "description": "HTTP 内容转 Markdown", "cells": ["fetch", "—", "—"]},
+    {"name": "代码仓库", "description": "状态、提交与历史读取", "cells": ["git_status · git_commit · git_log", "git:// URI", "—"]},
+    {"name": "时间服务", "description": "时间查询与时区换算", "cells": ["get_current_time · convert_time", "—", "—"]},
+    {"name": "数据库", "description": "表结构读取与 SQL 查询", "cells": ["list_tables · describe_table · execute_sql", "db:// URI", "—"]}
+  ],
+  "theme": {"text": "#1e293b", "muted": "#475569", "primary": "#002855", "line": "#cbd5e1", "surface": "#ffffff", "headerText": "#ffffff", "codeSurface": "#f1f5f9"}
+}

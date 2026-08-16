@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "templateId": "case-facts-conclusion",
+  "checks": [
+    {"id": "root", "selector": "[data-template=case-facts-conclusion]", "required": true},
+    {"id": "facts", "selector": "[data-fact]", "min": 3, "max": 5},
+    {"id": "analysis", "selector": "[data-analysis]", "required": true},
+    {"id": "lesson", "selector": "[data-lesson]", "required": true},
+    {"id": "no-autoplay", "expression": "no-timers-and-no-animation-loop", "required": true}
+  ],
+  "manualReview": ["事实与判断明确分区", "每条事实可验证", "结论从事实推出且可以迁移到其他场景"]
+}

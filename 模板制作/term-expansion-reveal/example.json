@@ -1,0 +1,30 @@
+{
+  "title": "CLI 的含义",
+  "term": {
+    "initials": ["C", "L", "I"],
+    "words": ["ommand", "ine", "nterface"],
+    "fullName": "Command Line Interface"
+  },
+  "definition": "CLI 是通过文本命令使用程序的方式：用户输入命令，操作系统启动进程，结果回显到屏幕。",
+  "example": {
+    "kind": "terminal",
+    "title": "在源码中搜索 TODO",
+    "command": "grep -rn \"TODO\" src/",
+    "lines": [
+      "handler.ts:42:// TODO: handle null case",
+      "utils.ts:8:// TODO: refactor this",
+      "index.ts:15:// TODO: add help text"
+    ],
+    "result": "3 matches"
+  },
+  "theme": {
+    "text": "#1f2937",
+    "muted": "#475569",
+    "primary": "#1e40af",
+    "emphasis": "#b91c1c",
+    "line": "#cbd5e1",
+    "surface": "#ffffff",
+    "terminalSurface": "#f8fafc",
+    "terminalText": "#1f2937"
+  }
+}

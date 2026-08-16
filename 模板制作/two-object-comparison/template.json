@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "two-object-comparison",
+  "version": "0.1.0",
+  "name": "双对象逐项对照",
+  "family": "basic-content",
+  "roles": ["content", "comparison"],
+  "contentKinds": ["comparison", "tradeoff", "selection"],
+  "density": ["medium", "high"],
+  "motionModes": ["none"],
+  "slots": {
+    "title": {"type": "text", "required": true, "maxChars": 32},
+    "left": {"type": "comparison-object", "required": true},
+    "right": {"type": "comparison-object", "required": true},
+    "dimensions": {"type": "comparison-row-list", "required": true, "minItems": 3, "maxItems": 6},
+    "takeaway": {"type": "text", "required": true, "maxChars": 90}
+  },
+  "constraints": {"rootSelector": "[data-template=two-object-comparison]", "pairedDimensions": true, "maxDimensions": 6, "defaultMotion": "none", "fontUnit": "vw"},
+  "avoid": ["三个以上对象", "双方比较维度不同", "只有优缺点没有选择结论", "单元格需要长段落"]
+}

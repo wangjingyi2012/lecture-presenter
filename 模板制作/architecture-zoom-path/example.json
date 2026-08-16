@@ -1,0 +1,13 @@
+{
+  "title": "实时风控系统架构",
+  "lead": "一条交易从事件接入开始，经过规则与模型判断，最终输出风险处置结果。",
+  "input": {"label": "交易事件", "detail": "金额、账户、设备"},
+  "layers": [
+    {"id": "access", "role": "context", "label": "接入层", "modules": [{"id": "gateway", "label": "事件网关"}, {"id": "normalize", "label": "字段标准化"}]},
+    {"id": "decision", "role": "core", "label": "决策层", "modules": [{"id": "rules", "label": "规则引擎"}, {"id": "model", "label": "风险模型"}, {"id": "merge", "label": "结果融合"}]},
+    {"id": "data", "role": "support", "label": "数据层", "modules": [{"id": "profile", "label": "用户画像"}, {"id": "history", "label": "历史行为"}, {"id": "blacklist", "label": "风险名单"}]}
+  ],
+  "output": {"label": "处置结果", "detail": "放行、复核、拦截"},
+  "path": ["gateway", "normalize", "model", "merge"],
+  "takeaway": "接入层统一事件，决策层完成判断，数据层为每次判断提供证据。"
+}

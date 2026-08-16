@@ -32,6 +32,8 @@ npm run test:captions        # scripts/test-live-caption.js (caption transcript 
 npm run test:course-manager  # scripts/test-course-manager.js (course grouping/switcher logic)
 node scripts/test-auth.js    # auth UI logic (no npm script alias)
 npm run test:workbench       # scripts/test-workbench-window.js (AI workbench, deck Harness, Pi bridge)
+npm run test:ppt-export      # scripts/test-ppt-exporter-steps.js (PPTX export step driving)
+npm run test:ppt-export-animate # scripts/test-ppt-exporter-animate.js (PPTX animation plan)
 
 cargo check            # run inside src-tauri/ to type-check Rust
 cargo test             # run inside src-tauri/ — unit tests in lib.rs plus tests/info_plist.rs
@@ -126,7 +128,7 @@ Annotator styles live in `css/ppte-annotator.css` and must be loaded via `<link>
 
 ### PPTX export (js/ppte-ppt-exporter.js)
 
-`PptePptExporter.export(viewer)` converts the loaded PPTE HTML slides into an editable `.pptx` via the `pptxgenjs` dependency (`LAYOUT_WIDE`, 13.33×7.5in / 1920×1080 render basis). It reads the live DOM of each slide iframe, so it depends on slides being loaded through `PptExtraViewer`. This is the only feature using `pptxgenjs`; there is no test script for it.
+`PptePptExporter.export(viewer, {mode, onProgress})` converts the loaded PPTE HTML slides into an editable `.pptx` via the `pptxgenjs` dependency (`LAYOUT_WIDE`, 13.33×7.5in / 1920×1080 render basis). It loads each slide in a hidden iframe and extracts native elements (text boxes, autoshapes, embedded images) — no rasterization. Three modes, chosen from the dropdown next to `#ppt-extra-export`: `static` drives stepped templates to their final state and exports one page per slide; `steps` dispatches `ArrowRight` keydowns into the slide document (templates consume them via `preventDefault` per the `data-step`/`data-max-step` contract) and exports one page per animation step; `animate` exports one PPTX page per source slide and binds elements to native on-click fade in/out animations — elements are stamped with `data-ppt-export-id` in the iframe DOM, `_buildAnimationPlan` tracks per-element visibility/signature runs across steps (content changes become exit+enter variants), animated objects get `objectName: "pptr<N>"`, and the Rust `save_pptx_file` command patches a `<p:timing>` tree (fade = presetID 10 entr/exit) into each slide XML via the `zip` crate. The injected export stylesheet kills CSS transitions/animations (snapshots only need end states) and hides viewer chrome (`.step-rail`/`.term-rail`/`.progress`/`.scene-progress`, scoped to `[data-template]` pages). This is the only feature using `pptxgenjs`; the step-driving and animation-plan logic are covered by `npm run test:ppt-export` and `npm run test:ppt-export-animate`, the zip/XML patching by `cargo test` (`pptx_animation_tests`).
 
 ### Page reuse: shared groups (js/ppte-shared-groups.js) and resource center (js/resource-center.js)
 

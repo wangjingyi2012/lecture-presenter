@@ -1,0 +1,13 @@
+{
+  "title": "智能体工具调用循环",
+  "lead": "每个工具结果都会回到决策中心，决定下一步动作。",
+  "cycles": [
+    {"think": "分析当前状态", "action": "读取目录", "result": "获得文件列表"},
+    {"think": "定位目标资源", "action": "读取元数据", "result": "获得资源信息"},
+    {"think": "执行处理动作", "action": "转换资源", "result": "获得处理结果"},
+    {"think": "确认交付状态", "action": "发布结果", "result": "获得发布回执"}
+  ],
+  "final": "生成最终答复",
+  "captions": {"thinking": "每一轮都先判断下一步动作", "receiving": "每一轮都接收工具返回的数据"},
+  "theme": {"text": "#f1f5f9", "muted": "#94a3b8", "primary": "#1f2937", "tool": "#1d4ed8", "result": "#15803d", "final": "#7c3aed", "line": "#94a3b8", "surface": "#ffffff"}
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "templateId": "architecture-zoom-path",
+  "checks": [
+    {"id": "root", "selector": "[data-template=architecture-zoom-path]", "required": true},
+    {"id": "layers", "selector": "[data-layer]", "min": 2, "max": 4},
+    {"id": "modules", "selector": "[data-module]", "min": 4, "max": 16},
+    {"id": "path", "selector": "[data-path-node]", "min": 3, "max": 7},
+    {"id": "path-valid", "expression": "every-path-id-references-existing-module", "required": true},
+    {"id": "reduced-motion", "expression": "source.includes('prefers-reduced-motion')", "required": true},
+    {"id": "host-navigation", "expression": "final-step-does-not-prevent-host-navigation", "required": true},
+    {"id": "no-autoplay", "expression": "no-setInterval-and-no-unbounded-animation-loop", "required": true},
+    {"id": "font-units", "expression": "visible-font-size-units-use-vw-or-vh", "required": true}
+  ],
+  "manualReview": [
+    "总览状态能看清系统边界",
+    "聚焦层不会导致其他模块重新排版",
+    "端到端路径只高亮必要模块",
+    "输入、系统和输出之间没有视觉断点"
+  ]
+}

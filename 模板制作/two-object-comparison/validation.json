@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "templateId": "two-object-comparison",
+  "checks": [
+    {"id": "root", "selector": "[data-template=two-object-comparison]", "required": true},
+    {"id": "objects", "selector": "[data-object]", "min": 2, "max": 2},
+    {"id": "dimensions", "selector": "[data-dimension]", "min": 3, "max": 6},
+    {"id": "paired", "expression": "every-dimension-has-left-and-right-values", "required": true},
+    {"id": "no-autoplay", "expression": "no-timers-and-no-animation-loop", "required": true}
+  ],
+  "manualReview": ["左右对象在同一维度比较", "单元格使用短句", "底部结论说明选择条件而非宣布绝对胜负"]
+}

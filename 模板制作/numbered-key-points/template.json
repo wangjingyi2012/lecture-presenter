@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "numbered-key-points",
+  "version": "0.1.0",
+  "name": "编号要点清单",
+  "family": "basic-content",
+  "roles": ["content", "reference", "summary"],
+  "contentKinds": ["key-points", "principles", "definitions"],
+  "density": ["medium", "high"],
+  "motionModes": ["none", "optional-reveal"],
+  "slots": {
+    "title": {"type": "text", "required": true, "maxChars": 32},
+    "lead": {"type": "text", "required": false, "maxChars": 80},
+    "items": {"type": "object-list", "required": true, "minItems": 3, "maxItems": 6},
+    "takeaway": {"type": "text", "required": false, "maxChars": 80}
+  },
+  "constraints": {"rootSelector": "[data-template=numbered-key-points]", "maxItems": 6, "defaultMotion": "none", "fontUnit": "vw"},
+  "avoid": ["条目存在严格顺序", "条目需要逐列比较", "超过六项", "每项超过85字"]
+}

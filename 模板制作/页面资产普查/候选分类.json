@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "ratingsFile": "PPTE页面评价.json",
+  "ratingsSummary": {"like": 74, "neutral": 58, "dislike": 6},
+  "firstBatchAfterRatings": ["concept-story-progression", "architecture-zoom-path", "parameter-result-space"],
+  "generatedFrom": ["知识库搭建", "AI大模型原理_安恒", "Agent概念及基础开发"],
+  "summary": {"totalPages": 138, "contentPages": 125, "scaffoldPages": 13, "interactivePages": 48, "imagePages": 34, "tablePages": 10, "codePages": 14, "svgPages": 38},
+  "newTemplateFamilies": [
+    {"id": "metric-definition-example", "name": "指标定义与样例", "priority": "P0", "sources": ["知识库搭建/slide29.html", "知识库搭建/slide30.html", "知识库搭建/slide31.html", "知识库搭建/slide32.html"], "relation": "定义/公式 + 具体样例 + 结果解释", "notes": "同一结构连续出现四页，跨 Recall、Precision、Score、阈值仍成立。"},
+    {"id": "evidence-trace", "name": "结论与证据追溯", "priority": "P0", "sources": ["知识库搭建/slide28.html", "Agent概念及基础开发/slide051.html"], "relation": "结论/回答 + 引用标号 + 原文或外部证据", "notes": "适合研究、合规、审核、数据分析和事实核验。"},
+    {"id": "before-after-ranking", "name": "处理前后排序变化", "priority": "P0", "sources": ["知识库搭建/slide33.html"], "relation": "输入排序 + 中间处理 + 输出排序", "notes": "可替换为推荐重排、优先级调整、清洗前后和模型校准。"},
+    {"id": "input-process-output", "name": "输入处理输出舞台", "priority": "P0", "sources": ["知识库搭建/slide19.html", "AI大模型原理_安恒/slide15.html"], "relation": "输入材料 + 核心处理器 + 输出结果", "notes": "适合模型调用、数据加工、审核、编译和转换流程。"},
+    {"id": "interactive-parameter-space", "name": "参数控制与结果空间", "priority": "P1", "sources": ["知识库搭建/slide18.html"], "relation": "控制参数 + 中央空间/图形 + 动态结果列表", "notes": "滑杆和选项是通用交互组件，模板需限定数据规模。"},
+    {"id": "progressive-concept-story", "name": "抽象概念分幕演进", "priority": "P0", "sources": ["AI大模型原理_安恒/slide05.html", "AI大模型原理_安恒/slide15.html", "AI大模型原理_安恒/slide51a.html", "AI大模型原理_安恒/slide63.html"], "relation": "直观对象 + 中间机制 + 正式概念 + 边界结论", "notes": "不是固定布局，而是需要服务端生成分幕状态的高价值叙事族。"},
+    {"id": "architecture-zoom", "name": "总览到局部的架构拆解", "priority": "P0", "sources": ["AI大模型原理_安恒/slide24.html", "Agent概念及基础开发/slide033.html", "Agent概念及基础开发/slide035.html"], "relation": "系统总览 + 模块放大 + 路径解释 + 输出", "notes": "适合复杂模型、系统架构、业务平台和网络拓扑。"},
+    {"id": "iterative-merge", "name": "迭代合并算法演示", "priority": "P1", "sources": ["AI大模型原理_安恒/slide45.html"], "relation": "当前状态 + 候选项 + 本轮选择 + 新状态", "notes": "可覆盖聚类、合并、压缩、调度和贪心算法。"},
+    {"id": "teacher-student-transfer", "name": "能力迁移对照", "priority": "P1", "sources": ["AI大模型原理_安恒/slide53.html"], "relation": "来源对象 + 迁移动作 + 目标对象 + 收益/代价", "notes": "可扩展到知识传承、系统迁移、数据同步和新旧方案替换。"},
+    {"id": "timeline-evidence", "name": "事件时间线与响应结论", "priority": "P1", "sources": ["Agent概念及基础开发/slide018.html"], "relation": "时间节点 + 事件证据 + 延迟或结论", "notes": "适合监管、故障、项目里程碑和事件复盘。"},
+    {"id": "risk-escalation-curve", "name": "能力与风险递增曲线", "priority": "P1", "sources": ["Agent概念及基础开发/slide029.html"], "relation": "阶段提升 + 能力增强 + 风险同步上升", "notes": "可扩展到成本、复杂度、收益和权限变化。"},
+    {"id": "write-store-recall-context", "name": "写入存储召回闭环", "priority": "P1", "sources": ["Agent概念及基础开发/slide038.html"], "relation": "写入 + 持久化 + 召回 + 注入上下文", "notes": "适合记忆、缓存、知识库、状态管理和数据闭环。"},
+    {"id": "boundary-separated-pipelines", "name": "专业边界与串联流程", "priority": "P1", "sources": ["Agent概念及基础开发/slide053.html", "Agent概念及基础开发/slide054.html"], "relation": "多个专业单元 + 各自边界 + 串联/协作方式", "notes": "可用于团队、服务、Agent、Skill 和职责拆分。"}
+  ],
+  "variantsOfExistingFamilies": [
+    {"family": "table", "variant": "selection-catalog", "sources": ["知识库搭建/slide22.html", "知识库搭建/slide24.html", "Agent概念及基础开发/slide008.html", "Agent概念及基础开发/slide009.html"], "notes": "选型表应作为 table-comparison-matrix 的高密度变体，不另建版式族。"},
+    {"family": "flow", "variant": "linear-tool-call", "sources": ["Agent概念及基础开发/slide005.html"], "notes": "线性工具调用是 flow 家族的轻量变体。"},
+    {"family": "flow", "variant": "risk-position-chain", "sources": ["Agent概念及基础开发/slide025.html"], "notes": "五个投毒位置本质是流程节点叠加风险状态。"},
+    {"family": "comparison", "variant": "two-column-role-boundary", "sources": ["AI大模型原理_安恒/slide53.html", "Agent概念及基础开发/slide037.html", "Agent概念及基础开发/slide053.html"], "notes": "双对象角色、能力和边界对照。"},
+    {"family": "reference", "variant": "numbered-definition-list", "sources": ["Agent概念及基础开发/slide048.html", "Agent概念及基础开发/slide052.html", "Agent概念及基础开发/slide059.html"], "notes": "编号定义清单是参考页，不需要复杂动效。"}
+  ],
+  "reusableComponents": [
+    {"id": "image-modal-detail", "name": "主图与弹窗细节", "sources": ["知识库搭建/slide15.html", "知识库搭建/slide17.html", "AI大模型原理_安恒/slide24.html"]},
+    {"id": "parameter-slider", "name": "数值滑杆与实时结果", "sources": ["知识库搭建/slide18.html"]},
+    {"id": "step-tabs-detail", "name": "步骤标签与详情切换", "sources": ["Agent概念及基础开发/slide005.html", "Agent概念及基础开发/slide036.html"]},
+    {"id": "document-browser-popover", "name": "文档浏览与证据弹层", "sources": ["Agent概念及基础开发/slide024.html"]},
+    {"id": "architecture-hotspot", "name": "架构图局部热点与放大", "sources": ["AI大模型原理_安恒/slide24.html"]},
+    {"id": "rank-change-list", "name": "排序前后名次变化", "sources": ["知识库搭建/slide33.html"]},
+    {"id": "progressive-risk-highlight", "name": "风险链逐点高亮", "sources": ["Agent概念及基础开发/slide029.html"]}
+  ],
+  "styleSamples": [
+    {"kind": "product-screenshot", "sources": ["知识库搭建/slide07.html", "知识库搭建/slide23.html", "知识库搭建/slide27.html", "Agent概念及基础开发/slide011.html", "Agent概念及基础开发/slide012.html", "Agent概念及基础开发/slide015.html"], "reason": "业务截图价值高，但布局依赖具体产品，应作为图片/浏览器框组件样本。"},
+    {"kind": "case-evidence", "sources": ["Agent概念及基础开发/slide017.html", "Agent概念及基础开发/slide019.html", "Agent概念及基础开发/slide022.html", "Agent概念及基础开发/slide026.html", "Agent概念及基础开发/slide027.html", "Agent概念及基础开发/slide028.html"], "reason": "保留案例证据组织方式，不将具体新闻事件抽象成模板。"},
+    {"kind": "dense-industry-brief", "sources": ["AI大模型原理_安恒/slide73.html", "AI大模型原理_安恒/slide74.html"], "reason": "可作为行业简报风格样本，但文本密度和时效性较强。"}
+  ]
+}

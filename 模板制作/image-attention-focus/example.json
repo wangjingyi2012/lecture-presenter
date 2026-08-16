@@ -1,0 +1,17 @@
+{
+  "title": "图片注意力的计算过程",
+  "query": "人物",
+  "images": [
+    {"src": "assets/normal1.png", "alt": "抽象纹理", "labels": "纹理 · 抽象", "weight": 0.02},
+    {"src": "assets/normal2.png", "alt": "模糊背景", "labels": "模糊 · 背景", "weight": 0.01},
+    {"src": "assets/attention1.png", "alt": "人物示例一", "labels": "人物 · 女性 · 演员", "weight": 0.78, "target": true},
+    {"src": "assets/normal3.png", "alt": "墙面纹理", "labels": "墙面 · 纹理", "weight": 0.02},
+    {"src": "assets/normal4.png", "alt": "颗粒背景", "labels": "颗粒 · 背景", "weight": 0.01},
+    {"src": "assets/attention2.png", "alt": "人物示例二", "labels": "人物 · 男性 · 运动员", "weight": 0.08},
+    {"src": "assets/normal5.png", "alt": "裂纹墙面", "labels": "墙面 · 裂纹", "weight": 0.03},
+    {"src": "assets/normal7.png", "alt": "线条图形", "labels": "线条 · 抽象", "weight": 0.05}
+  ],
+  "selectedValue": {"image": "assets/attention1.png", "alt": "高权重图片", "weight": 0.78, "kicker": "VALUE | 实际内容", "name": "人物示例一", "fields": [{"label": "类别", "value": "人物"}, {"label": "特征", "value": "女性、演员"}, {"label": "作用", "value": "为结果提供主要内容"}]},
+  "takeaway": "权重越高，图片内容对最终结果的贡献越大",
+  "theme": {"text": "#0f172a", "muted": "#64748b", "primary": "#002855", "query": "#0284c7", "emphasis": "#f59e0b", "line": "#cbd5e1", "surface": "#ffffff", "summarySurface": "#f0f9ff"}
+}
