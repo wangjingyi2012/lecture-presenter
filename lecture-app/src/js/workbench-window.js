@@ -87,7 +87,7 @@ window.WorkbenchWindow = {
     if (send) send.onclick = () => this._send();
     if (stop) stop.onclick = () => this._requestStop();
     if (clear) clear.onclick = () => this._clear();
-    input.oninput = () => this._updateInputPicker();
+    input.oninput = () => { this._autoResizeInput(); this._updateInputPicker(); };
     input.onclick = () => this._updateInputPicker();
     input.onkeyup = (e) => {
       if (!['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) this._updateInputPicker();
@@ -102,6 +102,14 @@ window.WorkbenchWindow = {
     if (pageTrigger) pageTrigger.onclick = () => this._openPickerToken('@');
     if (skillTrigger) skillTrigger.onclick = () => this._openPickerToken('$');
     if (skillImport) skillImport.onclick = () => this._importSkills();
+  },
+
+  // Grows the textarea with its content, capped by the CSS max-height.
+  _autoResizeInput() {
+    const input = document.getElementById('wb-input');
+    if (!input || !input.style) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight || 0, 160)}px`;
   },
 
   async _importSkills() {
@@ -229,6 +237,7 @@ window.WorkbenchWindow = {
     if (!page) return;
     const input = document.getElementById('wb-input');
     if (input && !input.value.startsWith('@')) input.value = `@${page} ` + input.value;
+    this._autoResizeInput();
     input.focus();
   },
 
@@ -350,6 +359,7 @@ window.WorkbenchWindow = {
     const applied = window.PpteSlashCommands.applySuggestion(input.value, input.selectionStart, name);
     input.value = applied.value;
     input.setSelectionRange?.(applied.caret, applied.caret);
+    this._autoResizeInput();
     this._hideSlashMenu();
     input.focus();
   },
@@ -360,6 +370,7 @@ window.WorkbenchWindow = {
     const applied = window.PpteSlashCommands.applyPageSuggestion(input.value, input.selectionStart, page);
     input.value = applied.value;
     input.setSelectionRange?.(applied.caret, applied.caret);
+    this._autoResizeInput();
     this._hideSlashMenu();
     input.focus();
   },
@@ -370,6 +381,7 @@ window.WorkbenchWindow = {
     const applied = window.PpteSlashCommands.applySkillSuggestion(input.value, input.selectionStart, name);
     input.value = applied.value;
     input.setSelectionRange?.(applied.caret, applied.caret);
+    this._autoResizeInput();
     this._hideSlashMenu();
     input.focus();
   },
@@ -554,6 +566,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       else if (slash.command.localAction === 'compact') this._compact();
       else this._appendAssistantMarkdown(window.PpteSlashCommands.helpMarkdown());
       if (inputEl) inputEl.value = '';
+      this._autoResizeInput();
       this._hideSlashMenu();
       return;
     }
@@ -573,6 +586,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     if (this._isHarnessResumeRequest(input) && ['running', 'paused', 'failed', 'repairing', 'needs-repair'].includes(executionStatus)) {
       this._appendUser(input, []);
       if (inputEl) inputEl.value = '';
+      this._autoResizeInput();
       this._hideSlashMenu();
       await this._resumePlannedHarness(resumablePlan, input);
       return;
@@ -640,9 +654,10 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     this._stopRequested = false;
     this._appendUser(input, mentioned);
     if (enabledSkills.length) this._log('sys', `本轮启用技能 · ${enabledSkills.join('、')}`);
-    const additions = [skillContext, commandContext, taskInitialization, slash?.instruction || ''].filter(Boolean).join('\n\n');
+    const additions = [skillContext, commandContext, taskInitialization, deckLevel ? this._outlinePromptBlock() : '', slash?.instruction || ''].filter(Boolean).join('\n\n');
     this.history.push({ role: 'user', content: additions ? `${content}\n\n${additions}` : content });
     if (inputEl) inputEl.value = '';
+    this._autoResizeInput();
     this._hideSlashMenu();
 
     await this._runTurn();
