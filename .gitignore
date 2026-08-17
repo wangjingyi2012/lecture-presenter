@@ -56,3 +56,8 @@ docs/images/
 
 # Claude Code local handoff (contains internal ops details; kept local only)
 CLAUDE.md
+
+# Internal working notes, template library copies, and agent guidance stay local
+AGENTS.md
+memory/
+模板制作/
