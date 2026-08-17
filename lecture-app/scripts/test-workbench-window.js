@@ -1036,6 +1036,52 @@ async function testAgentImportsSelectedExternalSkillFolder() {
   assert.equal(calls[1].payload.sourcePath, '/tmp/codex-skills');
 }
 
+function testStreamingBubbleRendersFinalAnswerProgressively() {
+  const appended = [];
+  const messages = { appendChild: el => appended.push(el), scrollTop: 0, scrollHeight: 0 };
+  const originalGetElementById = context.document.getElementById;
+  const hadCreateElement = 'createElement' in context.document;
+  const originalCreateElement = context.document.createElement;
+  context.document.getElementById = id => (id === 'wb-messages' ? messages : null);
+  context.document.createElement = () => {
+    const classes = new Set();
+    return {
+      className: '',
+      textContent: '',
+      innerHTML: '',
+      removed: false,
+      classList: {
+        add: c => classes.add(c),
+        remove: c => classes.delete(c),
+        contains: c => classes.has(c),
+      },
+      remove() { this.removed = true; },
+    };
+  };
+  try {
+    wb._streamBubble = null;
+    wb._streamFull = '短句';
+    wb._renderStreamingBubble();
+    assert.equal(wb._streamBubble, null, 'short prose stays in the status line');
+
+    wb._streamFull = '这是一段足够长的最终答复内容，'.repeat(10);
+    wb._renderStreamingBubble();
+    assert.ok(wb._streamBubble, 'long prose streams into a live bubble');
+    assert.ok(wb._streamBubble.textContent.includes('最终答复内容'));
+    assert.ok(wb._streamBubble.className.includes('wb-streaming'));
+
+    wb._streamFull += '\n\n```action\n{"tool":"validate_deck"}\n```';
+    wb._renderStreamingBubble();
+    assert.equal(wb._streamBubble, null, 'a complete action block pulls prose back to the status line');
+  } finally {
+    context.document.getElementById = originalGetElementById;
+    if (hadCreateElement) context.document.createElement = originalCreateElement;
+    else delete context.document.createElement;
+    wb._streamBubble = null;
+    wb._streamFull = '';
+  }
+}
+
 (async () => {
   await testLectureAiRetriesOneTransientUpstreamFailure();
   await testInputUiBindsWithoutTauriEvents();
@@ -1057,6 +1103,7 @@ async function testAgentImportsSelectedExternalSkillFolder() {
   await testPageHarnessResetsMessagesBetweenSlides();
   await testPiWebSocketReturnsMatchingToolResult();
   await testAgentImportsSelectedExternalSkillFolder();
+  testStreamingBubbleRendersFinalAnswerProgressively();
 })()
   .then(() => console.log('test-workbench-window: all assertions passed'))
   .catch((error) => {

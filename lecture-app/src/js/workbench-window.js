@@ -16,6 +16,7 @@ window.WorkbenchWindow = {
   busy: false,
   _streamFull: '',
   _streamResolve: null,
+  _streamBubble: null,
   _renderTimer: null,
   _modelStatusTimer: null,
   _modelStatusEl: null,
@@ -737,10 +738,25 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             });
             continue;
           }
-          this._appendAssistantMarkdown(this._stripActions(text));
+          if (this._streamBubble) {
+            // The round streamed into a live bubble: finalize it in place.
+            const el = this._streamBubble;
+            this._streamBubble = null;
+            el.classList.remove('wb-streaming');
+            const finalText = this._stripActions(text);
+            if (window.marked) {
+              el.innerHTML = this._sanitizeHtml(window.marked.parse(finalText));
+            } else {
+              el.textContent = finalText;
+            }
+            this._scroll();
+          } else {
+            this._appendAssistantMarkdown(this._stripActions(text));
+          }
           this._log('sys', `任务结束 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
           break;
         }
+        this._removeStreamBubble();
         const results = [];
         let terminalToolFailure = '';
         for (const a of actions) {
@@ -864,6 +880,11 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         this._log('err', `${e?.isModelRequestError ? '模型请求失败' : '出错'}：${message}`);
       }
     } finally {
+      // Stop mid-stream (or an error) can leave a live bubble: freeze its cursor.
+      if (this._streamBubble) {
+        this._streamBubble.classList.remove('wb-streaming');
+        this._streamBubble = null;
+      }
       this.busy = false;
       this._setBusy(false);
     }
@@ -1447,6 +1468,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   _callAIOnce(messages, attempt = 1, contextMode = 'deck-plan', contextTemplateIds = []) {
     return new Promise((resolve, reject) => {
       this._streamFull = '';
+      this._removeStreamBubble();
       this._streamResolve = resolve;
       const request = { generation: this._turnGeneration, reject };
       this._activeStreamRequest = request;
@@ -1525,7 +1547,43 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     this._renderTimer = setTimeout(() => {
       this._renderTimer = null;
       this._updateModelStatusFromOutput();
+      this._renderStreamingBubble();
     }, 50);
+  },
+
+  // Streams the round's prose into a live bubble so a final answer appears
+  // progressively. Tool-round prose stays compressed in the status line: as
+  // soon as a complete ```action block exists, the bubble is removed.
+  _renderStreamingBubble() {
+    if (/```action\s*[\s\S]*?```/i.test(this._streamFull)) {
+      this._removeStreamBubble();
+      return;
+    }
+    // Hide an unterminated action fence tail while it is still streaming in.
+    const fenceIndex = this._streamFull.indexOf('```action');
+    const source = fenceIndex >= 0 ? this._streamFull.slice(0, fenceIndex) : this._streamFull;
+    const visible = this._stripActions(source).trim();
+    if (visible.length < 80) return;
+    if (!this._streamBubble) {
+      const m = document.getElementById('wb-messages');
+      if (!m) return;
+      this._streamBubble = document.createElement('div');
+      this._streamBubble.className = 'ln ln-ai markdown-body wb-streaming';
+      m.appendChild(this._streamBubble);
+    }
+    if (window.marked) {
+      this._streamBubble.innerHTML = this._sanitizeHtml(window.marked.parse(visible));
+    } else {
+      this._streamBubble.textContent = visible;
+    }
+    this._scroll();
+  },
+
+  _removeStreamBubble() {
+    if (this._streamBubble) {
+      this._streamBubble.remove();
+      this._streamBubble = null;
+    }
   },
 
   _compactStatus(text) {

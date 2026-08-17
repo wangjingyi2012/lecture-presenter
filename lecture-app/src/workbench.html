@@ -65,6 +65,8 @@
     .ln-user { color: var(--term-accent); }
     .ln-user::before { content: "> "; color: var(--term-accent); }
     .ln-ai { color: var(--term-fg); margin: 6px 0; white-space: normal; }
+    .wb-streaming::after { content: "▍"; color: var(--term-accent); animation: wb-caret-blink 0.9s steps(1) infinite; }
+    @keyframes wb-caret-blink { 50% { opacity: 0; } }
     .ln-phase { color: var(--term-muted); font-size: 12px; margin: 4px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto; }
     .ln-phase::before { content: "◌ "; color: var(--term-accent); }
     .ln-act { color: var(--term-yellow); }
