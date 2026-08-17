@@ -1415,7 +1415,8 @@ fn zip_ppte_directory(dir_path: &str) -> Result<Vec<u8>, String> {
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
-            if entry.file_name().to_string_lossy() == ".DS_Store" {
+            let entry_name = entry.file_name().to_string_lossy().to_lowercase();
+            if entry_name == ".ds_store" || entry_name == "outline.md" {
                 continue;
             }
             if path.is_dir() {
@@ -2720,6 +2721,7 @@ fn ppte_is_excluded_snapshot_name(name: &str) -> bool {
         || lower.starts_with(".env.")
         || lower == "credentials.json"
         || lower == "app-config.json"
+        || lower == "outline.md"
         || lower.ends_with(".pem")
         || lower.ends_with(".key")
 }
@@ -4440,6 +4442,48 @@ mod slide_bridge_tests {
             b"window.third = 3;"
         );
         assert!(extract_html_script_body(html, 3).is_none());
+    }
+}
+
+#[cfg(test)]
+mod ppte_outline_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lecture-app-{}-{}", name, suffix))
+    }
+
+    #[test]
+    fn outline_md_is_excluded_from_snapshot_names() {
+        assert!(ppte_is_excluded_snapshot_name("outline.md"));
+        assert!(ppte_is_excluded_snapshot_name("Outline.MD"));
+        assert!(!ppte_is_excluded_snapshot_name("slide01.html"));
+    }
+
+    #[test]
+    fn zip_ppte_directory_skips_outline_md() {
+        let dir = unique_temp_dir("zip-outline");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("slide01.html"), "<h1>One</h1>").unwrap();
+        fs::write(dir.join("outline.md"), "# 章纲").unwrap();
+        fs::write(dir.join(".DS_Store"), b"junk").unwrap();
+
+        let bytes = zip_ppte_directory(dir.to_string_lossy().as_ref()).unwrap();
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"slide01.html".to_string()));
+        assert!(!names.iter().any(|n| n.ends_with("outline.md")));
+        assert!(!names.iter().any(|n| n.ends_with(".DS_Store")));
+
+        fs::remove_dir_all(dir).unwrap();
     }
 }
 

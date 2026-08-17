@@ -1656,6 +1656,130 @@ html, body {
   min-height: 0;
 }
 
+/* ===== PPTE outline tab (outline.md) ===== */
+#ppte-editor-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.ppte-editor-tab {
+  padding: 5px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ppte-editor-tab:hover {
+  color: var(--text-primary);
+}
+
+.ppte-editor-tab.active {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--accent, #4a7dff);
+}
+
+#ppte-editor-toolbar.hidden,
+#ppt-current-html.hidden,
+#ppte-outline-pane.hidden,
+#ppte-outline-edit.hidden,
+#ppte-outline-preview.hidden {
+  display: none !important;
+}
+
+#ppte-outline-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ppte-outline-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.ppte-outline-hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.ppte-outline-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ppte-outline-status {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+#ppte-outline-edit {
+  flex: 1;
+  width: 100%;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+  resize: none;
+  box-sizing: border-box;
+  min-height: 0;
+}
+
+#ppte-outline-preview {
+  flex: 1;
+  width: 100%;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-y: auto;
+  box-sizing: border-box;
+  min-height: 0;
+}
+
+#ppte-outline-preview.markdown-body h1,
+#ppte-outline-preview.markdown-body h2,
+#ppte-outline-preview.markdown-body h3 {
+  margin: 0.8em 0 0.45em;
+  line-height: 1.35;
+}
+
+#ppte-outline-preview.markdown-body h1 {
+  font-size: 24px;
+}
+
+#ppte-outline-preview.markdown-body h2 {
+  font-size: 19px;
+}
+
+#ppte-outline-preview.markdown-body p,
+#ppte-outline-preview.markdown-body ul,
+#ppte-outline-preview.markdown-body ol {
+  margin: 0 0 0.7em;
+}
+
+#ppte-outline-preview.markdown-body code {
+  background: var(--bg-secondary);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
 @media (max-width: 1100px) {
   .ppte-editor-header {
     align-items: flex-start;

@@ -9,7 +9,7 @@ window.PpteEditor = {
   async _loadPptFileStats(folderPath, manifest) {
     if (!window.__TAURI__) return {};
     const slides = this._normalizeManifestSlides(manifest?.slides);
-    const relPaths = ['manifest.json', ...slides.map(s => s.file).filter(Boolean)];
+    const relPaths = ['manifest.json', 'outline.md', ...slides.map(s => s.file).filter(Boolean)];
     const uniqueRelPaths = [...new Set(relPaths)];
     const fullPaths = uniqueRelPaths.map(path => this._joinPptPath(folderPath, path));
     const stats = await window.__TAURI__.core.invoke('stat_files', { paths: fullPaths });
@@ -78,6 +78,89 @@ window.PpteEditor = {
     }
   },
 
+  // ----- outline.md (chapter outline tab) -----
+
+  async _loadPptOutline(pb) {
+    if (!pb || !window.__TAURI__) return;
+    try {
+      pb.outline = await window.__TAURI__.core.invoke('read_text_file', {
+        filePath: this._joinPptPath(pb.folderPath, 'outline.md'),
+      });
+    } catch (e) {
+      pb.outline = '';
+    }
+    pb.outlineDirty = false;
+    if (this._pptBuilder === pb) {
+      const edit = document.getElementById('ppte-outline-edit');
+      if (edit && pb.activeTab === 'outline') edit.value = pb.outline;
+      this._updatePptOutlineStatus();
+    }
+  },
+
+  _markOutlineFromEditor(pb) {
+    if (!pb || pb.activeTab !== 'outline') return;
+    const edit = document.getElementById('ppte-outline-edit');
+    if (!edit) return;
+    if ((pb.outline || '') !== edit.value) {
+      pb.outline = edit.value;
+      pb.outlineDirty = true;
+    }
+  },
+
+  _updatePptOutlineStatus() {
+    const el = document.getElementById('ppte-outline-status');
+    if (!el) return;
+    const pb = this._pptBuilder;
+    el.textContent = pb && pb.outlineDirty ? '未保存' : '';
+  },
+
+  _setPptEditorTab(tab) {
+    const pb = this._pptBuilder;
+    if (!pb) return;
+    const next = tab === 'outline' ? 'outline' : 'slide';
+    // Capture the pane being left before switching
+    if (next === 'outline') this._markCurrentSlideFromEditor(pb);
+    else this._markOutlineFromEditor(pb);
+    pb.activeTab = next;
+
+    document.getElementById('ppte-tab-slide')?.classList.toggle('active', next === 'slide');
+    document.getElementById('ppte-tab-outline')?.classList.toggle('active', next === 'outline');
+    document.getElementById('ppte-editor-toolbar')?.classList.toggle('hidden', next === 'outline');
+    document.getElementById('ppt-current-html')?.classList.toggle('hidden', next === 'outline');
+    document.getElementById('ppte-outline-pane')?.classList.toggle('hidden', next !== 'outline');
+
+    if (next === 'outline') {
+      const edit = document.getElementById('ppte-outline-edit');
+      if (edit) edit.value = pb.outline || '';
+      this._setPptOutlineMode('edit');
+      this._updatePptOutlineStatus();
+    }
+  },
+
+  _setPptOutlineMode(mode) {
+    const pb = this._pptBuilder;
+    const edit = document.getElementById('ppte-outline-edit');
+    const preview = document.getElementById('ppte-outline-preview');
+    const btn = document.getElementById('ppte-outline-toggle');
+    if (!edit || !preview || !btn) return;
+    if (mode === 'preview') {
+      this._markOutlineFromEditor(pb);
+      const content = pb?.outline || '';
+      if (window.marked && content) {
+        preview.innerHTML = window.marked.parse(content);
+      } else {
+        preview.textContent = content || '（还没有大纲内容）';
+      }
+      edit.classList.add('hidden');
+      preview.classList.remove('hidden');
+      btn.textContent = '编辑';
+    } else {
+      preview.classList.add('hidden');
+      edit.classList.remove('hidden');
+      btn.textContent = '预览';
+    }
+  },
+
   _collectPptSlideFiles(pb, forceAll = false) {
     const slideFiles = [];
     for (const slide of (pb.slides || [])) {
@@ -99,6 +182,10 @@ window.PpteEditor = {
           slideFiles.push([key.substring(4), pb.templateFiles[key]]);
         }
       }
+    }
+    // outline.md rides the same transactional save + conflict protection
+    if (pb.outlineDirty || (forceAll && pb.outline)) {
+      slideFiles.push(['outline.md', pb.outline || '']);
     }
     return slideFiles;
   },
@@ -127,6 +214,7 @@ window.PpteEditor = {
     pb.currentSlideIndex = Math.min(pb.currentSlideIndex || 0, Math.max(0, pb.slides.length - 1));
     pb.fileStats = await this._loadPptFileStats(pb.folderPath, manifest);
     pb.manifestDirty = manifestUpgraded;
+    await this._loadPptOutline(pb);
     this._renderPptBuilderInContent();
     setTimeout(() => this._checkLinkedGroups?.({ silent: true }), 0);
   },
@@ -151,12 +239,13 @@ window.PpteEditor = {
   async _savePptBuilderData(pb, options = {}) {
     if (!pb) return { skipped: true };
     this._markCurrentSlideFromEditor(pb);
+    this._markOutlineFromEditor(pb);
 
     const forceAll = !!options.forceAll;
     const forceOverwrite = !!options.forceOverwrite;
     const interactiveConflicts = options.interactiveConflicts !== false;
     const slideFiles = options.slideFiles || this._collectPptSlideFiles(pb, forceAll);
-    const shouldSave = forceAll || forceOverwrite || pb.manifestDirty || slideFiles.length > 0;
+    const shouldSave = forceAll || forceOverwrite || pb.manifestDirty || pb.outlineDirty || slideFiles.length > 0;
     if (!shouldSave) return { skipped: true };
 
     const saveOnce = async (withoutExpected = false) => {
@@ -188,6 +277,10 @@ window.PpteEditor = {
         slide.dirty = false;
         slide.created = false;
       }
+    }
+    if (slideFiles.some(([filename]) => filename === 'outline.md')) {
+      pb.outlineDirty = false;
+      this._updatePptOutlineStatus();
     }
     pb.manifestDirty = false;
     pb.templateFilesDirty = false;
@@ -256,6 +349,34 @@ window.PpteEditor = {
       return;
     }
 
+    if (files.includes('outline.md')) {
+      try {
+        const disk = await window.__TAURI__.core.invoke('read_text_file', {
+          filePath: this._joinPptPath(pb.folderPath, 'outline.md'),
+        });
+        if (disk === (pb.outline || '')) {
+          // Echo of our own save: just refresh the stat baseline
+          await this._refreshPptFileStats(pb, ['outline.md']);
+        } else if (pb.outlineDirty) {
+          this._showToast('outline.md 已被外部修改，当前编辑器也有未保存改动', true);
+        } else {
+          pb.outline = disk;
+          await this._refreshPptFileStats(pb, ['outline.md']);
+          const outlineEdit = document.getElementById('ppte-outline-edit');
+          if (outlineEdit && pb.activeTab === 'outline') outlineEdit.value = disk;
+          this._showToast('大纲已载入外部更新');
+        }
+      } catch (e) {
+        if (!pb.outlineDirty) {
+          // outline.md deleted externally
+          pb.outline = '';
+          await this._refreshPptFileStats(pb, ['outline.md']);
+          const outlineEdit = document.getElementById('ppte-outline-edit');
+          if (outlineEdit && pb.activeTab === 'outline') outlineEdit.value = '';
+        }
+      }
+    }
+
     let updatedCurrent = false;
     let blockedByDirty = false;
     for (let i = 0; i < pb.slides.length; i++) {
@@ -310,6 +431,10 @@ window.PpteEditor = {
       templateFilesDirty: false,
       sharedSelection: new Set(),
       linkedGroupStatuses: {},
+      // outline.md — per-deck chapter outline, edited on the 大纲 tab
+      outline: '',
+      outlineDirty: false,
+      activeTab: 'slide',
     };
     delete manifest._fileStats;
 
@@ -318,6 +443,8 @@ window.PpteEditor = {
 
     // Render the editor in main content
     this._renderPptBuilderInContent();
+    this._setPptEditorTab('slide');
+    this._loadPptOutline(this._pptBuilder);
     this._startPptEditorWatch(this._pptBuilder);
     setTimeout(() => this._checkLinkedGroups?.({ silent: true }), 0);
 
@@ -430,6 +557,8 @@ window.PpteEditor = {
         const li = e.target.closest('li');
         if (li) {
           const idx = parseInt(li.dataset.index);
+          // Clicking a page is explicit intent to see it: leave the outline tab
+          if (pb.activeTab === 'outline') this._setPptEditorTab('slide');
           pb.currentSlideIndex = idx;
           this._renderPptBuilderInContent();
         }
@@ -480,6 +609,36 @@ window.PpteEditor = {
         if (!cur) return;
         cur.slides[cur.currentSlideIndex].html = e.target.value;
         cur.slides[cur.currentSlideIndex].dirty = true;
+      };
+    }
+
+    const slideTabBtn = document.getElementById('ppte-tab-slide');
+    if (slideTabBtn) {
+      slideTabBtn.onclick = () => this._setPptEditorTab('slide');
+    }
+
+    const outlineTabBtn = document.getElementById('ppte-tab-outline');
+    if (outlineTabBtn) {
+      outlineTabBtn.onclick = () => this._setPptEditorTab('outline');
+    }
+
+    const outlineEdit = document.getElementById('ppte-outline-edit');
+    if (outlineEdit) {
+      outlineEdit.oninput = (e) => {
+        const cur = this._pptBuilder;
+        if (!cur) return;
+        cur.outline = e.target.value;
+        cur.outlineDirty = true;
+        this._updatePptOutlineStatus();
+      };
+    }
+
+    const outlineToggle = document.getElementById('ppte-outline-toggle');
+    if (outlineToggle) {
+      outlineToggle.onclick = () => {
+        const preview = document.getElementById('ppte-outline-preview');
+        const toPreview = preview ? preview.classList.contains('hidden') : false;
+        this._setPptOutlineMode(toPreview ? 'preview' : 'edit');
       };
     }
 

@@ -134,6 +134,17 @@ window.PpteWorkbenchAgent = {
         console.warn('Failed to list optional workbench skills', error);
       }
     }
+    // outline.md is the author's handwritten chapter outline; missing is normal
+    let outline = null;
+    if (pb?.folderPath && window.__TAURI__?.core?.invoke) {
+      try {
+        outline = await window.__TAURI__.core.invoke('read_text_file', {
+          filePath: `${String(pb.folderPath).replace(/[\\/]+$/, '')}/outline.md`,
+        });
+      } catch (error) {
+        outline = null;
+      }
+    }
     const ctx = {
       title: pb?.manifest?.title || '',
       slides: (pb?.slides || []).map(s => ({
@@ -144,6 +155,7 @@ window.PpteWorkbenchAgent = {
       templateBlueprint: this._templateBlueprint(pb),
       deckPlan,
       skills,
+      outline,
       aiConfig: settingsConfig,
       providers,
       defaultProvider,

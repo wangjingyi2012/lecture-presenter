@@ -396,6 +396,14 @@ window.WorkbenchWindow = {
   },
 
   // ---- system prompt ----
+  _outlinePromptBlock() {
+    // outline.md is the author's handwritten chapter outline (章纲): chapter
+    // order, per-page intent, layout wishes. It must steer deck planning.
+    const outline = String(this.manifest?.outline || '').trim();
+    if (!outline) return '';
+    return `[用户章纲]\n${outline}\n\n以上是作者在写页面前定下的章纲：整套生成时必须按章纲的章节顺序、每页主题和排版意图规划页面；章纲与本次指令冲突时以本次指令为准。`;
+  },
+
   _systemPrompt() {
     let ctx = '当前未连接课件。';
     if (this.manifest?.slides?.length) {
@@ -420,6 +428,10 @@ window.WorkbenchWindow = {
       ctx += `\n\n现有 LectureAI 规划状态：${planState.status || 'unknown'}。${planState.status === 'stale' ? '课件已在规划后变化，整套任务开始前应重新 set_deck_plan。' : ''}`;
     } else {
       ctx += '\n\n当前项目没有 LectureAI 规划。这不影响旧项目打开、播放或单页修改；整套生成时按需创建。';
+    }
+    const outlineBlock = this._outlinePromptBlock();
+    if (outlineBlock) {
+      ctx += `\n\n${outlineBlock}`;
     }
     if (this.skills.length) {
       const catalog = this.skills.map(skill => `- ${skill.id}：${skill.description}（${skill.sourceLabel}）`).join('\n');
@@ -945,7 +957,8 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     const directive = this._harnessMutationDirective(planSlide);
     const templateId = planSlide.templateId || planSlide.template_id || '';
     const templateVersion = planSlide.templateVersion || planSlide.template_version || '';
-    return `[整套任务原始目标]\n${this._activeTask?.userInstruction || ''}
+    const outlineBlock = this._outlinePromptBlock();
+    return `[整套任务原始目标]\n${this._activeTask?.userInstruction || ''}${outlineBlock ? `\n\n${outlineBlock}` : ''}
 
 [全局视觉规范]\n${JSON.stringify(plan.visualSystem || {})}
 
@@ -1126,7 +1139,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
             page, templateId: planSlide.templateId || planSlide.template_id || '',
             mode: directive.mode, after: directive.after,
           },
-          user_instruction: this._activeTask?.userInstruction || '生成整套课件',
+          user_instruction: [this._activeTask?.userInstruction || '生成整套课件', this._outlinePromptBlock()].filter(Boolean).join('\n\n'),
           stage_guidance: stageGuidance || '',
         }));
       };

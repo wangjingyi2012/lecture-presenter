@@ -243,6 +243,10 @@
             <ul id="ppte-page-items"></ul>
           </div>
           <div id="ppte-editor-content">
+            <div id="ppte-editor-tabs">
+              <button id="ppte-tab-slide" class="ppte-editor-tab active">页面</button>
+              <button id="ppte-tab-outline" class="ppte-editor-tab">大纲</button>
+            </div>
             <div id="ppte-editor-toolbar">
               <input type="text" id="ppt-current-title" placeholder="页面标题">
               <div class="ppte-editor-tool-actions">
@@ -256,6 +260,17 @@
               </div>
             </div>
             <textarea id="ppt-current-html" placeholder="HTML 内容..."></textarea>
+            <div id="ppte-outline-pane" class="hidden">
+              <div class="ppte-outline-toolbar">
+                <span class="ppte-outline-hint">章纲保存为 outline.md，AI 整套生成时会按它排页面</span>
+                <div class="ppte-outline-actions">
+                  <span id="ppte-outline-status" class="ppte-outline-status"></span>
+                  <button id="ppte-outline-toggle" class="ppte-editor-button ppte-editor-button-compact">预览</button>
+                </div>
+              </div>
+              <textarea id="ppte-outline-edit" placeholder="# 章纲&#10;&#10;按章节写下这节课讲什么、每一页大概的内容和排版想法，正式开始写页面前先搭好骨架。"></textarea>
+              <div id="ppte-outline-preview" class="markdown-body hidden"></div>
+            </div>
           </div>
         </div>
       </div>
