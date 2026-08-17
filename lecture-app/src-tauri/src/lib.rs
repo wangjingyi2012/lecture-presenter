@@ -1753,8 +1753,23 @@ async fn pick_reference_files(app_handle: tauri::AppHandle) -> Result<Vec<String
 }
 
 #[tauri::command]
-async fn pick_folder(app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn pick_folder(
+    app_handle: tauri::AppHandle,
+    show_hidden: Option<bool>,
+) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
+
+    // On macOS the native panel hides dot-directories (e.g. `.claude`,
+    // `.agents`) unless showsHiddenFiles is set; rfd does not expose that
+    // option, so use AppKit directly when the caller asks for it.
+    #[cfg(target_os = "macos")]
+    {
+        if show_hidden.unwrap_or(false) {
+            return pick_folder_macos_show_hidden(&app_handle);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = show_hidden;
 
     let (tx, rx) = std::sync::mpsc::channel();
     app_handle
@@ -1771,6 +1786,39 @@ async fn pick_folder(app_handle: tauri::AppHandle) -> Result<String, String> {
         .to_string_lossy()
         .to_string();
     Ok(path)
+}
+
+// NSOpenPanel with showsHiddenFiles enabled, so hidden directories such as
+// `.claude` / `.agents` are visible when picking SKILL folders.
+#[cfg(target_os = "macos")]
+fn pick_folder_macos_show_hidden(app_handle: &tauri::AppHandle) -> Result<String, String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app_handle
+        .run_on_main_thread(move || {
+            // Safe: run_on_main_thread executes this closure on the main thread.
+            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+            let panel = NSOpenPanel::openPanel(mtm);
+            panel.setCanChooseFiles(false);
+            panel.setCanChooseDirectories(true);
+            panel.setAllowsMultipleSelection(false);
+            panel.setShowsHiddenFiles(true);
+            let picked = if panel.runModal() == NSModalResponseOK {
+                panel
+                    .URLs()
+                    .firstObject()
+                    .and_then(|url| url.path().map(|path| path.to_string()))
+            } else {
+                None
+            };
+            let _ = tx.send(picked);
+        })
+        .map_err(|e| e.to_string())?;
+    rx.recv()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "cancelled".to_string())
 }
 
 #[tauri::command]

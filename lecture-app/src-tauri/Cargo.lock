@@ -2009,6 +2009,8 @@ dependencies = [
  "keyring",
  "mime_guess",
  "notify",
+ "objc2",
+ "objc2-app-kit",
  "percent-encoding",
  "reqwest 0.12.28",
  "scraper",

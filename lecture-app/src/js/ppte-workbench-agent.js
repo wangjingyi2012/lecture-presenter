@@ -284,7 +284,9 @@ window.PpteWorkbenchAgent = {
   async _importSkill() {
     let sourcePath;
     try {
-      sourcePath = await window.__TAURI__.core.invoke('pick_folder');
+      // showHidden lets the macOS picker display dot-directories such as
+      // ~/.claude/skills and ~/.agents/skills.
+      sourcePath = await window.__TAURI__.core.invoke('pick_folder', { showHidden: true });
     } catch (error) {
       if (String(error) === 'cancelled') return { cancelled: true, imported: [], skipped: [] };
       throw error;
