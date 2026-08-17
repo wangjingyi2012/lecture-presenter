@@ -237,7 +237,62 @@ async function main() {
     assert.ok(piInstruction.includes('生成整套课件') && piInstruction.includes('# AndroidStudio 安装'));
   }
 
+  // ---------- write_outline tool (ppte-workbench-agent.js) ----------
+  {
+    const agentSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'js', 'ppte-workbench-agent.js'), 'utf8');
+    const saveCalls = [];
+    const fakeEditor = {
+      _pptBuilder: null,
+      _updatePptOutlineStatus() {},
+      async _savePptBuilderData(pb) {
+        saveCalls.push(pb.outline);
+        pb.outlineDirty = false;
+        return { saved: ['outline.md'], conflicts: [] };
+      },
+    };
+    const agentContext = {
+      console,
+      window: { PpteEditor: fakeEditor },
+      document: { getElementById() { return null; } },
+      setTimeout, clearTimeout,
+    };
+    vm.createContext(agentContext);
+    vm.runInContext(`${agentSource}\nglobalThis.Agent = window.PpteWorkbenchAgent;`, agentContext);
+    const agent = agentContext.Agent;
+    assert.ok(agent, 'PpteWorkbenchAgent should be defined');
 
+    // success path: clean editor state -> content written through the save pipeline
+    const pb = { folderPath: '/deck', outline: '', outlineDirty: false, activeTab: 'slide' };
+    fakeEditor._pptBuilder = pb;
+    const ok = await agent._toolWriteOutline(pb, { content: '# 新大纲' });
+    assert.ok(ok.includes('已保存'), `expected success, got: ${ok}`);
+    assert.equal(pb.outline, '# 新大纲');
+    assert.deepEqual(saveCalls, ['# 新大纲'], 'write must go through _savePptBuilderData');
+
+    // empty content is refused before touching state
+    const refused = await agent._toolWriteOutline(pb, { content: '   ' });
+    assert.ok(refused.includes('失败'));
+
+    // unsaved user edits are never clobbered
+    pb.outlineDirty = true;
+    pb.outline = '用户未保存的内容';
+    const blocked = await agent._toolWriteOutline(pb, { content: '# AI 大纲' });
+    assert.ok(blocked.includes('未保存'), `expected dirty-guard message, got: ${blocked}`);
+    assert.equal(pb.outline, '用户未保存的内容', 'dirty outline must survive a refused write');
+    pb.outlineDirty = false;
+
+    // disk conflict rolls back the in-memory state
+    fakeEditor._savePptBuilderData = async () => ({ cancelled: true, reason: 'conflict' });
+    pb.outline = '磁盘上的版本';
+    const conflict = await agent._toolWriteOutline(pb, { content: '# 又一版' });
+    assert.ok(conflict.includes('失败'));
+    assert.equal(pb.outline, '磁盘上的版本', 'conflict must roll back to the previous outline');
+    assert.equal(pb.outlineDirty, false);
+
+    // display name keeps the raw tool id out of the UI
+    const wbSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'js', 'workbench-window.js'), 'utf8');
+    assert.match(wbSource, /write_outline:\s*'写入课件大纲'/);
+  }
 }
 
 main()

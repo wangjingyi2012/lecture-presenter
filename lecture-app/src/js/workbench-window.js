@@ -276,7 +276,8 @@ window.WorkbenchWindow = {
     const menu = document.getElementById('wb-slash-menu');
     if (!input || !menu || !window.PpteSlashCommands) return;
     const commandResult = window.PpteSlashCommands.search(input.value, input.selectionStart);
-    const pageResult = window.PpteSlashCommands.searchPages(input.value, input.selectionStart, this.manifest?.slides || []);
+    const mentionFiles = this._mentionableFiles();
+    const pageResult = window.PpteSlashCommands.searchPages(input.value, input.selectionStart, this.manifest?.slides || [], mentionFiles);
     const skillResult = window.PpteSlashCommands.searchSkills(input.value, input.selectionStart, this.skills);
     const mode = skillResult.token ? 'skill' : (pageResult.token ? 'page' : (commandResult.token ? 'command' : null));
     const result = mode === 'skill' ? skillResult : (mode === 'page' ? pageResult : commandResult);
@@ -291,7 +292,7 @@ window.WorkbenchWindow = {
     const heading = mode === 'skill'
       ? `选择技能 · ${result.items.length}/${this.skills.length} 项`
       : (mode === 'page'
-        ? `选择页面 · ${result.items.length}/${this.manifest?.slides?.length || 0} 页`
+        ? `选择页面或文件 · ${result.items.length}/${(this.manifest?.slides?.length || 0) + mentionFiles.length} 项`
         : `斜杠命令 · ${result.items.length}/${window.PpteSlashCommands.commands.length} 项`);
     const rows = mode === 'skill'
       ? result.items.map((skill, index) => `
@@ -300,10 +301,14 @@ window.WorkbenchWindow = {
           <span class="slash-command-copy"><span class="slash-desc">${this._escape(skill.description)}</span><span class="skill-source">${this._escape(skill.sourceLabel || skill.source)}</span></span>
         </button>`).join('')
       : (mode === 'page'
-      ? result.items.map((page, index) => `
-        <button type="button" class="slash-item slash-page-item${index === this._slashIndex ? ' active' : ''}" data-page="${page.page}" role="option" aria-selected="${index === this._slashIndex}">
-          <span class="slash-page-number">第 ${page.page} 页</span>
-          <span class="slash-page-copy"><span class="slash-page-title"><span class="slash-name">@ ${this._escape(page.file || `slide${page.page}.html`)}</span><span class="slash-separator"> - </span>${this._escape(page.title)}</span><span class="slash-desc">${this._escape(page.slideType)}</span></span>
+      ? result.items.map((item, index) => item.kind === 'file' ? `
+        <button type="button" class="slash-item slash-page-item${index === this._slashIndex ? ' active' : ''}" data-file="${this._escape(item.file)}" role="option" aria-selected="${index === this._slashIndex}">
+          <span class="slash-page-number">文件</span>
+          <span class="slash-page-copy"><span class="slash-page-title"><span class="slash-name">@ ${this._escape(item.file)}</span><span class="slash-separator"> - </span>${this._escape(item.label)}</span><span class="slash-desc">file</span></span>
+        </button>` : `
+        <button type="button" class="slash-item slash-page-item${index === this._slashIndex ? ' active' : ''}" data-page="${item.page}" role="option" aria-selected="${index === this._slashIndex}">
+          <span class="slash-page-number">第 ${item.page} 页</span>
+          <span class="slash-page-copy"><span class="slash-page-title"><span class="slash-name">@ ${this._escape(item.file || `slide${item.page}.html`)}</span><span class="slash-separator"> - </span>${this._escape(item.title)}</span><span class="slash-desc">${this._escape(item.slideType)}</span></span>
         </button>`).join('')
       : result.items.map((command, index) => `
         <button type="button" class="slash-item${index === this._slashIndex ? ' active' : ''}" data-command="${this._escape(command.name)}" role="option" aria-selected="${index === this._slashIndex}">
@@ -317,6 +322,7 @@ window.WorkbenchWindow = {
       button.onmousedown = (event) => {
         event.preventDefault();
         if (button.dataset.skill) this._applySkillSuggestion(button.dataset.skill);
+        else if (button.dataset.file) this._applyFileSuggestion(button.dataset.file);
         else if (button.dataset.page) this._applyPageSuggestion(Number(button.dataset.page));
         else this._applySlashSuggestion(button.dataset.command);
       };
@@ -342,7 +348,10 @@ window.WorkbenchWindow = {
       event.preventDefault();
       const item = this._slashItems[this._slashIndex];
       if (this._pickerMode === 'skill') this._applySkillSuggestion(item.name);
-      else if (this._pickerMode === 'page') this._applyPageSuggestion(item.page);
+      else if (this._pickerMode === 'page') {
+        if (item.kind === 'file') this._applyFileSuggestion(item.file);
+        else this._applyPageSuggestion(item.page);
+      }
       else this._applySlashSuggestion(item.name);
       return true;
     }
@@ -369,6 +378,23 @@ window.WorkbenchWindow = {
     const input = document.getElementById('wb-input');
     if (!input || !window.PpteSlashCommands) return;
     const applied = window.PpteSlashCommands.applyPageSuggestion(input.value, input.selectionStart, page);
+    input.value = applied.value;
+    input.setSelectionRange?.(applied.caret, applied.caret);
+    this._autoResizeInput();
+    this._hideSlashMenu();
+    input.focus();
+  },
+
+  // Deck files that can be @-mentioned in the workbench input
+  _mentionableFiles() {
+    if (!this.manifest?.slides?.length) return [];
+    return [{ file: 'outline.md', label: '课件大纲' }];
+  },
+
+  _applyFileSuggestion(file) {
+    const input = document.getElementById('wb-input');
+    if (!input || !window.PpteSlashCommands) return;
+    const applied = window.PpteSlashCommands.applyFileSuggestion(input.value, input.selectionStart, file);
     input.value = applied.value;
     input.setSelectionRange?.(applied.caret, applied.caret);
     this._autoResizeInput();
@@ -440,6 +466,7 @@ window.WorkbenchWindow = {
     }
     ctx += `\n\n课件级扩展工具：
 - set_deck_plan {plan}：保存整套可执行蓝图，整套生成或大规模改造必须最先调用
+- write_outline {content}：把章纲（Markdown）写入课件的 outline.md；用户要求根据现有页面整理/保存大纲时使用，整套生成前也可先把章纲落成文件
 - search_design_examples {content_kind?, layout_family?, density?, motion?, exclude?, limit?}：检索真实 HTML/CSS 设计案例
 - render_template {template_id, template_version?, payload, mode, page?, after?, title?, slide_type?, note?}：正文页优先使用服务端私有模板；replace 提供 page，insert 可提供 after
 - inspect_slides {check, pages?}：确定性检查页面；check 为 font/overflow/density/card/copy/motion/concept-animation/quality，pages 省略时检查整套；concept-animation 同时检查标准分步结构、字体、溢出和学员文案
@@ -530,6 +557,13 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       mentioned.push({ page: i + 1, title: s.title });
       return `@第${i + 1}页「${s.title}」当前HTML：\n\`\`\`html\n${html || ''}\n\`\`\``;
     };
+    const fetchOutline = async () => {
+      if (seen.has('file:outline.md')) return null;
+      seen.add('file:outline.md');
+      const outline = await this._rpc('get-outline');
+      if (!outline) return '@课件大纲（outline.md）：当前还没有大纲内容。';
+      return `@课件大纲（outline.md）当前内容：\n\`\`\`markdown\n${outline}\n\`\`\``;
+    };
 
     // @N (page number) - resolve asynchronously
     let input = rawInput;
@@ -543,10 +577,19 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     }
     input = input.replace(/@(\d+)\b/g, (m, n) => `第${n}页`);
 
-    // @title (substring)
+    // @title (substring) or @大纲 / @outline.md (deck outline file)
     const titleMatches = [...input.matchAll(/@([^\s@，。、,]+)/g)];
     for (const m of titleMatches) {
       const frag = m[1];
+      const lower = frag.toLowerCase();
+      if (lower === 'outline' || lower === 'outline.md' || frag === '大纲' || frag === '章纲') {
+        const part = await fetchOutline();
+        if (part) {
+          ctxParts.push(part);
+          input = input.replace(`@${frag}`, '课件大纲');
+        }
+        continue;
+      }
       const i = this.manifest.slides.findIndex(s => (s.title || '').includes(frag));
       if (i >= 0) {
         const part = await fetchSlide(i);
@@ -825,6 +868,11 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
           this._finishAction(actionEl, actionStartedAt, result);
           this._logResult(result);
           results.push(result || '(无结果)');
+          if (a.tool === 'write_outline' && !/失败|出错|错误/.test(String(result || ''))) {
+            // Keep the local context in sync so later rounds see the new outline
+            this.manifest = this.manifest || {};
+            this.manifest.outline = String(a.content ?? '');
+          }
           if (a.tool === 'set_deck_plan' && !/失败|出错|错误/.test(String(result || ''))) {
             this._activeTask.planSaved = true;
             this._activeTask.plan = a.plan;
@@ -1764,6 +1812,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   // User-facing names for internal tool calls; raw tool ids never reach the UI.
   _toolDisplayNames: {
     set_deck_plan: '规划整套大纲',
+    write_outline: '写入课件大纲',
     search_design_examples: '检索设计案例',
     render_template: '渲染页面模板',
     read_slide: '读取页面',

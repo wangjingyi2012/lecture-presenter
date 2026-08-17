@@ -341,11 +341,20 @@ function testInputPickerRendering() {
   input.selectionStart = 1;
   wb._updateInputPicker();
   assert.equal(menu.hidden, false, 'a bare @ must open the page picker');
-  assert.match(menu.innerHTML, /选择页面 · 2\/2 页/);
+  assert.match(menu.innerHTML, /选择页面或文件 · 3\/3 项/, 'picker counts pages plus mentionable files');
   assert.match(menu.innerHTML, /@ slide01\.html/);
   assert.match(menu.innerHTML, /@ slide02\.html/);
   assert.match(menu.innerHTML, /封面/);
   assert.match(menu.innerHTML, /正文/);
+  assert.match(menu.innerHTML, /@ outline\.md/, 'the deck outline file must be mentionable');
+  assert.match(menu.innerHTML, /课件大纲/);
+  assert.match(menu.innerHTML, /data-file="outline\.md"/);
+
+  input.value = '@大纲';
+  input.selectionStart = 3;
+  wb._updateInputPicker();
+  assert.match(menu.innerHTML, /data-file="outline\.md"/, 'typing @大纲 filters to the outline file');
+  assert.ok(!menu.innerHTML.includes('slide01.html'), 'non-matching pages are filtered out');
 
   input.value = '$';
   input.selectionStart = 1;
@@ -1082,6 +1091,28 @@ function testStreamingBubbleRendersFinalAnswerProgressively() {
   }
 }
 
+async function testOutlineMentionResolvesViaRpc() {
+  const originalRpc = wb._rpc;
+  const calls = [];
+  wb._rpc = async (type) => {
+    calls.push(type);
+    return type === 'get-outline' ? '# 章纲内容' : '';
+  };
+  wb.manifest = { title: 'T', slides: [{ title: '封面', file: 'slide01.html' }] };
+  try {
+    const result = await wb._resolveAt('@大纲 参考它继续');
+    assert.ok(calls.includes('get-outline'), '@大纲 must fetch the outline via RPC');
+    assert.ok(result.content.includes('# 章纲内容'));
+    assert.ok(result.content.includes('课件大纲'), 'the mention token is replaced with a readable label');
+    assert.ok(!result.content.includes('@大纲'));
+
+    const again = await wb._resolveAt('@outline.md 和 @outline.md 一起');
+    assert.equal(again.content.match(/outline\.md）当前内容/g).length, 1, 'duplicate outline mentions resolve once');
+  } finally {
+    wb._rpc = originalRpc;
+  }
+}
+
 (async () => {
   await testLectureAiRetriesOneTransientUpstreamFailure();
   await testInputUiBindsWithoutTauriEvents();
@@ -1104,6 +1135,7 @@ function testStreamingBubbleRendersFinalAnswerProgressively() {
   await testPiWebSocketReturnsMatchingToolResult();
   await testAgentImportsSelectedExternalSkillFolder();
   testStreamingBubbleRendersFinalAnswerProgressively();
+  await testOutlineMentionResolvesViaRpc();
 })()
   .then(() => console.log('test-workbench-window: all assertions passed'))
   .catch((error) => {

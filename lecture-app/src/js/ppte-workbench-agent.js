@@ -5,8 +5,9 @@
 //   1. injects the "工作台" toggle button into the PPTE editor header (opens the window)
 //   2. rewires the per-page "AI助手" button to open the window pre-@ing the current page
 //   3. answers wb-request RPC from the workbench window:
-//        get-context      -> {title, slides:[{title, slideType, file}], templateBlueprint, deckPlan, skills, aiConfig}
+//        get-context      -> {title, slides:[{title, slideType, file}], templateBlueprint, deckPlan, skills, outline, aiConfig}
 //        get-slide {page} -> html string
+//        get-outline      -> outline.md content string (live editor state)
 //        get-command-context {command, pages} -> target + adjacent slide/CSS context
 //        import-skill     -> imported external SKILL metadata
 //        execute-action {action} -> result string (runs the tool against PpteEditor)
@@ -53,6 +54,7 @@ window.PpteWorkbenchAgent = {
     try {
       if (type === 'get-context') result = await this._getContext();
       else if (type === 'get-slide') result = this._getSlide(req.payload?.page);
+      else if (type === 'get-outline') result = this._getOutline();
       else if (type === 'get-command-context') result = await this._getCommandContext(req.payload);
       else if (type === 'read-skill') result = await this._readSkill(req.payload);
       else if (type === 'import-skill') result = await this._importSkill();
@@ -249,6 +251,12 @@ window.PpteWorkbenchAgent = {
     return pb.slides[i].html || '';
   },
 
+  _getOutline() {
+    const pb = this._editor()._pptBuilder;
+    if (!pb) return '';
+    return String(pb.outline ?? '');
+  },
+
   async _getCommandContext(payload) {
     const pb = this._editor()._pptBuilder;
     if (!pb || payload?.command !== 'concept-animate') return '';
@@ -347,6 +355,7 @@ window.PpteWorkbenchAgent = {
     try {
       switch (a.tool) {
         case 'set_deck_plan': return await this._toolSetDeckPlan(pb, a);
+        case 'write_outline': return await this._toolWriteOutline(pb, a);
         case 'search_design_examples': return await this._toolSearchDesignExamples(a);
         case 'render_template': return await this._toolRenderTemplate(pb, a);
         case 'apply_role_template': return await this._toolApplyRoleTemplate(pb, a);
@@ -376,6 +385,41 @@ window.PpteWorkbenchAgent = {
     this._activeDeckPlan = { folderPath: pb.folderPath, plan: saved };
     const count = Number(saved?.targetSlideCount || 0);
     return `set_deck_plan 已保存课件蓝图${count ? `（目标 ${count} 页）` : ''}。`;
+  },
+
+  // Writes outline.md through the editor's own state + transactional save, so
+  // the 大纲 tab and the anti-overwrite baseline stay consistent.
+  async _toolWriteOutline(pb, a) {
+    const content = String(a?.content ?? '');
+    if (!content.trim()) return 'write_outline 失败：content 不能为空';
+    if (pb.outlineDirty) {
+      return 'write_outline 失败：大纲在编辑器里有未保存的修改，为避免覆盖没有写入。请在主窗口大纲页签中保存或放弃修改后重试。';
+    }
+    const previousOutline = pb.outline || '';
+    const previousDirty = !!pb.outlineDirty;
+    pb.outline = content;
+    pb.outlineDirty = true;
+    // Reflect into the 大纲 tab if it is currently open
+    const edit = document.getElementById('ppte-outline-edit');
+    if (edit && pb.activeTab === 'outline') edit.value = content;
+    this._editor()._updatePptOutlineStatus?.();
+    try {
+      const result = await this._editor()._savePptBuilderData(pb, { interactiveConflicts: false });
+      if (result?.cancelled || (result?.conflicts || []).length) {
+        pb.outline = previousOutline;
+        pb.outlineDirty = previousDirty;
+        if (edit && pb.activeTab === 'outline') edit.value = previousOutline;
+        this._editor()._updatePptOutlineStatus?.();
+        return 'write_outline 失败：outline.md 在磁盘上被外部修改过，未覆盖。请在主窗口处理后重试。';
+      }
+      return `write_outline 已保存 outline.md（${content.length} 字）。`;
+    } catch (error) {
+      pb.outline = previousOutline;
+      pb.outlineDirty = previousDirty;
+      if (edit && pb.activeTab === 'outline') edit.value = previousOutline;
+      this._editor()._updatePptOutlineStatus?.();
+      return `write_outline 保存失败：${String(error)}`;
+    }
   },
 
   async _toolSearchDesignExamples(a) {

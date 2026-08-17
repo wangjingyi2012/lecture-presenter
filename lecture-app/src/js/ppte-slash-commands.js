@@ -152,11 +152,12 @@ window.PpteSlashCommands = {
     return { token, items };
   },
 
-  searchPages(value, caret, slides) {
+  searchPages(value, caret, slides, files = []) {
     const token = this.mentionTokenAt(value, caret);
     if (!token) return { token: null, items: [] };
     const query = token.query;
-    const items = (Array.isArray(slides) ? slides : []).map((slide, index) => ({
+    const pageItems = (Array.isArray(slides) ? slides : []).map((slide, index) => ({
+      kind: 'page',
       page: index + 1,
       title: slide?.title || `第 ${index + 1} 页`,
       file: slide?.file || '',
@@ -168,7 +169,16 @@ window.PpteSlashCommands = {
         || item.file.toLowerCase().includes(query)
         || item.slideType.toLowerCase().includes(query);
     });
-    return { token, items };
+    const fileItems = (Array.isArray(files) ? files : []).map(entry => ({
+      kind: 'file',
+      file: entry.file || '',
+      label: entry.label || entry.file || '',
+      title: entry.label || entry.file || '',
+    })).filter(item => {
+      if (!query) return true;
+      return item.file.toLowerCase().includes(query) || item.label.toLowerCase().includes(query);
+    });
+    return { token, items: [...fileItems, ...pageItems] };
   },
 
   search(value, caret) {
@@ -198,6 +208,16 @@ window.PpteSlashCommands = {
     const hit = this.mentionTokenAt(text, caret);
     if (!hit) return { value: text, caret: caret == null ? text.length : caret };
     const replacement = `@${Number(page)} `;
+    const next = text.slice(0, hit.start) + replacement + text.slice(hit.end);
+    const nextCaret = hit.start + replacement.length;
+    return { value: next, caret: nextCaret };
+  },
+
+  applyFileSuggestion(value, caret, file) {
+    const text = String(value || '');
+    const hit = this.mentionTokenAt(text, caret);
+    if (!hit) return { value: text, caret: caret == null ? text.length : caret };
+    const replacement = `@${String(file || '').replace(/^@/, '')} `;
     const next = text.slice(0, hit.start) + replacement + text.slice(hit.end);
     const nextCaret = hit.start + replacement.length;
     return { value: next, caret: nextCaret };
