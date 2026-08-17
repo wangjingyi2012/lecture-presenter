@@ -356,6 +356,8 @@ window.PpteWorkbenchAgent = {
       switch (a.tool) {
         case 'set_deck_plan': return await this._toolSetDeckPlan(pb, a);
         case 'write_outline': return await this._toolWriteOutline(pb, a);
+        case 'search_icons': return await this._toolSearchIcons(a);
+        case 'use_icon': return await this._toolUseIcon(pb, a);
         case 'search_design_examples': return await this._toolSearchDesignExamples(a);
         case 'render_template': return await this._toolRenderTemplate(pb, a);
         case 'apply_role_template': return await this._toolApplyRoleTemplate(pb, a);
@@ -434,6 +436,32 @@ window.PpteWorkbenchAgent = {
     };
     const result = await window.__TAURI__.core.invoke('lectureai_design_examples', { authToken: token, query });
     return `search_design_examples 匹配 ${result?.count || 0} 个案例：\n${JSON.stringify(result, null, 2)}`;
+  },
+
+  async _toolSearchIcons(a) {
+    const token = window.Auth?.getToken() || '';
+    const result = await window.__TAURI__.core.invoke('lectureai_icon_search', {
+      authToken: token,
+      query: String(a.query || ''),
+    });
+    const items = Array.isArray(result?.items) ? result.items : [];
+    if (!items.length) return 'search_icons 没有匹配的图标，可换个名称或省略 query 列出全部';
+    const lines = items.map(item => `- ${item.file}（${item.name}${item.aliases?.length ? `，别名：${item.aliases.join('、')}` : ''}）`);
+    return `search_icons 匹配 ${items.length} 个图标：\n${lines.join('\n')}`;
+  },
+
+  // Downloads one library icon into the deck's resources/ so the PPTE stays
+  // self-contained (backup / copy / export all carry it).
+  async _toolUseIcon(pb, a) {
+    const file = String(a?.file || '').trim();
+    if (!file) return 'use_icon 失败：缺少 file 字段（先用 search_icons 查询图标文件名）';
+    const token = window.Auth?.getToken() || '';
+    const relPath = await window.__TAURI__.core.invoke('ppte_download_icon', {
+      folderPath: pb.folderPath,
+      file,
+      authToken: token,
+    });
+    return `use_icon 已下载到 ${relPath}。页面 HTML 中用 <img src="${relPath}"> 引用；write_slide / render_template 可直接使用该路径。`;
   },
 
   async _toolRenderTemplate(pb, a) {

@@ -1348,6 +1348,93 @@ async fn lectureai_render_template(
     serde_json::from_str(&text).map_err(|e| format!("模板渲染响应格式错误：{}", e))
 }
 
+fn auth_server_url(app_handle: &tauri::AppHandle) -> Result<String, String> {
+    let config = read_app_config(app_handle.clone())?;
+    Ok(config
+        .auth_server
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("https://design.hz-study-system.com")
+        .trim_end_matches('/')
+        .to_string())
+}
+
+#[tauri::command]
+async fn lectureai_icon_search(
+    app_handle: tauri::AppHandle,
+    auth_token: String,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    if auth_token.trim().is_empty() {
+        return Err("检索图标库需要先登录".to_string());
+    }
+    let server = auth_server_url(&app_handle)?;
+    let response = direct_client()
+        .get(format!("{}/api/web/desktop/icons", server))
+        .query(&[("q", query)])
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .map_err(|e| format!("图标库服务连接失败：{}", e))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| format!("图标库响应读取失败：{}", e))?;
+    if !status.is_success() {
+        return Err(format!("图标库服务错误（{}）：{}", status.as_u16(), response_detail(&text)));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("图标库响应格式错误：{}", e))
+}
+
+/// Validate the requested icon file name and resolve the destination inside
+/// the deck's resources/ folder. Rejects anything with directory components.
+fn ppte_icon_destination(base_dir: &Path, file: &str) -> Result<(PathBuf, String), String> {
+    let name = Path::new(file)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if name.is_empty() || name != file {
+        return Err("非法的图标文件名".to_string());
+    }
+    let relative = format!("resources/{}", name);
+    let destination = ppte_safe_destination(base_dir, Path::new(&relative))?;
+    Ok((destination, relative))
+}
+
+/// Download one icon from the server-side library into the current PPTE's
+/// resources/ folder, keeping decks self-contained. Returns the deck-relative
+/// path for slides to reference.
+#[tauri::command]
+async fn ppte_download_icon(
+    app_handle: tauri::AppHandle,
+    folder_path: String,
+    file: String,
+    auth_token: String,
+) -> Result<String, String> {
+    if auth_token.trim().is_empty() {
+        return Err("下载图标需要先登录".to_string());
+    }
+    let base_dir = canonical_ppte_root(&folder_path)?;
+    let (destination, relative) = ppte_icon_destination(&base_dir, &file)?;
+    let server = auth_server_url(&app_handle)?;
+    let response = direct_client()
+        .get(format!("{}/api/web/desktop/icons/{}", server, file))
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .map_err(|e| format!("图标下载连接失败：{}", e))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("图标下载失败（{}）：{}", status.as_u16(), response_detail(&text)));
+    }
+    let bytes = response.bytes().await.map_err(|e| format!("图标内容读取失败：{}", e))?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建 resources 目录失败：{}", e))?;
+    }
+    fs::write(&destination, &bytes).map_err(|e| format!("图标写入失败：{}", e))?;
+    Ok(relative)
+}
+
+
 #[tauri::command]
 async fn save_pptx_file(
     app_handle: tauri::AppHandle,
@@ -4466,6 +4553,17 @@ mod ppte_outline_tests {
     }
 
     #[test]
+    fn icon_destination_rejects_path_components() {
+        let base = Path::new("/tmp/lecture-icon-dest-test");
+        let (dest, rel) = ppte_icon_destination(base, "doubao-logo.png").unwrap();
+        assert_eq!(rel, "resources/doubao-logo.png");
+        assert!(dest.ends_with("resources/doubao-logo.png"));
+        assert!(ppte_icon_destination(base, "../evil.png").is_err());
+        assert!(ppte_icon_destination(base, "a/b.png").is_err());
+        assert!(ppte_icon_destination(base, "").is_err());
+    }
+
+    #[test]
     fn zip_ppte_directory_skips_outline_md() {
         let dir = unique_temp_dir("zip-outline");
         fs::create_dir_all(&dir).unwrap();
@@ -7462,6 +7560,8 @@ pub fn run() {
             ppte_agent_plan_refresh,
             lectureai_design_examples,
             lectureai_render_template,
+            lectureai_icon_search,
+            ppte_download_icon,
             save_pptx_file,
             export_pptx_editable,
             list_ppt_templates,

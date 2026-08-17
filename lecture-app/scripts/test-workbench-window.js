@@ -1113,6 +1113,46 @@ async function testOutlineMentionResolvesViaRpc() {
   }
 }
 
+async function testIconToolsSearchAndDownload() {
+  const calls = [];
+  agentContext.window.Auth = { getToken() { return 'tok'; } };
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    calls.push({ command, payload });
+    if (command === 'lectureai_icon_search') {
+      return payload.query === '豆包'
+        ? { items: [{ file: 'doubao-logo.png', name: '豆包', aliases: ['doubao', '豆包'] }] }
+        : { items: [] };
+    }
+    if (command === 'ppte_download_icon') return 'resources/doubao-logo.png';
+    return null;
+  };
+
+  const searchResult = await agent._toolSearchIcons({ query: '豆包' });
+  assert.ok(searchResult.includes('doubao-logo.png'));
+  assert.ok(searchResult.includes('豆包'));
+  assert.equal(calls[0].command, 'lectureai_icon_search');
+  assert.equal(calls[0].payload.query, '豆包');
+  assert.equal(calls[0].payload.authToken, 'tok');
+
+  const emptyResult = await agent._toolSearchIcons({ query: '不存在的图标' });
+  assert.ok(emptyResult.includes('没有匹配'), 'empty search must say so instead of dumping JSON');
+
+  const useResult = await agent._toolUseIcon(pb, { file: 'doubao-logo.png' });
+  assert.ok(useResult.includes('resources/doubao-logo.png'));
+  assert.ok(useResult.includes('<img src="resources/doubao-logo.png">'), 'result must show the reference snippet');
+  const download = calls.find(call => call.command === 'ppte_download_icon');
+  assert.equal(download.payload.folderPath, '/tmp/deck');
+  assert.equal(download.payload.file, 'doubao-logo.png');
+
+  const missingFile = await agent._toolUseIcon(pb, {});
+  assert.ok(missingFile.includes('失败'), 'use_icon without file must be refused');
+
+  assert.match(wb._systemPrompt(), /search_icons \{query\?\}/, 'tool catalog must document icon search');
+  assert.match(wb._systemPrompt(), /use_icon \{file\}/);
+  assert.equal(wb._toolDisplayNames.search_icons, '检索图标库');
+  assert.equal(wb._toolDisplayNames.use_icon, '下载图标');
+}
+
 (async () => {
   await testLectureAiRetriesOneTransientUpstreamFailure();
   await testInputUiBindsWithoutTauriEvents();
@@ -1136,6 +1176,7 @@ async function testOutlineMentionResolvesViaRpc() {
   await testAgentImportsSelectedExternalSkillFolder();
   testStreamingBubbleRendersFinalAnswerProgressively();
   await testOutlineMentionResolvesViaRpc();
+  await testIconToolsSearchAndDownload();
 })()
   .then(() => console.log('test-workbench-window: all assertions passed'))
   .catch((error) => {

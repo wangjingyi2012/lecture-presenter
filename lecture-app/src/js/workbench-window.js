@@ -467,6 +467,8 @@ window.WorkbenchWindow = {
     ctx += `\n\n课件级扩展工具：
 - set_deck_plan {plan}：保存整套可执行蓝图，整套生成或大规模改造必须最先调用
 - write_outline {content}：把章纲（Markdown）写入课件的 outline.md；用户要求根据现有页面整理/保存大纲时使用，整套生成前也可先把章纲落成文件
+- search_icons {query?}：检索云端图标库（AI 公司/工具 logo，支持中文别名，如“豆包”“英伟达”）；省略 query 列出全部
+- use_icon {file}：把图标库中的图标下载进当前课件 resources/ 目录并返回引用路径；页面需要 logo 时先 search_icons 拿到 file，再 use_icon 下载后在 HTML 里用相对路径引用
 - search_design_examples {content_kind?, layout_family?, density?, motion?, exclude?, limit?}：检索真实 HTML/CSS 设计案例
 - render_template {template_id, template_version?, payload, mode, page?, after?, title?, slide_type?, note?}：正文页优先使用服务端私有模板；replace 提供 page，insert 可提供 after
 - inspect_slides {check, pages?}：确定性检查页面；check 为 font/overflow/density/card/copy/motion/concept-animation/quality，pages 省略时检查整套；concept-animation 同时检查标准分步结构、字体、溢出和学员文案
@@ -1813,6 +1815,8 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   _toolDisplayNames: {
     set_deck_plan: '规划整套大纲',
     write_outline: '写入课件大纲',
+    search_icons: '检索图标库',
+    use_icon: '下载图标',
     search_design_examples: '检索设计案例',
     render_template: '渲染页面模板',
     read_slide: '读取页面',
