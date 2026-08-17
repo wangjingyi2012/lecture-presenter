@@ -53,3 +53,6 @@ lecture-app/src-tauri/resources/prompts.enc
 output/
 tmp/
 docs/images/
+
+# Claude Code local handoff (contains internal ops details; kept local only)
+CLAUDE.md
