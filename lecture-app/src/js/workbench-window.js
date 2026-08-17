@@ -1085,10 +1085,10 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     this._activeRound = counters.rounds;
     this._startModelStatus(this._activeRound, 1);
     if (this._modelStatusEl) {
-      this._modelStatusEl.dataset.summary = `Pi Agent 正在规划第 ${page} 页`;
-      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · Pi Agent 正在规划第 ${page} 页`;
+      this._modelStatusEl.dataset.summary = `LectureAI 正在设计第 ${page} 页`;
+      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · LectureAI 正在设计第 ${page} 页`;
     }
-    this._log('sys', `Pi Agent 已连接 · 第 ${page} 页 · 等待工具计划`);
+    this._log('sys', `LectureAI 已连接 · 第 ${page} 页 · 正在准备生成`);
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(piConfig.url, ['lectureai.pi.v1', `lectureai.auth.${piConfig.token}`]);
       this._piSocket = socket;
@@ -1101,7 +1101,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
         if (this._piSocket === socket) this._piSocket = null;
         if (this._piReject === reject) this._piReject = null;
         if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'page complete');
-        this._finishModelStatus(error ? 'Pi Agent 执行失败' : `第 ${page} 页完成`);
+        this._finishModelStatus(error ? 'LectureAI 生成失败' : `第 ${page} 页完成`);
         if (error) reject(error); else resolve(value);
       };
       socket.onopen = () => {
@@ -1119,8 +1119,8 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
         queue = queue.then(async () => {
           const message = JSON.parse(String(event.data || '{}'));
           if (message.type === 'tool_call') {
-            if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 正在执行 ${message.tool} · ${this._duration(this._modelStartedAt)}`;
-            this._log('sys', `Pi 工具计划 · 第 ${page} 页 · ${message.tool}`);
+            if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 正在${this._toolDisplayName(message.tool)} · ${this._duration(this._modelStartedAt)}`;
+            this._log('sys', `LectureAI · 第 ${page} 页 · ${this._toolDisplayName(message.tool)}`);
             try {
               const result = await this._executePiTool(message, planSlide, directive, counters);
               if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
@@ -1140,7 +1140,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
             return;
           }
           if (message.type === 'progress' || message.type === 'session_started') {
-            const label = message.label || `Pi 会话已启动 · 第 ${page} 页`;
+            const label = this._friendlyLabel(message.label) || `LectureAI 已开始生成 · 第 ${page} 页`;
             this._log('sys', label);
             return;
           }
@@ -1153,12 +1153,12 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
             finish(new Error('用户取消了当前任务'));
             return;
           }
-          if (message.type === 'error') finish(new Error(message.error || `第 ${page} 页 Pi Agent 执行失败`));
+          if (message.type === 'error') finish(new Error(this._friendlyLabel(message.error) || `第 ${page} 页生成失败`));
         }).catch(error => finish(error));
       };
-      socket.onerror = () => finish(new Error('无法连接 LectureAI Pi WebSocket'));
+      socket.onerror = () => finish(new Error('无法连接 LectureAI 服务'));
       socket.onclose = event => {
-        if (!settled) finish(new Error(this._stopRequested ? '用户取消了当前任务' : `LectureAI Pi 连接已关闭（${event.code}）`));
+        if (!settled) finish(new Error(this._stopRequested ? '用户取消了当前任务' : `LectureAI 连接已中断（${event.code}）`));
       };
     });
   },
@@ -1675,6 +1675,31 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     }
   },
 
+  // User-facing names for internal tool calls; raw tool ids never reach the UI.
+  _toolDisplayNames: {
+    set_deck_plan: '规划整套大纲',
+    search_design_examples: '检索设计案例',
+    render_template: '渲染页面模板',
+    read_slide: '读取页面',
+    write_slide: '写入页面内容',
+    insert_slide: '插入新页面',
+    reorder_slides: '调整页面顺序',
+    validate_slide: '校验页面',
+    validate_deck: '校验整套课件',
+    inspect_slides: '检查页面',
+  },
+
+  _toolDisplayName(tool) {
+    return this._toolDisplayNames[tool] || '处理页面';
+  },
+
+  _friendlyLabel(label) {
+    return String(label || '')
+      .replace(/Pi\s*Agent/g, 'LectureAI')
+      .replace(/\bPi\b/g, 'LectureAI')
+      .replace(/渲染私有模板/g, '渲染页面模板');
+  },
+
   _logAction(a, callNumber) {
     if (a.tool === '_parse_error') {
       return this._log('err', `action 解析失败：${a.error || ''}`);
@@ -1682,7 +1707,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     const page = a.page != null ? ` 第${a.page}页` : '';
     const after = a.after != null ? `（插在第${a.after}页后）` : '';
     const reason = a.reason ? ` · ${a.reason}` : '';
-    const label = `工具 ${callNumber} · ${a.tool}${page}${after}${reason}`;
+    const label = `操作 ${callNumber} · ${this._toolDisplayName(a.tool)}${page}${after}${reason}`;
     const el = this._log('act', `${label} · 执行中`);
     if (el) el.dataset.actionLabel = label;
     return el;
