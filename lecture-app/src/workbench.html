@@ -138,6 +138,14 @@
     .term-send:disabled { opacity: 0.4; cursor: not-allowed; }
     .wb-pick-btn { margin-top: 10px; padding: 6px 16px; border-radius: 6px; border: 1px solid var(--term-accent); background: var(--term-accent); color: #fff; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 600; }
     .wb-pick-btn:hover { opacity: 0.9; }
+    .wb-pick-actions { display: flex; gap: 8px; justify-content: center; }
+    .wb-pick-btn-secondary { background: transparent; color: var(--term-accent); }
+    .wb-recent-list { margin-top: 10px; max-height: 260px; overflow-y: auto; text-align: left; }
+    .wb-recent-item { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 7px 10px; margin-bottom: 6px; border: 1px solid var(--term-border); border-radius: 6px; background: var(--term-bg); color: var(--term-fg); cursor: pointer; font-family: inherit; text-align: left; }
+    .wb-recent-item:hover { border-color: var(--term-accent); }
+    .wb-recent-title { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wb-recent-path { font-size: 11px; color: var(--term-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wb-recent-empty { padding: 10px; color: var(--term-muted); font-size: 12px; text-align: center; }
   </style>
 </head>
 <body>

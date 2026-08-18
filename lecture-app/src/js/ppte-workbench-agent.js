@@ -59,7 +59,8 @@ window.PpteWorkbenchAgent = {
       else if (type === 'read-skill') result = await this._readSkill(req.payload);
       else if (type === 'import-skill') result = await this._importSkill();
       else if (type === 'execute-action') result = await this._executeAction(req.payload?.action);
-      else if (type === 'pick-ppte') result = await this._pickPpte();
+      else if (type === 'pick-ppte') result = await this._pickPpte(req.payload);
+      else if (type === 'recent-ppte') result = this._recentPpte();
       else result = { error: '未知请求类型 ' + type };
     } catch (e) {
       result = { error: String(e) };
@@ -316,15 +317,34 @@ window.PpteWorkbenchAgent = {
 
   // Open a PPTE folder picker in the main window (requested by the workbench
   // window when no course is connected); _onRequest emits wb-refresh afterwards.
-  async _pickPpte() {
+  // With payload.path the workbench already chose a recently opened PPTE, so
+  // open it directly instead of showing the disk picker.
+  async _pickPpte(payload) {
     try {
       const editor = this._editor();
+      if (payload?.path) {
+        const opener = editor.openPptExtraPath?.bind(editor) || window.Settings?.openPptExtraPath?.bind(window.Settings);
+        if (!opener) return 'openPptExtraPath unavailable';
+        await opener(payload.path);
+        return 'ok';
+      }
       const opener = editor.openPptExtra?.bind(editor) || window.Settings?.openPptExtra?.bind(window.Settings);
       if (opener) await opener();
       return 'ok';
     } catch (e) {
       return String(e);
     }
+  },
+
+  // Recently opened PPTE list for the workbench's "选择打开过的 PPTE" picker.
+  _recentPpte() {
+    const recent = window.CourseLoader?.appConfig?.recentPpte || [];
+    return {
+      items: recent.slice(0, 30).map(item => ({
+        title: String(item?.title || '未命名'),
+        path: String(item?.path || ''),
+      })).filter(item => item.path),
+    };
   },
 
   // ---- open window ----

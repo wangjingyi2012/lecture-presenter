@@ -207,12 +207,44 @@ window.WorkbenchWindow = {
     m.innerHTML = `<div class="term-empty">
       <span class="term-empty-accent">AI 助手</span> · 课件级 Agent<br>
       未连接课件。选择一个 PPTE 课件开始对话。<br>
-      <button class="wb-pick-btn" id="wb-pick-ppte">选择 PPTE 课件</button>
+      <div class="wb-pick-actions">
+        <button class="wb-pick-btn" id="wb-pick-ppte">从本地磁盘选择</button>
+        <button class="wb-pick-btn wb-pick-btn-secondary" id="wb-pick-recent">选择打开过的 PPTE</button>
+      </div>
+      <div class="wb-recent-list" id="wb-recent-list"></div>
     </div>`;
     const btn = document.getElementById('wb-pick-ppte');
     if (btn) btn.onclick = () => {
       window.__TAURI__.event.emit('wb-request', { type: 'pick-ppte' });
     };
+    const recentBtn = document.getElementById('wb-pick-recent');
+    if (recentBtn) recentBtn.onclick = () => this._renderRecentPptePicker();
+  },
+
+  // List PPTEs opened before (from the main window's recentPpte config) and let
+  // the user connect one directly, without going through the disk picker.
+  async _renderRecentPptePicker() {
+    const box = document.getElementById('wb-recent-list');
+    if (!box) return;
+    box.innerHTML = '<div class="wb-recent-empty">加载中…</div>';
+    const result = await this._rpc('recent-ppte');
+    const items = Array.isArray(result?.items) ? result.items : [];
+    if (!items.length) {
+      box.innerHTML = '<div class="wb-recent-empty">暂无打开过的 PPTE</div>';
+      return;
+    }
+    box.innerHTML = items.map(item => `
+      <button type="button" class="wb-recent-item" data-path="${this._escape(item.path)}">
+        <span class="wb-recent-title">${this._escape(item.title || '未命名')}</span>
+        <span class="wb-recent-path">${this._escape(item.path)}</span>
+      </button>
+    `).join('');
+    box.querySelectorAll('.wb-recent-item').forEach(btn => {
+      btn.onclick = () => {
+        box.innerHTML = '<div class="wb-recent-empty">正在打开…</div>';
+        window.__TAURI__.event.emit('wb-request', { type: 'pick-ppte', payload: { path: btn.dataset.path } });
+      };
+    });
   },
 
   _applySelectedModel(id) {
