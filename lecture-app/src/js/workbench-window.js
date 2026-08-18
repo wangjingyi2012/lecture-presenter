@@ -7,7 +7,7 @@
 //   wb-request {type:'execute-action', payload:{action}} -> {result}
 // Main window responds via wb-response {type, result}.
 //
-// AI streaming: call_ai_messages_stream emits global ai-stream-chunk / ai-stream-done
+// AI streaming: call_ai_messages_stream emits global ai-stream-chunk / ai-stream-thinking / ai-stream-done
 // events; only this window listens (the main window no longer streams).
 window.WorkbenchWindow = {
   history: [],          // [{role, content}]; [0] is the system prompt
@@ -15,6 +15,7 @@ window.WorkbenchWindow = {
   aiConfig: null,
   busy: false,
   _streamFull: '',
+  _thinkingTail: '',
   _streamResolve: null,
   _streamBubble: null,
   _renderTimer: null,
@@ -60,6 +61,16 @@ window.WorkbenchWindow = {
           this._streamFull += String(e.payload || '');
           if (firstChunk) this._markModelReceiving();
           this._scheduleStreamingUpdate();
+        }),
+        listen('ai-stream-thinking', (e) => {
+          if (!this._activeStreamRequest || this._activeStreamRequest.generation !== this._turnGeneration) return;
+          // Rolling glimpse of the model's reasoning: the status-line timer
+          // picks this up so waiting users see live progress, not a dead
+          // "still waiting" message. Reasoning never enters the answer text.
+          this._thinkingTail = ((this._thinkingTail || '') + String(e.payload || ''))
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(-40);
         }),
         listen('ai-stream-done', () => {
           if (!this._activeStreamRequest || this._activeStreamRequest.generation !== this._turnGeneration) return;
@@ -1700,6 +1711,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   _callAIOnce(messages, attempt = 1, contextMode = 'deck-plan', contextTemplateIds = []) {
     return new Promise((resolve, reject) => {
       this._streamFull = '';
+      this._thinkingTail = '';
       this._removeStreamBubble();
       this._streamResolve = resolve;
       const request = { generation: this._turnGeneration, reject };
@@ -1965,13 +1977,15 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     this._modelStatusTimer = setInterval(() => {
       if (this._modelStatusEl && !this._streamFull) {
         const elapsed = this._now() - this._modelStartedAt;
-        const phase = elapsed < 1200
-          ? '正在提交模型请求'
-          : elapsed < 5000
-            ? '请求已送达，等待模型首个响应'
-            : elapsed < 15000
-              ? '模型正在准备下一步工具计划'
-              : '模型响应较慢，仍在等待首个响应';
+        const phase = this._thinkingTail
+          ? `正在思考 · ${this._thinkingTail}`
+          : elapsed < 1200
+            ? '正在提交模型请求'
+            : elapsed < 5000
+              ? '请求已送达，等待模型首个响应'
+              : elapsed < 15000
+                ? '模型正在准备下一步工具计划'
+                : '模型响应较慢，仍在等待首个响应';
         this._modelStatusEl.textContent = `第 ${round} 轮 · ${attemptLabel}${phase} · ${this._modelDuration()}`;
       }
     }, 100);

@@ -6071,6 +6071,9 @@ async fn call_lectureai_chat_stream(
                 if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
                     let _ = app_handle.emit("ai-stream-chunk", content);
                 }
+                if let Some(thinking) = data.get("thinking").and_then(|v| v.as_str()) {
+                    let _ = app_handle.emit("ai-stream-thinking", thinking);
+                }
             }
         }
     }
