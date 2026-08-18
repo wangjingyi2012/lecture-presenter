@@ -198,6 +198,9 @@ assert.equal(wb._resultIsError('set_deck_plan 已保存课件蓝图（目标 20 
 assert.equal(wb._resultIsError('set_deck_plan 失败：缺少完整 plan 对象'), true);
 assert.equal(wb._hasUnexecutedToolIntent('先读取第 1 页，确认封面风格。'), true);
 assert.equal(wb._hasUnexecutedToolIntent('现在校验第 3 页。'), true);
+assert.equal(wb._hasUnexecutedToolIntent('查找 DeepSeek 图标资源。'), true);
+assert.equal(wb._hasUnexecutedToolIntent('检索图标库。'), true);
+assert.equal(wb._hasUnexecutedToolIntent('下载 deepseek-logo.png 到 resources/。'), true);
 assert.equal(wb._hasUnexecutedToolIntent('检查结果：课件结构完整，无需修改。'), false);
 assert.equal(wb._isHarnessResumeRequest('继续'), true);
 assert.equal(wb._isHarnessResumeRequest('继续生成课件'), true);

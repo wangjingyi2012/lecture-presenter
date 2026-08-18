@@ -1870,7 +1870,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
       .trim();
     if (!clean || clean.length > 160) return false;
     if (/检查结果|校验结果|处理完成|检查完成|总结|发现以下|问题如下|无需修改/.test(clean)) return false;
-    return /^(?:好的[，。!！\s]*)?(?:收到[，。!！\s]*)?(?:我?先|现在|继续|接下来|准备|开始|将|需要)?\s*(?:逐页)?(?:读取|查看|打开|检查|校验|验证|修改|重写|写入|插入|新增|删除|调整|重排)/u.test(clean);
+    return /^(?:好的[，。!！\s]*)?(?:收到[，。!！\s]*)?(?:我?先|现在|继续|接下来|准备|开始|将|需要)?\s*(?:逐页)?(?:读取|查看|打开|检查|校验|验证|修改|重写|写入|插入|新增|删除|调整|重排|查找|检索|搜索|查询|下载|获取)/u.test(clean);
   },
 
   _isTerminalToolFailure(result) {
