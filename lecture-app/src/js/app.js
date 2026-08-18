@@ -77,7 +77,10 @@ const App = {
     window.errorLogs.push('[APP] NotificationCenter type: ' + typeof window.NotificationCenter);
 
     if (typeof Updater !== 'undefined') {
-      await Updater.init(appConfig);
+      // 版本检查走网络，fire-and-forget，断网/慢网不能卡住启动
+      Updater.init(appConfig).catch(err => {
+        window.errorLogs.push('[APP] Updater init error: ' + err);
+      });
     }
     if (typeof window.NotificationCenter !== 'undefined') {
       await window.NotificationCenter.init(appConfig);

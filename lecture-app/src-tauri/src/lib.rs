@@ -184,6 +184,9 @@ pub struct AppConfig {
     pub analytics_endpoint: Option<String>,
     #[serde(default, rename = "autoCheckUpdate", skip_serializing_if = "Option::is_none")]
     pub auto_check_update: Option<bool>,
+    // Version the user chose to ignore; skipped in future update checks
+    #[serde(default, rename = "ignoredUpdateVersion", skip_serializing_if = "Option::is_none")]
+    pub ignored_update_version: Option<String>,
     #[serde(default, rename = "localPpteAgentEnabled", skip_serializing_if = "Option::is_none")]
     pub local_ppte_agent_enabled: Option<bool>,
     #[serde(default, rename = "localPpteAgentPath", skip_serializing_if = "Option::is_none")]
@@ -6752,7 +6755,12 @@ async fn call_anthropic_messages_messages(
 
 #[tauri::command]
 async fn check_update(current_version: String, server_url: String) -> Result<UpdateInfo, String> {
-    let client = direct_client();
+    // 独立 client + 短超时：断网或服务器无响应时快速失败，绝不拖住启动流程
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
     let url = format!("{}/api/version/check?current={}", server_url, current_version);
 
     let response = client.get(&url).send().await.map_err(|e| format!("请求失败: {}", e))?;
