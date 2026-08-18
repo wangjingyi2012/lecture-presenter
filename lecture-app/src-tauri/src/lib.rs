@@ -6002,6 +6002,83 @@ fn lectureai_http_error(status: u16, error_text: &str) -> String {
     detail.unwrap_or_else(|| format!("AI 服务错误（HTTP {}）", status))
 }
 
+/// Streaming variant of the LectureAI chat call. The CDN edge in front of the
+/// server drops responses that stay silent for ~15s (HTTP 524), which long
+/// non-streaming generations hit easily; the SSE endpoint starts responding
+/// within seconds. Falls back to the non-streaming endpoint when the server
+/// has not deployed /chat/stream yet (404).
+async fn call_lectureai_chat_stream(
+    app_handle: tauri::AppHandle,
+    auth_token: String,
+    messages: Vec<ChatMessage>,
+    context_mode: Option<String>,
+    context_template_ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+
+    let messages: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+        .collect();
+    let client = direct_client();
+    let body = serde_json::json!({
+        "messages": messages,
+        "context_mode": context_mode.clone().unwrap_or_else(|| "full".to_string()),
+        "context_template_ids": context_template_ids.clone().unwrap_or_default(),
+    });
+
+    let response = client
+        .post("https://design.hz-study-system.com/api/web/ai/chat/stream")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", auth_token))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败，请检查网络连接: {}", e))?;
+
+    if response.status().as_u16() == 404 {
+        let result =
+            call_lectureai_chat_request_with_mode(auth_token, messages, context_mode, context_template_ids).await?;
+        app_handle.emit("ai-stream-chunk", result).map_err(|e| e.to_string())?;
+        app_handle.emit("ai-stream-done", ()).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(lectureai_http_error(status, &error_text));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("读取流失败: {}", e))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer[..pos].trim_end_matches('\r').to_string();
+            buffer = buffer[pos + 1..].to_string();
+            let Some(payload) = line.strip_prefix("data: ") else { continue };
+            if payload == "[DONE]" {
+                continue;
+            }
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(payload) {
+                if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                    // Match the non-streaming failure shape so the workbench
+                    // treats it as a retryable upstream error.
+                    let detail = serde_json::json!({ "detail": error }).to_string();
+                    return Err(lectureai_http_error(503, &detail));
+                }
+                if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
+                    let _ = app_handle.emit("ai-stream-chunk", content);
+                }
+            }
+        }
+    }
+
+    let _ = app_handle.emit("ai-stream-done", ());
+    Ok(())
+}
+
 #[cfg(test)]
 mod lectureai_error_tests {
     use super::lectureai_http_error;
@@ -6515,10 +6592,7 @@ async fn call_ai_messages_stream(
             Ok(())
         }
         "lectureai" => {
-            let result = call_lectureai_chat(api_key, messages, context_mode, context_template_ids).await?;
-            let _ = app_handle.emit("ai-stream-chunk", result);
-            let _ = app_handle.emit("ai-stream-done", ());
-            Ok(())
+            call_lectureai_chat_stream(app_handle, api_key, messages, context_mode, context_template_ids).await
         }
         "custom" => {
             let result = call_custom_messages(api_key, api_type, base_url, model, messages).await?;
