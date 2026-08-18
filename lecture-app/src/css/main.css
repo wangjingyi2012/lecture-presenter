@@ -1525,6 +1525,64 @@ html, body {
   background: #c0392b;
 }
 
+/* ===== PPTE editor dropdown menus (更多 / ⋯) ===== */
+.ppte-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.ppte-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 140px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 2000;
+}
+
+.ppte-menu.hidden {
+  display: none;
+}
+
+.ppte-menu button {
+  width: 100%;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ppte-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.ppte-menu button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ppte-menu .ppte-menu-danger {
+  color: #e74c3c;
+}
+
+.ppte-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
 .ppte-editor-body {
   display: flex;
   flex: 1;
@@ -3451,176 +3509,6 @@ body.presentation-mode #week-title {
 .speaker-actions button:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
-}
-
-/* ===== PPTE Visual Editor ===== */
-.ppt-visual-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 3600;
-  background: rgba(0, 0, 0, 0.72);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.ppt-visual-shell {
-  width: min(1600px, 96vw);
-  height: min(940px, 94vh);
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: var(--bg-primary);
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
-}
-
-.ppt-visual-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
-}
-
-.ppt-visual-header-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.ppt-visual-header-desc {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.ppt-visual-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.ppt-visual-btn {
-  border: 1px solid var(--border);
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  border-radius: 6px;
-  font-size: 12px;
-  padding: 6px 10px;
-  cursor: pointer;
-}
-
-.ppt-visual-btn:hover {
-  background: var(--bg-hover);
-}
-
-.ppt-visual-btn.primary {
-  background: var(--accent);
-  border-color: transparent;
-  color: #fff;
-}
-
-.ppt-visual-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-
-.ppt-visual-canvas-wrap {
-  flex: 1;
-  min-width: 0;
-  background: #0f1118;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 14px;
-}
-
-.ppt-visual-canvas {
-  width: 100%;
-  height: 100%;
-  border: 1px solid #1e2433;
-  border-radius: 8px;
-  background: #000;
-}
-
-.ppt-visual-side {
-  width: 300px;
-  border-left: 1px solid var(--border);
-  background: var(--bg-secondary);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.ppt-visual-side-scroll {
-  flex: 1;
-  overflow-y: auto;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.ppt-visual-block {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.ppt-visual-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-}
-
-.ppt-visual-selected {
-  font-family: "SF Mono", "Consolas", monospace;
-  font-size: 12px;
-  color: var(--text-primary);
-  word-break: break-all;
-  line-height: 1.4;
-}
-
-.ppt-visual-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
-}
-
-.ppt-visual-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ppt-visual-field span {
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.ppt-visual-field input {
-  height: 30px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  padding: 0 8px;
-  font-size: 12px;
-}
-
-.ppt-visual-tip {
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1.5;
 }
 
 /* ===== Code Viewer ===== */

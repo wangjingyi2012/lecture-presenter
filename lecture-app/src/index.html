@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="css/live-caption.css">
   <link rel="stylesheet" href="css/ppte-shared-groups.css">
   <link rel="stylesheet" href="css/resource-center.css">
+  <link rel="stylesheet" href="css/ppte-visual-editor.css">
   <link rel="stylesheet" href="vendor/highlight-github-dark.min.css" id="hljs-theme">
 </head>
 <body data-theme="dark">
@@ -217,7 +218,13 @@
             </div>
           </div>
           <div class="ppte-editor-primary-actions">
-            <button id="ppt-shared-manage-btn" class="ppte-editor-button">共享页面</button>
+            <div class="ppte-menu-wrap">
+              <button id="ppt-more-btn" class="ppte-editor-button" aria-haspopup="true" aria-expanded="false">更多 ▾</button>
+              <div id="ppt-more-menu" class="ppte-menu hidden">
+                <button id="ppt-shared-manage-btn" type="button">共享页面</button>
+                <button id="ppt-gitee-backup-btn" type="button">备份到Gitee</button>
+              </div>
+            </div>
             <button id="ppt-play-btn2" class="ppte-editor-button">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
               播放
@@ -226,7 +233,6 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>
               演讲
             </button>
-            <button id="ppt-gitee-backup-btn" class="ppte-editor-button">备份到Gitee</button>
             <button id="ppt-save-btn" class="ppte-editor-button ppte-editor-button-primary">保存</button>
           </div>
         </div>
@@ -250,13 +256,67 @@
             <div id="ppte-editor-toolbar">
               <input type="text" id="ppt-current-title" placeholder="页面标题">
               <div class="ppte-editor-tool-actions">
+                <div class="ppte-mode-switch">
+                  <button id="ppte-mode-visual" class="ppte-mode-btn active">可视化</button>
+                  <button id="ppte-mode-code" class="ppte-mode-btn">代码</button>
+                </div>
                 <button id="ppt-ai-chat-btn" class="ppte-editor-button ppte-editor-button-compact" title="AI 助手（课件级对话，自动定位当前页）">AI助手</button>
-                <button id="ppt-resources-btn" class="ppte-editor-button ppte-editor-button-compact">资源</button>
-                <button id="ppt-visual-edit-btn" class="ppte-editor-button ppte-editor-button-compact">可视化调整</button>
                 <button id="ppt-preview-btn" class="ppte-editor-button ppte-editor-button-compact">预览</button>
-                <button id="ppt-reorder-btn" class="ppte-editor-button ppte-editor-button-compact">调整顺序</button>
-                <button id="ppt-edit-config-btn" class="ppte-editor-button ppte-editor-button-compact">编辑配置</button>
-                <button id="ppt-delete-current" class="ppte-editor-button ppte-editor-button-danger ppte-editor-button-compact">删除页面</button>
+                <div class="ppte-menu-wrap">
+                  <button id="ppt-page-more-btn" class="ppte-editor-button ppte-editor-button-compact" aria-haspopup="true" aria-expanded="false">⋯</button>
+                  <div id="ppt-page-more-menu" class="ppte-menu hidden">
+                    <button id="ppt-resources-btn" type="button">资源</button>
+                    <button id="ppt-reorder-btn" type="button">调整顺序</button>
+                    <button id="ppt-edit-config-btn" type="button">编辑配置</button>
+                    <div class="ppte-menu-divider"></div>
+                    <button id="ppt-delete-current" type="button" class="ppte-menu-danger">删除页面</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="ppte-visual-pane" class="hidden">
+              <div id="ppte-visual-banner" class="ppte-visual-banner hidden">该页含分步动画，已展开到最终状态进行编辑；保存的分步逻辑不受影响</div>
+              <div class="ppte-visual-toolbar">
+                <button id="ppte-vis-add-text" class="ppte-editor-button ppte-editor-button-compact">插入文本框</button>
+                <button id="ppte-vis-add-image" class="ppte-editor-button ppte-editor-button-compact">插入图片</button>
+                <button id="ppte-vis-remove" class="ppte-editor-button ppte-editor-button-compact">删除元素</button>
+                <button id="ppte-vis-undo" class="ppte-editor-button ppte-editor-button-compact">撤销</button>
+                <span class="ppte-visual-hint">单击选择元素，双击编辑文字，拖拽移动位置</span>
+              </div>
+              <div class="ppte-visual-main">
+                <div class="ppte-visual-canvas-wrap">
+                  <iframe id="ppte-visual-iframe" class="ppte-visual-canvas"
+                    sandbox="allow-same-origin allow-scripts"></iframe>
+                </div>
+                <aside class="ppte-visual-side">
+                  <div>
+                    <div class="ppte-visual-label">当前元素</div>
+                    <div id="ppte-vis-selected" class="ppte-visual-selected">未选择</div>
+                  </div>
+                  <div>
+                    <div class="ppte-visual-label">位置与尺寸 (px)</div>
+                    <div class="ppte-visual-grid">
+                      <label class="ppte-visual-field"><span>X</span><input id="ppte-vis-x" type="number" step="1"></label>
+                      <label class="ppte-visual-field"><span>Y</span><input id="ppte-vis-y" type="number" step="1"></label>
+                      <label class="ppte-visual-field"><span>宽度</span><input id="ppte-vis-w" type="number" step="1"></label>
+                      <label class="ppte-visual-field"><span>高度</span><input id="ppte-vis-h" type="number" step="1"></label>
+                      <label class="ppte-visual-field"><span>字号</span><input id="ppte-vis-font-size" type="number" step="1"></label>
+                    </div>
+                  </div>
+                  <div>
+                    <div class="ppte-visual-label">文字样式</div>
+                    <div class="ppte-visual-text-tools">
+                      <input type="color" id="ppte-vis-color" title="文字颜色">
+                      <button id="ppte-vis-bold" class="ppte-editor-button ppte-editor-button-compact" title="加粗">B</button>
+                      <select id="ppte-vis-align" title="对齐">
+                        <option value="">对齐</option>
+                        <option value="left">居左</option>
+                        <option value="center">居中</option>
+                        <option value="right">居右</option>
+                      </select>
+                    </div>
+                  </div>
+                </aside>
               </div>
             </div>
             <textarea id="ppt-current-html" placeholder="HTML 内容..."></textarea>
@@ -770,6 +830,7 @@
   <script src="js/dev-settings.js"></script>
   <script src="js/ppte-recent.js"></script>
   <script src="js/ppte-rules-prompt.js"></script>
+  <script src="js/ppte-visual-editor.js"></script>
   <script src="js/ppte-editor.js"></script>
   <script src="js/ppte-shared-groups.js"></script>
   <script src="js/ppte-workbench-agent.js"></script>

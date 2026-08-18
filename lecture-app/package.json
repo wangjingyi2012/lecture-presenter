@@ -1,6 +1,6 @@
 {
   "name": "lecture-app",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "private": true,
   "scripts": {
     "tauri": "tauri",
@@ -15,6 +15,7 @@
     "test:ppte-outline": "node scripts/test-ppte-outline.js",
     "test:workbench": "node scripts/test-workbench-window.js",
     "test:ppt-export-gating": "node scripts/test-ppt-export-gating.js",
+    "test:ppte-visual": "node scripts/test-ppte-visual-editor.js",
     "test:updater": "node scripts/test-updater.js",
     "build:release": "node scripts/build-obfuscated.js",
     "encrypt-prompts": "node scripts/encrypt-prompts.js"

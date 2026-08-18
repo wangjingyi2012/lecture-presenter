@@ -126,8 +126,14 @@ window.PpteEditor = {
     document.getElementById('ppte-tab-slide')?.classList.toggle('active', next === 'slide');
     document.getElementById('ppte-tab-outline')?.classList.toggle('active', next === 'outline');
     document.getElementById('ppte-editor-toolbar')?.classList.toggle('hidden', next === 'outline');
-    document.getElementById('ppt-current-html')?.classList.toggle('hidden', next === 'outline');
     document.getElementById('ppte-outline-pane')?.classList.toggle('hidden', next !== 'outline');
+    if (next === 'outline') {
+      window.PpteVisualEditor?.closeSession();
+    }
+    this._syncPptEditorModeUI();
+    if (next === 'slide' && pb.editorMode === 'visual') {
+      this._openVisualSession();
+    }
 
     if (next === 'outline') {
       const edit = document.getElementById('ppte-outline-edit');
@@ -402,6 +408,7 @@ window.PpteEditor = {
       if (textarea && pb.slides[pb.currentSlideIndex]) {
         textarea.value = pb.slides[pb.currentSlideIndex].html || '';
       }
+      window.PpteVisualEditor?.rebaseSession(pb.slides[pb.currentSlideIndex]?.html || '');
       this._showToast('当前页已载入外部更新');
     }
     if (blockedByDirty) {
@@ -411,7 +418,6 @@ window.PpteEditor = {
 
   // PPT-EXTRA Builder (standalone)
   _pptBuilder: null,
-  _pptVisualEditor: null,
 
   _openPptBuilder(folderPath, manifest, templateFiles = null) {
     manifest.slides = this._normalizeManifestSlides(manifest.slides);
@@ -435,6 +441,8 @@ window.PpteEditor = {
       outline: '',
       outlineDirty: false,
       activeTab: 'slide',
+      // 页面 tab sub-mode: rendered visual editing by default, code on demand
+      editorMode: 'visual',
     };
     delete manifest._fileStats;
 
@@ -494,7 +502,7 @@ window.PpteEditor = {
   _renderPptBuilderInContent() {
     const pb = this._pptBuilder;
     if (!pb) return;
-    if (this._pptVisualEditor) this._closePptVisualEditor(false);
+    window.PpteVisualEditor?.closeSession();
 
     pb.slides = this._normalizeManifestSlides(pb.slides);
     pb.manifest.slides = pb.slides;
@@ -524,6 +532,68 @@ window.PpteEditor = {
     if (htmlTextarea) {
       htmlTextarea.value = pb.slides[pb.currentSlideIndex]?.html || '';
     }
+
+    this._syncPptEditorModeUI();
+    if (pb.activeTab === 'slide' && pb.editorMode === 'visual') {
+      this._openVisualSession();
+    }
+  },
+
+  _syncPptEditorModeUI() {
+    const pb = this._pptBuilder;
+    if (!pb) return;
+    const mode = pb.editorMode === 'code' ? 'code' : 'visual';
+    document.getElementById('ppte-mode-visual')?.classList.toggle('active', mode === 'visual');
+    document.getElementById('ppte-mode-code')?.classList.toggle('active', mode === 'code');
+    const isSlideTab = pb.activeTab === 'slide';
+    document.getElementById('ppt-current-html')?.classList.toggle('hidden', !isSlideTab || mode === 'visual');
+    document.getElementById('ppte-visual-pane')?.classList.toggle('hidden', !isSlideTab || mode !== 'visual');
+  },
+
+  _setPptEditorMode(mode) {
+    const pb = this._pptBuilder;
+    if (!pb) return;
+    const next = mode === 'code' ? 'code' : 'visual';
+    if (next === 'code') {
+      // Visual edits are committed to slide.html continuously; just detach.
+      window.PpteVisualEditor?.closeSession();
+    } else {
+      // Flush any code edits before rendering the visual session.
+      this._markCurrentSlideFromEditor(pb);
+    }
+    pb.editorMode = next;
+    this._syncPptEditorModeUI();
+    if (next === 'visual' && pb.activeTab === 'slide') {
+      this._openVisualSession();
+    }
+  },
+
+  _openVisualSession() {
+    const pb = this._pptBuilder;
+    if (!pb || !window.PpteVisualEditor) return;
+    const slide = pb.slides[pb.currentSlideIndex];
+    const pane = document.getElementById('ppte-visual-pane');
+    if (!slide || !pane) return;
+    window.PpteVisualEditor.openSession({
+      container: pane,
+      folderPath: pb.folderPath,
+      html: slide.html || this._generateSlideHtml(slide.title, slide.slide_type),
+      readOnly: !!slide.linkedFrom,
+      onCommit: (html, failed) => {
+        const cur = this._pptBuilder;
+        if (!cur) return;
+        const current = cur.slides[cur.currentSlideIndex];
+        if (!current) return;
+        current.html = html;
+        current.dirty = true;
+        const textarea = document.getElementById('ppt-current-html');
+        if (textarea) textarea.value = html;
+        if (failed > 0) {
+          this._showToast(`${failed} 处修改未能应用（目标元素由脚本动态生成）`, true);
+        }
+      },
+      onToast: (message, isError) => this._showToast(message, isError),
+    });
   },
 
   _renderPageListHtml() {
@@ -683,10 +753,42 @@ window.PpteEditor = {
       resourcesBtn.onclick = () => this._showPpteResources();
     }
 
-    const visualBtn = document.getElementById('ppt-visual-edit-btn');
-    if (visualBtn) {
-      visualBtn.disabled = !!pb.slides[pb.currentSlideIndex]?.linkedFrom;
-      visualBtn.onclick = () => this._openPptVisualEditor();
+    const modeVisualBtn = document.getElementById('ppte-mode-visual');
+    if (modeVisualBtn) {
+      modeVisualBtn.onclick = () => this._setPptEditorMode('visual');
+    }
+
+    const modeCodeBtn = document.getElementById('ppte-mode-code');
+    if (modeCodeBtn) {
+      modeCodeBtn.onclick = () => this._setPptEditorMode('code');
+    }
+
+    // Dropdown menus (更多 / ⋯): toggle on button click, close on item pick
+    // or outside click (global closer registered once).
+    const bindMenu = (btnId, menuId) => {
+      const btn = document.getElementById(btnId);
+      const menu = document.getElementById(menuId);
+      if (!btn || !menu) return;
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const willOpen = menu.classList.contains('hidden');
+        document.querySelectorAll('.ppte-menu').forEach(m => m.classList.add('hidden'));
+        document.querySelectorAll('.ppte-menu-wrap > button').forEach(b => b.setAttribute('aria-expanded', 'false'));
+        menu.classList.toggle('hidden', !willOpen);
+        btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+      };
+      menu.onclick = (e) => {
+        if (e.target.closest('button')) menu.classList.add('hidden');
+      };
+    };
+    bindMenu('ppt-more-btn', 'ppt-more-menu');
+    bindMenu('ppt-page-more-btn', 'ppt-page-more-menu');
+    if (!this._pptMenuCloseHandler) {
+      this._pptMenuCloseHandler = () => {
+        document.querySelectorAll('.ppte-menu').forEach(m => m.classList.add('hidden'));
+        document.querySelectorAll('.ppte-menu-wrap > button').forEach(b => b.setAttribute('aria-expanded', 'false'));
+      };
+      document.addEventListener('click', this._pptMenuCloseHandler);
     }
 
     const previewBtn = document.getElementById('ppt-preview-btn');
@@ -1062,348 +1164,8 @@ window.PpteEditor = {
     }
   },
 
-  _wrapPptHtmlForVisualEditor(html, baseHref) {
-    const content = String(html || '');
-    const baseTag = `<base href="${this._escapeAttr(baseHref)}">`;
-    if (/<head[^>]*>/i.test(content)) {
-      return content.replace(/<head[^>]*>/i, (m) => `${m}\n${baseTag}`);
-    }
-    return `<!DOCTYPE html><html><head><meta charset="UTF-8">${baseTag}</head><body>${content}</body></html>`;
-  },
-
-  _openPptVisualEditor() {
-    const pb = this._pptBuilder;
-    if (!pb || !pb.slides || pb.slides.length === 0) return;
-
-    const slide = pb.slides[pb.currentSlideIndex];
-    const htmlTextarea = document.getElementById('ppt-current-html');
-    if (htmlTextarea) slide.html = htmlTextarea.value;
-
-    this._closePptVisualEditor(false);
-
-    const modal = document.createElement('div');
-    modal.className = 'ppt-visual-modal';
-    modal.innerHTML = `
-      <div class="ppt-visual-shell" role="dialog" aria-label="PPTE 可视化调整">
-        <div class="ppt-visual-header">
-          <div>
-            <div class="ppt-visual-header-title">可视化调整：${this._escapeHtml(slide.title || '未命名')}</div>
-            <div class="ppt-visual-header-desc">点击元素后可拖拽位置，右侧面板可精确修改像素值（支持方向键微调）</div>
-          </div>
-          <div class="ppt-visual-actions">
-            <button id="ppt-visual-apply-btn" class="ppt-visual-btn">应用到编辑器</button>
-            <button id="ppt-visual-apply-close-btn" class="ppt-visual-btn primary">应用并关闭</button>
-            <button id="ppt-visual-close-btn" class="ppt-visual-btn">关闭</button>
-          </div>
-        </div>
-        <div class="ppt-visual-body">
-          <div class="ppt-visual-canvas-wrap">
-            <iframe id="ppt-visual-iframe" class="ppt-visual-canvas"
-              sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-forms"></iframe>
-          </div>
-          <aside class="ppt-visual-side">
-            <div class="ppt-visual-side-scroll">
-              <div class="ppt-visual-block">
-                <div class="ppt-visual-label">当前元素</div>
-                <div id="ppt-visual-selected" class="ppt-visual-selected">未选择</div>
-              </div>
-              <div class="ppt-visual-block">
-                <div class="ppt-visual-label">位置与尺寸 (px)</div>
-                <div class="ppt-visual-grid">
-                  <label class="ppt-visual-field"><span>X</span><input id="ppt-visual-left" type="number" step="1"></label>
-                  <label class="ppt-visual-field"><span>Y</span><input id="ppt-visual-top" type="number" step="1"></label>
-                  <label class="ppt-visual-field"><span>宽度</span><input id="ppt-visual-width" type="number" step="1"></label>
-                  <label class="ppt-visual-field"><span>高度</span><input id="ppt-visual-height" type="number" step="1"></label>
-                  <label class="ppt-visual-field"><span>字体大小</span><input id="ppt-visual-font-size" type="number" step="1"></label>
-                </div>
-              </div>
-              <div class="ppt-visual-block">
-                <div class="ppt-visual-tip">拖拽会改写元素内联样式（left/top）。若元素原来是 static，会自动改为 relative 以支持位移。</div>
-                <div class="ppt-visual-tip">方向键每次移动 1px，Shift + 方向键 每次移动 10px。</div>
-              </div>
-            </div>
-          </aside>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-
-    const iframe = modal.querySelector('#ppt-visual-iframe');
-    const baseHref = `${this._slideProtocolUrl(pb.folderPath).replace(/\/+$/, '')}/`;
-    const htmlContent = slide.html || this._generateSlideHtml(slide.title, slide.slide_type);
-    iframe.srcdoc = this._wrapPptHtmlForVisualEditor(htmlContent, baseHref);
-
-    const state = {
-      modal,
-      iframe,
-      pb,
-      selectedEl: null,
-      dragging: false,
-      dragStartX: 0,
-      dragStartY: 0,
-      startLeft: 0,
-      startTop: 0,
-      syncingInspector: false,
-      inputs: {
-        left: modal.querySelector('#ppt-visual-left'),
-        top: modal.querySelector('#ppt-visual-top'),
-        width: modal.querySelector('#ppt-visual-width'),
-        height: modal.querySelector('#ppt-visual-height'),
-        fontSize: modal.querySelector('#ppt-visual-font-size'),
-      },
-      selectedLabel: modal.querySelector('#ppt-visual-selected'),
-      canvasHandlers: null,
-      keydownHandler: null,
-    };
-    this._pptVisualEditor = state;
-
-    const bindInput = (input, key) => {
-      if (!input) return;
-      input.addEventListener('input', () => this._applyPptVisualField(state, key, input.value));
-    };
-    bindInput(state.inputs.left, 'left');
-    bindInput(state.inputs.top, 'top');
-    bindInput(state.inputs.width, 'width');
-    bindInput(state.inputs.height, 'height');
-    bindInput(state.inputs.fontSize, 'fontSize');
-
-    modal.querySelector('#ppt-visual-close-btn').addEventListener('click', () => this._closePptVisualEditor(false));
-    modal.querySelector('#ppt-visual-apply-btn').addEventListener('click', () => this._applyPptVisualChanges(state));
-    modal.querySelector('#ppt-visual-apply-close-btn').addEventListener('click', () => this._closePptVisualEditor(true));
-
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) this._closePptVisualEditor(false);
-    });
-
-    state.keydownHandler = (e) => {
-      if (!this._pptVisualEditor || this._pptVisualEditor !== state) return;
-      if (!state.selectedEl) return;
-      const tag = e.target && e.target.tagName ? e.target.tagName : '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
-      const step = e.shiftKey ? 10 : 1;
-      if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        this._nudgePptVisualSelection(state, -step, 0);
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        this._nudgePptVisualSelection(state, step, 0);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        this._nudgePptVisualSelection(state, 0, -step);
-      } else if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        this._nudgePptVisualSelection(state, 0, step);
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        this._closePptVisualEditor(false);
-      }
-    };
-    document.addEventListener('keydown', state.keydownHandler);
-
-    iframe.addEventListener('load', () => this._bindPptVisualCanvas(state), { once: true });
-  },
-
-  _closePptVisualEditor(apply) {
-    const state = this._pptVisualEditor;
-    if (!state) return;
-
-    if (apply) this._applyPptVisualChanges(state);
-
-    if (state.canvasHandlers && state.iframe && state.iframe.contentDocument) {
-      const doc = state.iframe.contentDocument;
-      doc.removeEventListener('click', state.canvasHandlers.click, true);
-      doc.removeEventListener('mousedown', state.canvasHandlers.mousedown, true);
-      doc.removeEventListener('mousemove', state.canvasHandlers.mousemove, true);
-      doc.removeEventListener('mouseup', state.canvasHandlers.mouseup, true);
-    }
-    if (state.keydownHandler) {
-      document.removeEventListener('keydown', state.keydownHandler);
-    }
-    if (state.modal && state.modal.parentNode) {
-      state.modal.parentNode.removeChild(state.modal);
-    }
-    this._pptVisualEditor = null;
-  },
-
-  _bindPptVisualCanvas(state) {
-    const doc = state.iframe.contentDocument;
-    if (!doc) return;
-
-    if (doc.head) {
-      const style = doc.createElement('style');
-      style.textContent = `
-        [data-ppt-visual-selected="1"] {
-          outline: 2px solid #3b82f6 !important;
-          outline-offset: 2px !important;
-          cursor: move !important;
-        }
-      `;
-      doc.head.appendChild(style);
-    }
-
-    const findTarget = (eventTarget) => {
-      let el = eventTarget;
-      while (el && el !== doc.documentElement) {
-        if (this._pickPptVisualElement(el)) return el;
-        el = el.parentElement;
-      }
-      return null;
-    };
-
-    const clickHandler = (e) => {
-      const target = findTarget(e.target);
-      if (!target) return;
-      e.preventDefault();
-      e.stopPropagation();
-      this._selectPptVisualElement(state, target);
-    };
-
-    const mousedownHandler = (e) => {
-      if (e.button !== 0) return;
-      const target = findTarget(e.target);
-      if (!target) return;
-      e.preventDefault();
-      e.stopPropagation();
-      this._selectPptVisualElement(state, target);
-
-      this._ensurePptVisualPositioned(target);
-      state.dragging = true;
-      state.dragStartX = e.clientX;
-      state.dragStartY = e.clientY;
-      state.startLeft = parseFloat(target.style.left) || 0;
-      state.startTop = parseFloat(target.style.top) || 0;
-      doc.body.style.userSelect = 'none';
-    };
-
-    const mousemoveHandler = (e) => {
-      if (!state.dragging || !state.selectedEl) return;
-      e.preventDefault();
-      const dx = e.clientX - state.dragStartX;
-      const dy = e.clientY - state.dragStartY;
-      state.selectedEl.style.left = `${Math.round(state.startLeft + dx)}px`;
-      state.selectedEl.style.top = `${Math.round(state.startTop + dy)}px`;
-      this._syncPptVisualInspector(state);
-    };
-
-    const mouseupHandler = () => {
-      if (!state.dragging) return;
-      state.dragging = false;
-      if (doc.body) doc.body.style.userSelect = '';
-      this._syncPptVisualInspector(state);
-    };
-
-    doc.addEventListener('click', clickHandler, true);
-    doc.addEventListener('mousedown', mousedownHandler, true);
-    doc.addEventListener('mousemove', mousemoveHandler, true);
-    doc.addEventListener('mouseup', mouseupHandler, true);
-
-    state.canvasHandlers = {
-      click: clickHandler,
-      mousedown: mousedownHandler,
-      mousemove: mousemoveHandler,
-      mouseup: mouseupHandler,
-    };
-  },
-
-  _pickPptVisualElement(el) {
-    if (!el || !el.tagName) return false;
-    const tag = el.tagName.toUpperCase();
-    return !['HTML', 'BODY', 'HEAD', 'META', 'TITLE', 'LINK', 'STYLE', 'SCRIPT', 'BASE'].includes(tag);
-  },
-
-  _selectPptVisualElement(state, el) {
-    if (!el) return;
-    if (state.selectedEl) state.selectedEl.removeAttribute('data-ppt-visual-selected');
-    state.selectedEl = el;
-    state.selectedEl.setAttribute('data-ppt-visual-selected', '1');
-    this._syncPptVisualInspector(state);
-  },
-
-  _syncPptVisualInspector(state) {
-    if (!state.selectedEl) {
-      if (state.selectedLabel) state.selectedLabel.textContent = '未选择';
-      return;
-    }
-    const el = state.selectedEl;
-    const win = el.ownerDocument.defaultView;
-    const computed = win.getComputedStyle(el);
-
-    const left = parseFloat(el.style.left) || 0;
-    const top = parseFloat(el.style.top) || 0;
-    const width = parseFloat(el.style.width) || parseFloat(computed.width) || 0;
-    const height = parseFloat(el.style.height) || parseFloat(computed.height) || 0;
-    const fontSize = parseFloat(el.style.fontSize) || parseFloat(computed.fontSize) || 0;
-
-    const name = `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${el.className ? '.' + String(el.className).trim().replace(/\s+/g, '.') : ''}`;
-    if (state.selectedLabel) state.selectedLabel.textContent = name || el.tagName.toLowerCase();
-
-    state.syncingInspector = true;
-    state.inputs.left.value = Math.round(left);
-    state.inputs.top.value = Math.round(top);
-    state.inputs.width.value = Math.round(width);
-    state.inputs.height.value = Math.round(height);
-    state.inputs.fontSize.value = Math.round(fontSize);
-    state.syncingInspector = false;
-  },
-
-  _applyPptVisualField(state, key, rawValue) {
-    if (!state || !state.selectedEl || state.syncingInspector) return;
-    const value = parseFloat(rawValue);
-    if (!Number.isFinite(value)) return;
-
-    const el = state.selectedEl;
-    if (key === 'left' || key === 'top') {
-      this._ensurePptVisualPositioned(el);
-    }
-
-    if (key === 'left') el.style.left = `${value}px`;
-    if (key === 'top') el.style.top = `${value}px`;
-    if (key === 'width') el.style.width = `${Math.max(1, value)}px`;
-    if (key === 'height') el.style.height = `${Math.max(1, value)}px`;
-    if (key === 'fontSize') el.style.fontSize = `${Math.max(1, value)}px`;
-
-    this._syncPptVisualInspector(state);
-  },
-
-  _nudgePptVisualSelection(state, dx, dy) {
-    if (!state || !state.selectedEl) return;
-    this._ensurePptVisualPositioned(state.selectedEl);
-    const left = (parseFloat(state.selectedEl.style.left) || 0) + dx;
-    const top = (parseFloat(state.selectedEl.style.top) || 0) + dy;
-    state.selectedEl.style.left = `${left}px`;
-    state.selectedEl.style.top = `${top}px`;
-    this._syncPptVisualInspector(state);
-  },
-
-  _ensurePptVisualPositioned(el) {
-    if (!el) return;
-    const computed = el.ownerDocument.defaultView.getComputedStyle(el);
-    if (computed.position === 'static') {
-      el.style.position = 'relative';
-    }
-  },
-
-  _serializePptVisualDoc(doc) {
-    const doctype = doc.doctype ? `<!DOCTYPE ${doc.doctype.name}>` : '<!DOCTYPE html>';
-    return `${doctype}\n${doc.documentElement.outerHTML}`;
-  },
-
-  _applyPptVisualChanges(state) {
-    if (!state || !state.pb || !state.iframe || !state.iframe.contentDocument) return;
-    const html = this._serializePptVisualDoc(state.iframe.contentDocument);
-    const pb = state.pb;
-    const idx = pb.currentSlideIndex;
-    if (idx === undefined || !pb.slides[idx]) return;
-    pb.slides[idx].html = html;
-    pb.slides[idx].dirty = true;
-    const htmlTextarea = document.getElementById('ppt-current-html');
-    if (htmlTextarea) htmlTextarea.value = html;
-    this._showToast('已应用可视化调整');
-  },
-
   closePptEditor() {
-    this._closePptVisualEditor(false);
+    window.PpteVisualEditor?.closeSession();
     this._stopPptEditorWatch();
     this.showCourseView();
     // Optionally hide PPTE section

@@ -1,0 +1,211 @@
+/* ppte-visual-editor.css — in-place visual editing pane for the PPTE editor.
+   Loaded via <link> (the production CSP blocks runtime-injected <style>). */
+
+/* ===== mode switch (可视化 / 代码) in the editor toolbar ===== */
+.ppte-mode-switch {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.ppte-mode-btn {
+  padding: 5px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ppte-mode-btn + .ppte-mode-btn {
+  border-left: 1px solid var(--border);
+}
+
+.ppte-mode-btn:hover {
+  color: var(--text-primary);
+}
+
+.ppte-mode-btn.active {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* ===== visual pane layout ===== */
+#ppte-visual-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 8px;
+}
+
+#ppte-visual-pane.hidden,
+#ppte-visual-banner.hidden {
+  display: none !important;
+}
+
+.ppte-visual-banner {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.ppte-visual-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ppte-visual-toolbar .ppte-editor-button-compact:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ppte-visual-hint {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ppte-visual-main {
+  flex: 1;
+  display: flex;
+  gap: 10px;
+  min-height: 0;
+}
+
+.ppte-visual-canvas-wrap {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+  display: flex;
+}
+
+.ppte-visual-canvas {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+/* ===== inspector (right side) ===== */
+.ppte-visual-side {
+  width: 220px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ppte-visual-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.ppte-visual-selected {
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-all;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+}
+
+.ppte-visual-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.ppte-visual-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ppte-visual-field span {
+  flex-shrink: 0;
+  min-width: 28px;
+}
+
+.ppte-visual-field input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.ppte-visual-text-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ppte-visual-text-tools input[type="color"] {
+  width: 32px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  cursor: pointer;
+}
+
+.ppte-visual-text-tools select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+#ppte-vis-bold {
+  width: 30px;
+  font-weight: 700;
+}
+
+#ppte-vis-bold.active {
+  background: var(--bg-tertiary);
+  border-color: var(--accent, #4a7dff);
+  color: var(--text-primary);
+}
+
+.ppte-visual-side input:disabled,
+.ppte-visual-side select:disabled,
+.ppte-visual-side button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* read-only (shared linked pages): keep the rendered preview, mute the hint */
+#ppte-visual-pane.ppte-visual-readonly .ppte-visual-hint {
+  visibility: hidden;
+}
