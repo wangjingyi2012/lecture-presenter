@@ -1854,18 +1854,40 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   },
 
   // ---- action parsing ----
+  // Conservative repair for near-valid model JSON: retry once after stripping
+  // trailing commas, and name truncation explicitly so the recovery prompt
+  // tells the model to re-output compactly instead of failing opaquely.
+  _parseActionJson(raw) {
+    try {
+      return { obj: JSON.parse(raw) };
+    } catch (firstError) {
+      const cleaned = raw.replace(/,\s*([}\]])/g, '$1');
+      if (cleaned !== raw) {
+        try {
+          return { obj: JSON.parse(cleaned) };
+        } catch (_) { /* fall through to the original error */ }
+      }
+      const opens = (raw.match(/[{[]/g) || []).length;
+      const closes = (raw.match(/[}\]]/g) || []).length;
+      if (opens > closes) {
+        return { error: 'JSON 不完整（输出可能被截断）：请重新输出一个完整且更紧凑的 action JSON' };
+      }
+      return { error: String(firstError) };
+    }
+  },
   _parseActions(text) {
     const actions = [];
     const re = /```action\s*([\s\S]*?)```/gi;
     let m;
     while ((m = re.exec(text))) {
       const raw = m[1].trim();
-      try {
-        const obj = JSON.parse(raw);
-        if (obj && obj.tool) actions.push(obj);
-        else actions.push({ tool: '_parse_error', error: '缺少 tool 字段', raw });
-      } catch (e) {
-        actions.push({ tool: '_parse_error', error: String(e), raw });
+      const { obj, error } = this._parseActionJson(raw);
+      if (error) {
+        actions.push({ tool: '_parse_error', error, raw });
+      } else if (obj && obj.tool) {
+        actions.push(obj);
+      } else {
+        actions.push({ tool: '_parse_error', error: '缺少 tool 字段', raw });
       }
     }
     return actions;

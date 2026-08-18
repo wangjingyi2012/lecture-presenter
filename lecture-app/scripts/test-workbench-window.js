@@ -1261,6 +1261,23 @@ async function testIconToolsSearchAndDownload() {
   assert.equal(wb._toolDisplayNames.use_icon, '下载图标');
 }
 
+function testActionJsonTolerantParsing() {
+  const valid = wb._parseActions('```action\n{"tool":"validate_deck"}\n```');
+  assert.equal(valid[0].tool, 'validate_deck', 'plain action still parses');
+
+  const trailingComma = wb._parseActions('```action\n{"tool":"render_template","payload":{"a":1,},}\n```');
+  assert.equal(trailingComma[0].tool, 'render_template', 'trailing commas are repaired');
+  assert.equal(trailingComma[0].payload.a, 1);
+
+  const truncated = wb._parseActions('```action\n{"tool":"set_deck_plan","plan":{"targetSlideCount":32\n```');
+  assert.equal(truncated[0].tool, '_parse_error', 'truncated JSON stays a parse error');
+  assert.ok(truncated[0].error.includes('截断'), 'truncation is named so the model re-outputs compactly');
+
+  const broken = wb._parseActions('```action\n{"tool": 请验证}\n```');
+  assert.equal(broken[0].tool, '_parse_error', 'genuinely invalid JSON still fails');
+  assert.ok(!broken[0].error.includes('截断'), 'non-truncation errors keep the original parser message');
+}
+
 (async () => {
   await testLectureAiRetriesOneTransientUpstreamFailure();
   await testInputUiBindsWithoutTauriEvents();
@@ -1283,6 +1300,7 @@ async function testIconToolsSearchAndDownload() {
   await testPiWebSocketReturnsMatchingToolResult();
   await testAgentImportsSelectedExternalSkillFolder();
   testStreamingBubbleRendersFinalAnswerProgressively();
+  testActionJsonTolerantParsing();
   await testOutlineMentionResolvesViaRpc();
   await testIconToolsSearchAndDownload();
   await testSessionPersistence();
