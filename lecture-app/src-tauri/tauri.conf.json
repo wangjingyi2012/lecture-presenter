@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/v2/crates/tauri-utils/schema.json",
   "productName": "Lecture Presenter",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "identifier": "com.lecture.presenter",
   "build": {
     "frontendDist": "../src",
