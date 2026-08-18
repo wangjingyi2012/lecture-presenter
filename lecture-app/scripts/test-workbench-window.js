@@ -44,6 +44,7 @@ assert.match(source, /_turnGeneration/);
 assert.match(source, /上游模型暂时不可用，1\.2s 后自动重试/, 'transient LectureAI failures should expose the automatic retry phase');
 
 const originalLogForUserLine = wb._log;
+const originalAppendMarkdown = wb._appendAssistantMarkdown;
 const userLines = [];
 wb._log = (_type, text) => userLines.push(text);
 wb._appendUser('@4 使用 /concept-animate 重绘', [{ page: 4 }]);
@@ -60,6 +61,110 @@ assert.doesNotMatch(htmlSource, /<div class="term-input-area"[^>]*>[\s\S]*?id="w
 assert.match(htmlSource, /\.markdown-body table/, 'workbench should style rendered Markdown tables');
 assert.doesNotMatch(editorSource, /templateFilesDirty:\s*!!templateFiles/, 'persisted template assets must not be marked dirty when a new PPTE opens');
 assert.match(editorSource, /templateFilesDirty:\s*false/, 'new PPTE template assets should start clean');
+
+// ---- workbench session persistence ----
+assert.match(source, /workbench-sessions\.json/, 'workbench chat sessions must persist to a per-deck file');
+assert.match(agentSource, /folderPath:\s*pb\?\.folderPath \|\| null/, 'get-context must expose the deck folderPath for session storage');
+async function testSessionPersistence() {
+  const messages = { innerHTML: '', children: [], appendChild(el) { this.children.push(el); }, querySelectorAll() { return []; } };
+  const prevGetEl = context.document.getElementById;
+  const prevCreateEl = context.document.createElement;
+  context.document.getElementById = (id) => (id === 'wb-messages' ? messages : null);
+  context.document.createElement = () => {
+    const el = { className: '', textContent: '', type: '', onclick: null, _children: [{ textContent: '' }, { textContent: '' }] };
+    Object.defineProperty(el, 'children', { get() { return this._children; } });
+    Object.defineProperty(el, 'innerHTML', { get() { return ''; }, set() {} });
+    return el;
+  };
+  const prevTauri = context.window.__TAURI__;
+  const writes = [];
+  const diskStore = {
+    version: 1,
+    sessions: [
+      { id: 'old1', startedAt: '2026-08-17T10:00:00Z', updatedAt: '2026-08-17T11:00:00Z', preview: '旧对话一', history: [{ role: 'user', content: 'u1' }], transcript: [{ t: 'user', text: '旧问题1' }, { t: 'ai', md: '旧回答1' }] },
+      { id: 'old2', startedAt: '2026-08-17T12:00:00Z', updatedAt: '2026-08-17T12:30:00Z', preview: '旧对话二', history: [], transcript: [{ t: 'user', text: '旧问题2' }] },
+    ],
+  };
+  context.window.__TAURI__ = {
+    core: {
+      invoke: async (cmd, args) => {
+        if (cmd === 'write_text_file') { writes.push(args); return null; }
+        if (cmd === 'read_text_file') return JSON.stringify(diskStore);
+        return null;
+      },
+    },
+  };
+  try {
+    // Earlier cases stub these without restoring; bring back the real ones.
+    wb._log = originalLogForUserLine;
+    wb._appendAssistantMarkdown = originalAppendMarkdown;
+    wb._deckPath = '/tmp/session-deck';
+    // each workbench open begins a new conversation
+    await wb._beginSession();
+    assert.ok(wb._sessionId && wb._sessionId !== 'old1' && wb._sessionId !== 'old2', 'a fresh session id per window open');
+    assert.equal(wb._transcript.length, 0, 'new session starts empty');
+    assert.equal(messages.children.length, 1, 'a /resume hint is shown when past sessions exist');
+    assert.match(messages.children[0].textContent, /\/resume/);
+    // a window that never produced content leaves nothing on disk
+    await wb._saveSession();
+    assert.equal(writes.length, 0, 'empty fresh sessions are not persisted');
+    // _log records conversation lines, skips transient phase lines
+    wb._log('user', '你好');
+    wb._log('phase', '第 1 轮 · 正在提交模型请求');
+    wb._log('sys', '任务结束');
+    wb._appendAssistantMarkdown('**回答**');
+    assert.deepEqual(wb._transcript, [
+      { t: 'user', text: '你好' },
+      { t: 'sys', text: '任务结束' },
+      { t: 'ai', md: '**回答**' },
+    ], 'transcript records user/sys/ai entries and skips phase lines');
+    wb._log('err', '忽略我', { skipRecord: true });
+    assert.equal(wb._transcript.length, 3, 'skipRecord lines are not persisted');
+    // save appends the current session alongside past ones
+    wb.history = [{ role: 'user', content: '你好' }];
+    await wb._saveSession();
+    assert.equal(writes.length, 1, 'save must write once');
+    assert.equal(writes[0].filePath, '/tmp/session-deck/.lectureai/workbench-sessions.json');
+    const saved = JSON.parse(writes[0].content);
+    assert.equal(saved.sessions.length, 3, 'current session joins the two past ones');
+    assert.equal(saved.sessions[0].id, wb._sessionId, 'most recently updated session comes first');
+    assert.equal(saved.sessions[0].preview, '你好');
+    assert.equal(saved.sessions[0].transcript.length, 3);
+    // the store is capped at 10 sessions
+    wb._sessions = Array.from({ length: 10 }, (_, i) => ({ id: `x${i}`, updatedAt: `2026-08-0${(i % 9) + 1}T00:00:00Z`, transcript: [{ t: 'user', text: `q${i}` }] }));
+    await wb._saveSession();
+    const capped = JSON.parse(writes[1].content);
+    assert.equal(capped.sessions.length, 10, 'only the 10 most recent sessions are kept');
+    assert.ok(capped.sessions.some(s => s.id === wb._sessionId), 'the active session is never trimmed');
+    // /resume lists past sessions as clickable entries
+    messages.children = [];
+    await wb._resume();
+    assert.equal(messages.children.length, 3, 'one header line plus two session buttons');
+    assert.equal(messages.children[1].children[0].textContent, '旧对话一');
+    // loading a session replays its transcript and rehydrates history
+    messages.children = [];
+    wb._loadSession(diskStore.sessions[0]);
+    assert.equal(wb._sessionId, 'old1', 'resumed session continues under its own id');
+    assert.equal(wb.history.length, 1, 'history is restored for model continuation');
+    assert.equal(wb._transcript.length, 2, 'transcript is restored');
+    assert.equal(messages.children.length, 3, 'two replayed lines plus the resume notice');
+    assert.equal(messages.children[0].textContent, '旧问题1');
+    // /clear wipes both the model history and the persisted transcript
+    wb._clear();
+    assert.equal(wb.history.length, 0);
+    assert.equal(wb._transcript.length, 1, 'only the clear notice remains');
+  } finally {
+    context.document.getElementById = prevGetEl;
+    context.document.createElement = prevCreateEl;
+    context.window.__TAURI__ = prevTauri;
+    wb._deckPath = null;
+    wb._sessionId = null;
+    wb._sessions = [];
+    wb.history = [];
+    wb._transcript = [];
+  }
+}
+
 
 const editorContext = {
   console,
@@ -1177,6 +1282,7 @@ async function testIconToolsSearchAndDownload() {
   testStreamingBubbleRendersFinalAnswerProgressively();
   await testOutlineMentionResolvesViaRpc();
   await testIconToolsSearchAndDownload();
+  await testSessionPersistence();
 })()
   .then(() => console.log('test-workbench-window: all assertions passed'))
   .catch((error) => {

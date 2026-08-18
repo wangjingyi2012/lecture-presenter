@@ -21,24 +21,7 @@ window.PpteWorkbenchAgent = {
 
   init(appConfig) {
     this.appConfig = appConfig || window.CourseLoader?.appConfig || {};
-    this._injectToggle();
     this._listenRequests();
-  },
-
-  // ---- toggle button in editor header ----
-  _injectToggle() {
-    if (document.getElementById('ppt-workbench-toggle')) return;
-    const actions = document.querySelector('.ppte-editor-primary-actions');
-    if (!actions) return;
-    const btn = document.createElement('button');
-    btn.id = 'ppt-workbench-toggle';
-    btn.className = 'ppte-editor-button ppte-editor-button-compact';
-    btn.title = '工作台助手（课件级对话，@页码定位）';
-    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v1H7a3 3 0 0 0-3 3v1a3 3 0 0 0 0 6v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1a3 3 0 0 0 0-6V9a3 3 0 0 0-3-3h-2V5a3 3 0 0 0-3-3z"/><path d="M9 13h6"/></svg> 工作台`;
-    btn.onclick = () => this.open();
-    const saveBtn = document.getElementById('ppt-save-btn');
-    if (saveBtn) actions.insertBefore(btn, saveBtn);
-    else actions.appendChild(btn);
   },
 
   _listenRequests() {
@@ -150,6 +133,7 @@ window.PpteWorkbenchAgent = {
     }
     const ctx = {
       title: pb?.manifest?.title || '',
+      folderPath: pb?.folderPath || null,
       slides: (pb?.slides || []).map(s => ({
         title: s.title || '（无标题）',
         slideType: s.slide_type || 'content',

@@ -102,6 +102,14 @@ window.PpteSlashCommands = {
       localAction: 'compact',
       defaultScope: 'none',
     },
+    {
+      name: 'resume',
+      title: '恢复会话',
+      description: '查看并恢复最近 10 次历史会话',
+      local: true,
+      localAction: 'resume',
+      defaultScope: 'none',
+    },
   ],
 
   get(name) {

@@ -32,6 +32,13 @@ window.WorkbenchWindow = {
   _pickerMode: null,
   currentPage: null,
   skills: [],
+  _deckPath: null,        // folderPath of the connected deck; session file lives under it
+  _transcript: [],        // persisted log entries: [{t:'user'|'sys'|'ok'|'err', text} | {t:'ai', md}]
+  _sessionId: null,       // current conversation id; a new one per window open
+  _sessionStartedAt: null,
+  _sessions: [],          // cached session store entries (max 10 kept on disk)
+  _sessionSaveTimer: null,
+  _restoreToken: 0,
 
   async init() {
     // Input discovery must not depend on Tauri event subscriptions. If any
@@ -88,6 +95,11 @@ window.WorkbenchWindow = {
     if (send) send.onclick = () => this._send();
     if (stop) stop.onclick = () => this._requestStop();
     if (clear) clear.onclick = () => this._clear();
+    // Flush the debounced session save when the window closes.
+    window.addEventListener?.('beforeunload', () => {
+      clearTimeout(this._sessionSaveTimer);
+      this._saveSession();
+    });
     input.oninput = () => { this._autoResizeInput(); this._updateInputPicker(); };
     input.onclick = () => this._updateInputPicker();
     input.onkeyup = (e) => {
@@ -193,12 +205,146 @@ window.WorkbenchWindow = {
       }
     }
     if (!ctx || !ctx.slides?.length) {
+      this._deckPath = null;
+      this._sessionId = null;
+      this._sessions = [];
       this._renderPickCourse();
-    } else if (document.getElementById('wb-pick-ppte')) {
-      // was showing the pick-course guide, now connected -> reset to empty
-      this._renderEmpty();
+    } else {
+      const deckPath = String(ctx.folderPath || '').replace(/[\\/]+$/, '') || null;
+      if (deckPath && deckPath !== this._deckPath) {
+        // Connected to a (different) deck: start a fresh conversation; past
+        // sessions stay on disk and can be reopened with /resume.
+        this._deckPath = deckPath;
+        this.history = [];
+        this._transcript = [];
+        this._beginSession();
+      } else if (document.getElementById('wb-pick-ppte')) {
+        // was showing the pick-course guide, now connected -> reset to empty
+        this._renderEmpty();
+      }
     }
     if (ctx?.prefillPage) this._onPrefill({ page: ctx.prefillPage });
+  },
+
+  // ---- session persistence (per deck, <deck>/.lectureai/workbench-sessions.json) ----
+  // Each workbench open starts a new conversation; the last 10 are kept on disk.
+  _sessionsFilePath() {
+    return this._deckPath ? `${this._deckPath}/.lectureai/workbench-sessions.json` : null;
+  },
+
+  async _readSessionStore() {
+    const filePath = this._sessionsFilePath();
+    if (!filePath || !window.__TAURI__) return [];
+    try {
+      const raw = await window.__TAURI__.core.invoke('read_text_file', { filePath });
+      const data = JSON.parse(raw);
+      return Array.isArray(data?.sessions) ? data.sessions : [];
+    } catch (_) {
+      return []; // no saved sessions is normal
+    }
+  },
+
+  async _beginSession() {
+    const token = ++this._restoreToken;
+    this._sessionId = `s${Date.now().toString(36)}`;
+    this._sessionStartedAt = new Date().toISOString();
+    const past = await this._readSessionStore();
+    if (token !== this._restoreToken) return; // deck switched while reading
+    this._sessions = past;
+    this._renderEmpty();
+    if (past.some(s => (s?.transcript || []).length)) {
+      this._log('sys', `本课件有历史会话 · 输入 /resume 可恢复最近 ${Math.min(past.length, 10)} 次对话`, { skipRecord: true });
+    }
+  },
+
+  _scheduleSessionSave() {
+    if (!this._sessionsFilePath()) return;
+    clearTimeout(this._sessionSaveTimer);
+    this._sessionSaveTimer = setTimeout(() => this._saveSession(), 800);
+  },
+
+  async _saveSession() {
+    const filePath = this._sessionsFilePath();
+    if (!filePath || !window.__TAURI__ || !this._sessionId) return;
+    // A brand-new window that never produced content leaves no trace on disk.
+    const known = (this._sessions || []).some(s => s.id === this._sessionId);
+    if (!this._transcript.length && !known) return;
+    // Bound the log so long-lived decks do not grow the file without limit.
+    if (this._transcript.length > 400) this._transcript = this._transcript.slice(-400);
+    const preview = String(this._transcript.find(i => i.t === 'user')?.text || '').slice(0, 60);
+    const entry = {
+      id: this._sessionId,
+      startedAt: this._sessionStartedAt,
+      updatedAt: new Date().toISOString(),
+      preview,
+      history: this.history,
+      transcript: this._transcript,
+    };
+    const others = (this._sessions || []).filter(s => s.id !== entry.id);
+    this._sessions = [entry, ...others]
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+      .slice(0, 10);
+    try {
+      await window.__TAURI__.core.invoke('write_text_file', {
+        filePath,
+        content: JSON.stringify({ version: 1, sessions: this._sessions }),
+      });
+    } catch (e) {
+      console.error('workbench session save failed', e);
+    }
+  },
+
+  // /resume — list past sessions and load the picked one into this window.
+  async _resume() {
+    if (!this._deckPath) {
+      this._log('sys', '未连接课件，没有可恢复的会话');
+      return;
+    }
+    this._sessions = await this._readSessionStore();
+    const sessions = this._sessions
+      .filter(s => s.id !== this._sessionId && (s?.transcript || []).length)
+      .slice(0, 10);
+    if (!sessions.length) {
+      this._log('sys', '没有可恢复的历史会话');
+      return;
+    }
+    this._log('sys', `最近 ${sessions.length} 次会话 · 点击恢复：`, { skipRecord: true });
+    const m = document.getElementById('wb-messages');
+    if (!m) return;
+    sessions.forEach(session => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'wb-recent-item';
+      const time = this._sessionTimeLabel(session.updatedAt || session.startedAt);
+      const lines = (session.transcript || []).length;
+      btn.innerHTML = `<span class="wb-recent-title"></span><span class="wb-recent-path"></span>`;
+      btn.children[0].textContent = session.preview || '（无标题对话）';
+      btn.children[1].textContent = `${time} · ${lines} 条记录`;
+      btn.onclick = () => this._loadSession(session);
+      m.appendChild(btn);
+    });
+    this._scroll();
+  },
+
+  _sessionTimeLabel(iso) {
+    const date = new Date(iso || '');
+    if (Number.isNaN(date.getTime())) return '时间未知';
+    return date.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  },
+
+  _loadSession(session) {
+    if (!session?.id) return;
+    this._sessionId = session.id;
+    this._sessionStartedAt = session.startedAt || null;
+    this.history = Array.isArray(session.history) ? session.history : [];
+    this._transcript = Array.isArray(session.transcript) ? session.transcript : [];
+    const m = document.getElementById('wb-messages');
+    if (m) m.innerHTML = '';
+    for (const item of this._transcript) {
+      if (item?.t === 'ai' && item.md) this._appendAssistantMarkdown(item.md, { skipRecord: true });
+      else if (item?.text) this._log(item.t, item.text, { skipRecord: true });
+    }
+    this._log('sys', `已恢复 ${this._sessionTimeLabel(session.updatedAt || session.startedAt)} 的会话 · ${this._transcript.length} 条记录，可直接继续提问`, { skipRecord: true });
   },
 
   _renderPickCourse() {
@@ -276,7 +422,9 @@ window.WorkbenchWindow = {
 
   _clear() {
     this.history = [];
+    this._transcript = [];
     this._renderEmpty();
+    this._saveSession();
     this._log('sys', '上下文已清理 · 课件连接和页面状态保留');
   },
 
@@ -294,6 +442,7 @@ window.WorkbenchWindow = {
       role: 'user',
       content: `[上下文压缩] 已压缩 ${removed} 条较早消息。课件当前状态以磁盘和最新上下文为准；如需细节，请重新读取页面。`,
     }, ...recent];
+    this._scheduleSessionSave();
     this._log('sys', `上下文已压缩 · 移除 ${removed} 条较早消息，保留最近 ${recent.length} 条`);
   },
 
@@ -654,6 +803,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       this._appendUser(input, []);
       if (slash.command.localAction === 'clear') this._clear();
       else if (slash.command.localAction === 'compact') this._compact();
+      else if (slash.command.localAction === 'resume') this._resume();
       else this._appendAssistantMarkdown(window.PpteSlashCommands.helpMarkdown());
       if (inputEl) inputEl.value = '';
       this._autoResizeInput();
@@ -1729,7 +1879,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   },
 
   // ---- terminal log ----
-  _log(type, text) {
+  _log(type, text, opts) {
     const m = document.getElementById('wb-messages');
     if (!m) return;
     const el = document.createElement('div');
@@ -1737,6 +1887,11 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     el.textContent = String(text || '');
     m.appendChild(el);
     this._scroll();
+    // Persist conversation-relevant lines; 'phase' status lines are transient.
+    if (!opts?.skipRecord && ['user', 'sys', 'ok', 'err'].includes(type)) {
+      this._transcript.push({ t: type, text: String(text || '') });
+      this._scheduleSessionSave();
+    }
     return el;
   },
 
@@ -1747,7 +1902,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     this._log('user', t);
   },
 
-  _appendAssistantMarkdown(markdown) {
+  _appendAssistantMarkdown(markdown, opts) {
     const m = document.getElementById('wb-messages');
     if (!m || !markdown) return;
     const el = document.createElement('div');
@@ -1759,6 +1914,10 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     }
     m.appendChild(el);
     this._scroll();
+    if (!opts?.skipRecord) {
+      this._transcript.push({ t: 'ai', md: String(markdown) });
+      this._scheduleSessionSave();
+    }
     return el;
   },
 

@@ -1037,6 +1037,9 @@ fn media_response(file_path: &str, range: Option<&str>) -> http::Response<Vec<u8
 
 #[tauri::command]
 fn write_text_file(file_path: String, content: String) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(&file_path).parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+    }
     fs::write(&file_path, &content).map_err(|e| format!("Failed to write {}: {}", file_path, e))
 }
 
@@ -1506,7 +1509,9 @@ fn zip_ppte_directory(dir_path: &str) -> Result<Vec<u8>, String> {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
             let entry_name = entry.file_name().to_string_lossy().to_lowercase();
-            if entry_name == ".ds_store" || entry_name == "outline.md" {
+            // .lectureai holds local agent state (deck plan, workbench chat
+            // session) that the cloud renderer does not need.
+            if entry_name == ".ds_store" || entry_name == "outline.md" || entry_name == ".lectureai" {
                 continue;
             }
             if path.is_dir() {
@@ -4573,6 +4578,8 @@ mod ppte_outline_tests {
         fs::write(dir.join("slide01.html"), "<h1>One</h1>").unwrap();
         fs::write(dir.join("outline.md"), "# 章纲").unwrap();
         fs::write(dir.join(".DS_Store"), b"junk").unwrap();
+        fs::create_dir_all(dir.join(".lectureai")).unwrap();
+        fs::write(dir.join(".lectureai").join("workbench-session.json"), "{}").unwrap();
 
         let bytes = zip_ppte_directory(dir.to_string_lossy().as_ref()).unwrap();
         let cursor = std::io::Cursor::new(bytes);
@@ -4583,6 +4590,7 @@ mod ppte_outline_tests {
         assert!(names.contains(&"slide01.html".to_string()));
         assert!(!names.iter().any(|n| n.ends_with("outline.md")));
         assert!(!names.iter().any(|n| n.ends_with(".DS_Store")));
+        assert!(!names.iter().any(|n| n.contains(".lectureai")));
 
         fs::remove_dir_all(dir).unwrap();
     }
