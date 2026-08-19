@@ -1276,6 +1276,48 @@ function testActionJsonTolerantParsing() {
   const broken = wb._parseActions('```action\n{"tool": 请验证}\n```');
   assert.equal(broken[0].tool, '_parse_error', 'genuinely invalid JSON still fails');
   assert.ok(!broken[0].error.includes('截断'), 'non-truncation errors keep the original parser message');
+
+  const ansiGarbage = wb._parseActions('```action\n{"tool":"validate_deck"\x1b[118;1:3u}\n```');
+  assert.equal(ansiGarbage[0].tool, 'validate_deck', 'ANSI escape bytes leaked by the model are stripped before parsing');
+
+  assert.equal(wb._hasBareToolPayload('{"tool":"set_deck_plan","plan":{}}'), true, 'bare JSON tool payload detected');
+  assert.equal(wb._hasBareToolPayload('任务完成，无需修改。'), false);
+  assert.equal(wb._hasBareToolPayload('```action\n{"tool":"validate_deck"}\n```'), false, 'fenced actions are not bare');
+}
+
+async function testBareToolJsonTriggersProtocolCorrection() {
+  const plan = {
+    targetSlideCount: 1,
+    visualSystem: { style: 'test' },
+    slides: [{ page: 1, role: 'cover', title: '测试', contentKind: 'cover', layoutFamily: 'cover', componentIds: [], motion: 'none', visualIntent: '测试' }],
+  };
+  const replies = [
+    JSON.stringify({ tool: 'set_deck_plan', plan }), // bare JSON, no ```action fence
+    `保存蓝图\n\`\`\`action\n${JSON.stringify({ tool: 'set_deck_plan', plan })}\n\`\`\``,
+    `整套校验\n\`\`\`action\n${JSON.stringify({ tool: 'validate_deck' })}\n\`\`\``,
+    '任务完成。',
+  ];
+  const executed = [];
+  let aiCalls = 0;
+  wb._activeTask = { deckLevel: true, requiresPlan: true, planSaved: false, deckValidated: false };
+  wb.history = [{ role: 'system', content: 'test' }];
+  wb._callAI = async () => replies[aiCalls++];
+  wb._rpc = async (_type, payload) => {
+    executed.push(payload.action.tool);
+    if (payload.action.tool === 'validate_deck') return JSON.stringify({ passed: true });
+    return `${payload.action.tool} 已完成`;
+  };
+  wb._appendAssistantMarkdown = () => {};
+  wb._log = () => {};
+  wb._logAction = () => {};
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  wb._setBusy = () => {};
+
+  await wb._runTurn();
+
+  assert.deepEqual(executed, ['set_deck_plan', 'validate_deck'], 'bare JSON neither executes nor silently ends the task');
+  assert.equal(wb.history.some(x => String(x.content).includes('[工具协议纠正]') && String(x.content).includes('裸 JSON')), true, 'protocol correction is fed back to the model');
 }
 
 (async () => {
@@ -1301,6 +1343,7 @@ function testActionJsonTolerantParsing() {
   await testAgentImportsSelectedExternalSkillFolder();
   testStreamingBubbleRendersFinalAnswerProgressively();
   testActionJsonTolerantParsing();
+  await testBareToolJsonTriggersProtocolCorrection();
   await testOutlineMentionResolvesViaRpc();
   await testIconToolsSearchAndDownload();
   await testSessionPersistence();

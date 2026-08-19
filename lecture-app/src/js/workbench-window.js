@@ -940,6 +940,22 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         // Tool-round prose stays compressed in the single status line. Only a
         // final response without actions is rendered as a full Markdown block.
         if (!actions.length) {
+          // The model emitted a bare JSON tool payload without the ```action
+          // fence (Stepfun does this more often than DeepSeek). Without this
+          // branch the turn would end as if the plan had been applied.
+          if (this._hasBareToolPayload(text)) {
+            recoveryRounds += 1;
+            if (recoveryRounds > 3) throw new Error('模型连续 3 次未按规定格式调用工具，任务已停止，请重试');
+            this.history.push({
+              role: 'user',
+              content: '[工具协议纠正] 你刚才输出了裸 JSON 工具调用，但没有放在 ```action 代码块里，系统无法解析执行。请重新输出同一个工具调用，完整包裹在 ```action 与 ``` 之间。',
+            });
+            if (this._modelStatusEl) {
+              this._modelStatusEl.dataset.summary = '正在补发工具调用';
+              this._modelStatusEl.textContent = `第 ${rounds} 轮 · 正在补发工具调用 · ${this._duration(turnStartedAt)}`;
+            }
+            continue;
+          }
           if (this._hasUnexecutedToolIntent(text)) {
             recoveryRounds += 1;
             if (recoveryRounds > 3) throw new Error('模型连续 3 次未发出有效工具调用，任务已停止，避免无限请求');
@@ -1858,17 +1874,23 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   // trailing commas, and name truncation explicitly so the recovery prompt
   // tells the model to re-output compactly instead of failing opaquely.
   _parseActionJson(raw) {
+    // Models occasionally leak ANSI escape/control bytes into the stream
+    // (observed as ESC[118;1:3u landing mid-JSON), which otherwise fails
+    // with an opaque "Property name must be a string literal".
+    const sanitized = String(raw)
+      .replace(/\x1b\[[0-9;:]*[A-Za-z]/g, '')
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
     try {
-      return { obj: JSON.parse(raw) };
+      return { obj: JSON.parse(sanitized) };
     } catch (firstError) {
-      const cleaned = raw.replace(/,\s*([}\]])/g, '$1');
-      if (cleaned !== raw) {
+      const cleaned = sanitized.replace(/,\s*([}\]])/g, '$1');
+      if (cleaned !== sanitized) {
         try {
           return { obj: JSON.parse(cleaned) };
         } catch (_) { /* fall through to the original error */ }
       }
-      const opens = (raw.match(/[{[]/g) || []).length;
-      const closes = (raw.match(/[}\]]/g) || []).length;
+      const opens = (sanitized.match(/[{[]/g) || []).length;
+      const closes = (sanitized.match(/[}\]]/g) || []).length;
       if (opens > closes) {
         return { error: 'JSON 不完整（输出可能被截断）：请重新输出一个完整且更紧凑的 action JSON' };
       }
@@ -1895,6 +1917,14 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
 
   _stripActions(text) {
     return text.replace(/```action\s*[\s\S]*?```/gi, '').trim();
+  },
+
+  // True when the reply carries a tool-call JSON payload that never made it
+  // into an ```action fence — Stepfun emits bare {"tool": ...} JSON far more
+  // often than DeepSeek. Long JSON trips the 160-char guard in
+  // _hasUnexecutedToolIntent, so bare payloads need their own detector.
+  _hasBareToolPayload(text) {
+    return /"tool"\s*:/.test(this._stripActions(String(text || '')));
   },
 
   _hasUnexecutedToolIntent(text) {

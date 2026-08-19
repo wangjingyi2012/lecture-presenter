@@ -6051,7 +6051,15 @@ async fn call_lectureai_chat_stream(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    while let Some(chunk) = stream.next().await {
+    // Backstop read timeout: the server emits an explicit error after 90s of
+    // upstream silence and heartbeats every 10s, so 180s without ANY byte
+    // means the network path itself is dead. Without this the JS promise
+    // never settles and the task hangs with a frozen status.
+    loop {
+        let next = tokio::time::timeout(std::time::Duration::from_secs(180), stream.next())
+            .await
+            .map_err(|_| "网络请求失败：模型响应长时间没有新数据，请重试".to_string())?;
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|e| format!("读取流失败: {}", e))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(pos) = buffer.find('\n') {
