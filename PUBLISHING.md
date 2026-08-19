@@ -56,6 +56,29 @@ Tag 推送会触发两个 workflow，并自动创建/更新同名的 GitHub Rele
 
 手动在 GitHub Actions 页面触发 workflow 只会产出 artifacts，不会创建 Release；只有 tag 推送才发版。
 
+## 上传安装包到官网 / Host Installers on the Site
+
+国内用户访问 GitHub 经常失败，所以安装包同时托管在官网 `https://design.hz-study-system.com/downloads/`，下载页的按钮直接指向这里（GitHub Releases 仅作备用）。GitHub Release 构建完成后必须执行：
+
+```bash
+# 1. 下载本次 Release 的三个包（以 2.2.1 为例）
+mkdir -p /tmp/lp-release-2.2.1 && cd /tmp/lp-release-2.2.1
+gh release download v2.2.1 --repo wangjingyi2012/lecture-presenter --pattern '*.dmg' --pattern '*.exe'
+
+# 2. 上传到服务器（持久卷，重建容器不丢；文件名自带版本号，不要改名）
+ssh root@47.82.106.26 "mkdir -p /opt/lecture-web-data/desktop-releases"
+scp Lecture-Presenter_2.2.1_* root@47.82.106.26:/opt/lecture-web-data/desktop-releases/
+
+# 3. 验证三个包都能公开下载（应返回 200，且大小与本地一致）
+for f in Lecture-Presenter_2.2.1_macOS_aarch64.dmg Lecture-Presenter_2.2.1_macOS_x64.dmg Lecture-Presenter_2.2.1_Windows_x64.exe; do
+  curl -sI "https://design.hz-study-system.com/downloads/$f" | head -1
+done
+```
+
+- 必须在上面的 `desktop-release.json` 更新**之前**完成——下载页按钮按版本号拼 URL，JSON 一切换用户就会来找新包。
+- 老版本的包留在服务器上没有害处（单个不到 30MB）；磁盘紧张时可删旧版本。
+- 顺序总览：GitHub Release 上架 → 传包到官网并验证 → 更新 `desktop-release.json` → 验证下载页。
+
 ## 让客户端收到更新提示 / Update Check JSON
 
 桌面端启动时请求 `GET {serverUrl}/api/version/check?current=x.y.z`，数据源是**服务器上的一个 JSON 文件**，发版后必须更新它，否则用户收不到更新提示：
@@ -64,7 +87,7 @@ Tag 推送会触发两个 workflow，并自动创建/更新同名的 GitHub Rele
 # 编辑服务器上的 /opt/lecture-web-data/desktop-release.json（无需重启任何服务）
 {
   "version": "2.2.1",
-  "download_url": "https://github.com/wangjingyi2012/lecture-presenter/releases/latest",
+  "download_url": "https://design.hz-study-system.com/app/download.html",
   "changelog": "## Lecture Presenter 2.2.1\n\n<更新内容，Markdown>",
   "force_update": false,
   "release_date": "2026-08-19 10:30"
@@ -72,6 +95,7 @@ Tag 推送会触发两个 workflow，并自动创建/更新同名的 GitHub Rele
 ```
 
 - `release_date` 填发布当时的本地时间（`date "+%Y-%m-%d %H:%M"`），每次发版必须同步更新。
+- `download_url` 固定填官网下载页 `https://design.hz-study-system.com/app/download.html`（国内可直连；GitHub Releases 在国内经常打不开）。
 - 等 GitHub Release 构建完成、DMG 上架后再改，避免用户点了「立即更新」却下载不到新包。
 - 验证：`curl "https://design.hz-study-system.com/api/version/check?current=2.2.0"` 应返回 `has_update: true`；`current=2.2.1` 应返回 `false`。
 - 版本比较按数字段进行（2.10.0 > 2.9.0）；`force_update: true` 时客户端只保留「立即更新」按钮。
@@ -125,9 +149,10 @@ cp -a "Lecture Presenter.app" /Applications/
 2. ☐ 两处版本号 bump 并推送 main
 3. ☐ `git tag v*` 并推送，Actions 两个 workflow 全绿
 4. ☐ GitHub Release 页面确认 DMG/安装包已上架
-5. ☐ 更新服务器 `desktop-release.json`（`version` + `changelog` + `release_date`）并用 curl 双向验证（旧版本 true / 新版本 false）
-6. ☐ 打开 `https://design.hz-study-system.com/app/download.html`，确认页面显示的版本号和更新日期是新版本
-7. ☐ 本机 `/Applications` 替换为新版（重签名 + 退出旧进程 + 清 NetworkCache 备选）
+5. ☐ 三个安装包 scp 到服务器 `/opt/lecture-web-data/desktop-releases/`，curl 验证 `/downloads/` 公开可下
+6. ☐ 更新服务器 `desktop-release.json`（`version` + `changelog` + `release_date`）并用 curl 双向验证（旧版本 true / 新版本 false）
+7. ☐ 打开 `https://design.hz-study-system.com/app/download.html`，确认版本号、更新日期是新版本，且按钮指向 `/downloads/` 本版安装包
+8. ☐ 本机 `/Applications` 替换为新版（重签名 + 退出旧进程 + 清 NetworkCache 备选）
 
 ## 单项目 Git 身份 / Per-Repository Git Identity
 
