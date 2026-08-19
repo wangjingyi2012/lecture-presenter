@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "coral-energy",
+  "name": "珊瑚活力",
+  "version": "1.0.0",
+  "description": "明快但克制的珊瑚色模板，适合培训、产品介绍与团队分享",
+  "tags": [
+    "活力",
+    "产品",
+    "培训"
+  ],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {
+        "id": "text",
+        "file": "content.html",
+        "title": "要点正文"
+      },
+      {
+        "id": "visual",
+        "file": "content-visual.html",
+        "title": "图文对照"
+      }
+    ],
+    "finish": "finish.html"
+  }
+}

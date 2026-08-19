@@ -196,6 +196,83 @@ MyCourse/
 
 `schemaVersion`、`deckId`、页面 `id`、`sharedGroups` 和 `linkedGroups` 由演讲宝在需要共享页面时自动维护。旧版只包含 `title` 和 `slides` 的 manifest 仍然兼容，不需要手工迁移。
 
+### 课件母版信息（agentTemplate v2）
+
+从模板中心创建的 PPTE 会在 manifest 中记录母版身份，并把原始角色页保存为不可变快照：
+
+```json
+{
+  "agentTemplate": {
+    "schemaVersion": 2,
+    "template": {
+      "id": "scholar-blue",
+      "remoteId": null,
+      "name": "学术蓝",
+      "version": "1.0.0",
+      "source": "builtin",
+      "digest": "sha256:..."
+    },
+    "state": "starter",
+    "roles": {
+      "cover": {"blueprintFile": ".ppte-template/roles/cover.html", "starterFile": "slide01.html"},
+      "catalog": {"blueprintFile": ".ppte-template/roles/catalog.html", "starterFile": "slide02.html"},
+      "chapter": {"blueprintFile": ".ppte-template/roles/chapter.html", "starterFile": "slide03.html"},
+      "content": [
+        {"id": "text", "title": "要点正文", "blueprintFile": ".ppte-template/roles/content-text.html", "starterFile": "slide04.html"}
+      ],
+      "finish": {"blueprintFile": ".ppte-template/roles/finish.html", "starterFile": "slide05.html"}
+    }
+  }
+}
+```
+
+- `source` 为 `builtin`、`custom` 或 `cloud`；云端模板的 `remoteId` 是模板中心记录 ID。
+- `content` 可以有多个正文变体，助教通过稳定的变体 `id` 选择合适母版。
+- `.ppte-template/roles/` 是助教新增页面时使用的原始母版，不会随普通页面编辑而变化。移动、压缩或备份 PPTE 时必须保留整个 `.ppte-template/` 目录；不要手工修改其中内容。
+- 旧版 `agentTemplate` v1 和不含该字段的 PPTE 继续兼容。
+
+### 课件母版模板包
+
+可上传到模板中心的模板包使用以下结构：
+
+```text
+template-package/
+├── template.json
+├── preview.png              # 可选，建议 16:9
+├── cover.html
+├── catalog.html
+├── chapter.html
+├── content.html
+├── content-visual.html      # 可选正文变体
+├── finish.html
+└── theme.css / images/...
+```
+
+`template.json` 的格式如下：
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "my-course-template",
+  "name": "我的课程模板",
+  "version": "1.0.0",
+  "description": "模板说明",
+  "tags": ["教学", "简洁"],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {"id": "text", "file": "content.html", "title": "正文"},
+      {"id": "visual", "file": "content-visual.html", "title": "图文"}
+    ],
+    "finish": "finish.html"
+  }
+}
+```
+
+角色 HTML 必须位于包根目录，`id` 和正文变体 `id` 使用 kebab-case。公开发布的模板只能包含被动 HTML/CSS、本地图片和 JSON：不能包含脚本、事件属性、表单、iframe、远程资源或 CSS `@import`。私有模板可以保留自己的脚本，但发布审核前必须移除主动内容。
+
 ### 共享页面组
 
 编辑器支持把一张或连续多张页面设为共享真源，再插入其他 PPTE：

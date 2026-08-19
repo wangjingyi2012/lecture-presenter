@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "porcelain-cyan",
+  "name": "天青白瓷",
+  "version": "1.0.0",
+  "description": "清雅的天青与白瓷配色，适合传统文化、学术交流与课程总结",
+  "tags": [
+    "雅致",
+    "文化",
+    "清新"
+  ],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {
+        "id": "text",
+        "file": "content.html",
+        "title": "要点正文"
+      },
+      {
+        "id": "visual",
+        "file": "content-visual.html",
+        "title": "图文对照"
+      }
+    ],
+    "finish": "finish.html"
+  }
+}

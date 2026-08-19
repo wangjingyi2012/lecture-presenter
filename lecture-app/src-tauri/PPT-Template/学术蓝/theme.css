@@ -1,0 +1,11 @@
+:root { --ink:#10243e; --muted:#617289; --blue:#2563eb; --pale:#edf4ff; --line:#cddcf2; }
+* { box-sizing:border-box; }
+html,body { width:100%; height:100%; margin:0; overflow:hidden; font-family:"Microsoft YaHei","PingFang SC",sans-serif; color:var(--ink); background:#f8fbff; }
+.slide { position:relative; width:100vw; height:100vh; padding:7vh 7vw; overflow:hidden; background:linear-gradient(135deg,#fff 0%,#f4f8ff 100%); }
+.eyebrow { color:var(--blue); font-size:1.5vw; font-weight:700; letter-spacing:.16em; text-transform:uppercase; }
+h1 { margin:1.8vh 0 0; font-size:4.1vw; line-height:1.18; letter-spacing:-.03em; }
+h2 { margin:0; font-size:2.45vw; line-height:1.25; }
+p { margin:0; }
+.rule { width:5.5vw; height:.55vh; margin:3vh 0; background:var(--blue); border-radius:999px; }
+.page-no { position:absolute; right:6vw; bottom:4vh; color:#71839a; font-size:1.5vw; }
+.soft-card { border:1px solid var(--line); border-radius:1.2vw; background:rgba(255,255,255,.84); box-shadow:0 1.4vh 4vh rgba(38,74,122,.08); }

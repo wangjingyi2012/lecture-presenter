@@ -18,6 +18,12 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
+mod deck_templates;
+use deck_templates::{
+    create_ppt_extra_from_template, deck_template_download, deck_templates_fetch_list,
+    get_deck_template_preview, list_deck_templates_builtin, read_ppte_template_blueprints,
+};
+
 const GITEE_KEYRING_SERVICE: &str = "Lecture Presenter";
 const GITEE_KEYRING_USER: &str = "gitee-access-token";
 const CAPTION_KEYRING_SERVICE: &str = "Lecture Presenter";
@@ -1511,7 +1517,7 @@ fn zip_ppte_directory(dir_path: &str) -> Result<Vec<u8>, String> {
             let entry_name = entry.file_name().to_string_lossy().to_lowercase();
             // .lectureai holds local agent state (deck plan, workbench chat
             // session) that the cloud renderer does not need.
-            if entry_name == ".ds_store" || entry_name == "outline.md" || entry_name == ".lectureai" {
+            if entry_name == ".ds_store" || entry_name == "outline.md" || entry_name == ".lectureai" || entry_name == ".ppte-template" {
                 continue;
             }
             if path.is_dir() {
@@ -7666,6 +7672,12 @@ pub fn run() {
             save_pptx_file,
             export_pptx_editable,
             list_ppt_templates,
+            list_deck_templates_builtin,
+            get_deck_template_preview,
+            deck_templates_fetch_list,
+            deck_template_download,
+            create_ppt_extra_from_template,
+            read_ppte_template_blueprints,
             get_template_files,
             save_app_config,
             save_course_config,

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "minimal-mono",
+  "name": "极简黑白",
+  "version": "1.0.0",
+  "description": "克制的黑白编辑风，适合结构化课程、复盘与正式汇报",
+  "tags": [
+    "极简",
+    "通用",
+    "黑白"
+  ],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {
+        "id": "text",
+        "file": "content.html",
+        "title": "要点正文"
+      },
+      {
+        "id": "visual",
+        "file": "content-visual.html",
+        "title": "图文对照"
+      }
+    ],
+    "finish": "finish.html"
+  }
+}

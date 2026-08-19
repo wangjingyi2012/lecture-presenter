@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "anheng-classic",
+  "name": "企业深蓝",
+  "version": "1.0.0",
+  "description": "稳重清晰的企业培训与正式汇报模板",
+  "tags": ["企业", "培训", "深蓝"],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {"id": "text", "file": "content.html", "title": "正文"}
+    ],
+    "finish": "finish.html"
+  }
+}

@@ -1,0 +1,12 @@
+:root { --ink:#173c36; --green:#245e52; --sage:#91aa9a; --cream:#f4f0e5; --paper:#fbfaf5; --gold:#bb9457; }
+* { box-sizing:border-box; }
+html,body { width:100%;height:100%;margin:0;overflow:hidden;font-family:"Songti SC","STSong","Microsoft YaHei",serif;color:var(--ink);background:var(--paper); }
+.slide { position:relative;width:100vw;height:100vh;padding:7vh 7vw;overflow:hidden;background:linear-gradient(115deg,#fbfaf5,#f2efe4); }
+.slide::before { content:"";position:absolute;inset:3vh 2vw;border:1px solid rgba(36,94,82,.24);pointer-events:none; }
+.seal { display:inline-grid;place-items:center;width:3vw;height:3vw;background:var(--green);color:white;font-size:1.35vw; }
+.kicker { color:var(--gold);font-family:"Microsoft YaHei",sans-serif;font-size:1.05vw;letter-spacing:.22em; }
+h1 { margin:0;font-size:4.2vw;line-height:1.2;font-weight:700;letter-spacing:.08em; }
+h2 { margin:0;font-size:2.5vw;line-height:1.3; }
+p { margin:0; }
+.hairline { width:7vw;height:1px;background:var(--gold);margin:3vh 0; }
+.page-no { position:absolute;right:5vw;bottom:4.4vh;color:var(--sage);font:1vw "Microsoft YaHei",sans-serif; }

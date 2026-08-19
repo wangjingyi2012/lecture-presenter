@@ -29,6 +29,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tempfile = "3"
+unicode-normalization = "0.1"
+unicase = "2.9"
 
 # macOS-only: native NSOpenPanel access so folder pickers can show hidden
 # (dot) directories — tauri-plugin-dialog/rfd does not expose that option.

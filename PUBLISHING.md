@@ -33,6 +33,24 @@ Lecture Presenter（演讲宝）的完整发布流程。当前处于开发前期
 
 ## 发布步骤 / Release Steps
 
+### 发布前同步官方课件模板
+
+`lecture-app/src-tauri/PPT-Template/` 是官方课件母版的规范源。桌面发版或 Web 部署前，在相邻的 Web 仓库执行摘要一致性检查：
+
+```bash
+cd ../lecture-presenter-public-web/backend
+./.venv/bin/python scripts/sync_official_deck_templates.py
+```
+
+如检查报告不一致，确认桌面模板改动无误后再显式同步，并重新运行检查和后端模板测试：
+
+```bash
+./.venv/bin/python scripts/sync_official_deck_templates.py --write
+./.venv/bin/python -m pytest -q tests/test_deck_templates.py
+```
+
+Web 启动时会把已同步的包注册为官方模板。不要分别修改两仓库中的同名模板，否则桌面和 Web 会得到不同的内容摘要。
+
 以 2.2.1 为例：
 
 ```bash
@@ -146,13 +164,14 @@ cp -a "Lecture Presenter.app" /Applications/
 ## 发布检查单 / Checklist
 
 1. ☐ 测试通过（前端 node 脚本 + `cargo test`）
-2. ☐ 两处版本号 bump 并推送 main
-3. ☐ `git tag v*` 并推送，Actions 两个 workflow 全绿
-4. ☐ GitHub Release 页面确认 DMG/安装包已上架
-5. ☐ 三个安装包 scp 到服务器 `/opt/lecture-web-data/desktop-releases/`，curl 验证 `/downloads/` 公开可下
-6. ☐ 更新服务器 `desktop-release.json`（`version` + `changelog` + `release_date`）并用 curl 双向验证（旧版本 true / 新版本 false）
-7. ☐ 打开 `https://design.hz-study-system.com/app/download.html`，确认版本号、更新日期是新版本，且按钮指向 `/downloads/` 本版安装包
-8. ☐ 本机 `/Applications` 替换为新版（重签名 + 退出旧进程 + 清 NetworkCache 备选）
+2. ☐ 官方课件模板跨仓摘要检查通过
+3. ☐ 两处版本号 bump 并推送 main
+4. ☐ `git tag v*` 并推送，Actions 两个 workflow 全绿
+5. ☐ GitHub Release 页面确认 DMG/安装包已上架
+6. ☐ 三个安装包 scp 到服务器 `/opt/lecture-web-data/desktop-releases/`，curl 验证 `/downloads/` 公开可下
+7. ☐ 更新服务器 `desktop-release.json`（`version` + `changelog` + `release_date`）并用 curl 双向验证（旧版本 true / 新版本 false）
+8. ☐ 打开 `https://design.hz-study-system.com/app/download.html`，确认版本号、更新日期是新版本，且按钮指向 `/downloads/` 本版安装包
+9. ☐ 本机 `/Applications` 替换为新版（重签名 + 退出旧进程 + 清 NetworkCache 备选）
 
 ## 单项目 Git 身份 / Per-Repository Git Identity
 

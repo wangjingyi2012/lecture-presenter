@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "ink-green",
+  "name": "墨绿",
+  "version": "1.0.0",
+  "description": "温润沉静的文化、人文与通识课程模板",
+  "tags": ["人文", "通识", "墨绿"],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {"id": "text", "file": "content.html", "title": "观点正文"},
+      {"id": "quote", "file": "content-quote.html", "title": "引文解析"}
+    ],
+    "finish": "finish.html"
+  }
+}

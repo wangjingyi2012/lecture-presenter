@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "amber-charcoal",
+  "name": "琥珀石墨",
+  "version": "1.0.0",
+  "description": "石墨深色与琥珀强调色，适合商业分析、战略与工程主题",
+  "tags": [
+    "商务",
+    "深色",
+    "工程"
+  ],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {
+        "id": "text",
+        "file": "content.html",
+        "title": "要点正文"
+      },
+      {
+        "id": "visual",
+        "file": "content-visual.html",
+        "title": "图文对照"
+      }
+    ],
+    "finish": "finish.html"
+  }
+}

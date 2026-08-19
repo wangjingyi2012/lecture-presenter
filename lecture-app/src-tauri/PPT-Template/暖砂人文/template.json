@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "warm-sand",
+  "name": "暖砂人文",
+  "version": "1.0.0",
+  "description": "温暖的人文纸张质感，适合通识课程、阅读分享与文化主题",
+  "tags": [
+    "人文",
+    "暖色",
+    "阅读"
+  ],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {
+        "id": "text",
+        "file": "content.html",
+        "title": "要点正文"
+      },
+      {
+        "id": "visual",
+        "file": "content-visual.html",
+        "title": "图文对照"
+      }
+    ],
+    "finish": "finish.html"
+  }
+}

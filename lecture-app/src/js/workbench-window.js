@@ -634,13 +634,12 @@ window.WorkbenchWindow = {
     const blueprint = this.manifest?.templateBlueprint;
     if (blueprint?.roles?.length) {
       const roles = blueprint.roles
-        .filter(role => role.page != null)
-        .map(role => `- ${role.slideType}: 第${role.page}页「${role.title || role.file}」${role.stylesheets?.length ? `，样式 ${role.stylesheets.join('、')}` : ''}`)
+        .map(role => `- ${role.slideType}${role.variantId ? `/${role.variantId}` : ''}: ${role.page != null ? `起始第${role.page}页` : '不可变母版快照'}「${role.title || role.file}」${role.stylesheets?.length ? `，样式 ${role.stylesheets.join('、')}` : ''}`)
         .join('\n');
       ctx += `\n\n模板蓝图：${blueprint.name || '默认模板'}（${blueprint.isStarter ? '尚未初始化' : '已用于当前课件'}）\n${roles}`;
     }
     if (blueprint?.isStarter) {
-      ctx += `\n\n这是客户端刚创建的“五页母版”，不是已经完成的五页课件。五页分别是封面、目录、章节过渡、正文、结束的样式样例。收到“制作 N 页课件”时，最终总页数必须恰好为 N，不是在现有 5 页后再追加 N 页。先按主题规划完整页序，再把现有五页改造成实际页面，并按需新增页面。封面、目录、章节过渡、正文、结束必须使用各自角色的母版，保留原模板的 stylesheet 链接、背景资源、布局容器和配色，不得把正文页样式套到封面、目录或章节页。新增页面优先用 insert_slide 的 template_role 克隆对应母版，再用 write_slide 填充内容。章节过渡页必须放在对应章节内容之前，结束页必须是最后一页。`;
+      ctx += `\n\n这是客户端刚创建的“角色母版起始课件”，当前 ${this.manifest.slides.length} 页是封面、目录、章节过渡、一个或多个正文变体、结束的样式样例，不是已经完成的课件。收到“制作 N 页课件”时，最终总页数必须恰好为 N，不是在现有起始页后再追加 N 页。先按主题规划完整页序，再改造起始页并按需新增页面。封面、目录、章节过渡、正文、结束必须使用各自角色母版；正文有多个 variantId 时，按内容结构选择 template_variant。保留原模板的 stylesheet 链接、背景资源、布局容器和配色，不得把正文页样式套到结构页。新增页面优先用 insert_slide 的 template_role 和 template_variant 克隆不可变母版快照，再用 write_slide 填充内容。章节过渡页必须放在对应章节内容之前，结束页必须是最后一页。`;
     }
     const planState = this.manifest?.deckPlan;
     if (planState?.plan) {
@@ -662,16 +661,17 @@ window.WorkbenchWindow = {
 - search_icons {query?}：检索云端图标库（AI 公司/工具 logo，支持中文别名，如“豆包”“英伟达”）；省略 query 列出全部
 - use_icon {file}：把图标库中的图标下载进当前课件 resources/ 目录并返回引用路径；页面需要 logo 时先 search_icons 拿到 file，再 use_icon 下载后在 HTML 里用相对路径引用
 - search_design_examples {content_kind?, layout_family?, density?, motion?, exclude?, limit?}：检索真实 HTML/CSS 设计案例
-- render_template {template_id, template_version?, payload, mode, page?, after?, title?, slide_type?, note?}：正文页优先使用服务端私有模板；replace 提供 page，insert 可提供 after
+- render_template {template_id, template_version?, template_variant?, payload, mode, page?, after?, title?, slide_type?, note?}：正文页优先使用服务端模板；replace 提供 page，insert 可提供 after
+- finalize_deck {plan?}：按已保存蓝图整理最终页序，移除不属于成品的起始占位页；只改 manifest，不删除磁盘源文件
 - inspect_slides {check, pages?}：确定性检查页面；check 为 font/overflow/density/card/copy/motion/concept-animation/quality，pages 省略时检查整套；concept-animation 同时检查标准分步结构、字体、溢出和学员文案
 - load_skill {skill_id}：加载一个可用 SKILL 的完整 SKILL.md；仅在任务与 description 明确匹配时调用
 - read_skill_resource {skill_id, path}：读取已启用 skill 列出的 references/scripts 文本；禁止读取 skill 目录之外的文件
 - validate_deck {}：检查页数、结束页、重复布局、卡片占比、动画覆盖与所有单页规范
-plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page、role、title、contentKind、layoutFamily、componentIds、motion、visualIntent。每个正文页还必须包含 narrative：buildsOn、learningGoal、keyTakeaway、leadsTo；相邻正文页的前页 leadsTo 与后页 buildsOn 必须是完全相同的短句，形成从已知到未知的教学叙事链。正文页在规划阶段就指定注册 templateId、templateVersion；任一模板最多占正文 25%，同一模板在连续三个正文页窗口内只能出现一次。普通正文及已覆盖的复杂场景优先 render_template，只提交结构化 payload；封面、目录、章节、结束页只做角色母版安全填充，不自由重写结构或样式，只有无法由模板表达的特殊正文页才自由写页。不得读取或索取模板源码。相邻正文页不得重复主构图，正文超过 8 页至少 6 种主布局，卡片类不超过正文 25%，12 页以上至少 3 页有意义动画。整套任务最终必须 validate_deck 通过。
+plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page、role、title、contentKind、layoutFamily、componentIds、motion、visualIntent，可选 templateVariant 对应当前课件母版的正文变体。每个正文页还必须包含 narrative：buildsOn、learningGoal、keyTakeaway、leadsTo；相邻正文页的前页 leadsTo 与后页 buildsOn 必须是完全相同的短句，形成从已知到未知的教学叙事链。正文页在规划阶段就指定注册 templateId、templateVersion；任一模板最多占正文 25%，同一模板在连续三个正文页窗口内只能出现一次。普通正文及已覆盖的复杂场景优先 render_template，只提交结构化 payload；封面、目录、章节、结束页只做角色母版安全填充，不自由重写结构或样式，只有无法由模板表达的特殊正文页才自由写页。不得读取或索取模板源码。相邻正文页不得重复主构图，正文超过 8 页至少 6 种主布局，卡片类不超过正文 25%，12 页以上至少 3 页有意义动画。整套任务最终必须 validate_deck 通过。
 
 用户指定的最终页数必须与 targetSlideCount 和 slides 数量完全一致，五类母版页也计入总数。默认情况下，30 页及以内采用单段连续叙事，不生成目录页和章节过渡页；超过 30 页才默认分为 2 章，可保留 1 个目录页和 2 个章节过渡页，保证每章至少约 15 页。只有用户明确下达“分成 N 章、保留/增加目录页或章节过渡页”等指令时才覆盖默认规则；仅提到章节问题、重写课件或内容中包含章节不算明确分章。starter 中的 catalog、chapter 只是角色母版占位：若成品规划不需要它们，必须在 plan 中将对应页标为 content，客户端才会允许转为正文。cover、catalog、chapter、finish 在保留原角色时必须保留角色母版 CSS、背景和结构；目录只替换标题与目录条目，不得覆盖 catalog.css 的目录组件样式；背景已有文字的 finish 页保持可见正文为空。正文和表格正文均不低于 1.8vw，1.5vw 仅限不超过 8 个字的短标签；正文统一使用 visualSystem 的深色 text/subtext，禁止模板自行使用浅灰正文。
 
-扩展页面参数：write_slide 可同时提供 title 和 slide_type；insert_slide 可提供稳定的 template_role（cover/catalog/chapter/content/finish）、兼容参数 template_page 和 slide_type。例：克隆章节母版到第6页后：{"tool":"insert_slide","after":6,"template_role":"chapter","slide_type":"chapter","title":"第二章"}。当存在 finish 页时，客户端会自动把普通新增页放到 finish 页之前；reorder_slides 也不允许把唯一的 finish 页移出末页。`;
+扩展页面参数：write_slide 可同时提供 title 和 slide_type；insert_slide 可提供稳定的 template_role（cover/catalog/chapter/content/finish）、template_variant 和兼容参数 template_page。例：克隆章节母版到第6页后：{"tool":"insert_slide","after":6,"template_role":"chapter","slide_type":"chapter","title":"第二章"}；选择正文图文变体可加 "template_variant":"visual"。当存在 finish 页时，客户端会自动把普通新增页放到 finish 页之前；reorder_slides 只能重排现有全部页面，不能用于删除；整套生成完成后调用 finalize_deck 确定性整理成品页序。`;
     ctx += `\n\n工作台会把工具轮次压缩成单行动态状态。需要读取、校验或修改页面时，必须在同一响应中输出对应的 \`\`\`action 工具块；只描述“准备读取/校验/修改”但不附 action 属于协议错误。带 action 的响应中，action 前只写一句不超过 32 个汉字的状态摘要，直接说明当前动作；禁止寒暄、重复已完成步骤或使用“好的”“收到”“我先”“继续读取”等填充句。最终不再调用工具时，一次性输出完整 Markdown 结论。不要输出冗长的内部思维链。`;
     // The tool-protocol prompt is prepended by the Rust backend when the request
     // is dispatched to a non-LectureAI provider; LectureAI's server owns the full
@@ -710,8 +710,8 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     if (!blueprint?.isStarter) return '';
     const target = this._requestedSlideCount(input);
     const targetRule = target
-      ? `用户要求最终 ${target} 页。当前 5 页都是母版占位，必须计入最终 ${target} 页，因此只需净新增 ${Math.max(0, target - this.manifest.slides.length)} 页，完成后核对总页数恰好为 ${target}。`
-      : '如果用户指定总页数，该数字包含当前五个母版页，完成后必须核对最终总页数。';
+      ? `用户要求最终 ${target} 页。当前 ${this.manifest.slides.length} 页都是角色母版起始页，必须计入最终 ${target} 页，因此只需净新增 ${Math.max(0, target - this.manifest.slides.length)} 页，完成后核对总页数恰好为 ${target}。`
+      : `如果用户指定总页数，该数字包含当前 ${this.manifest.slides.length} 个角色母版起始页，完成后必须核对最终总页数。`;
     const explicitSections = this._explicitSectionRequest(input);
     const continuousSections = this._continuousSectionRequest(input);
     const sectionRule = continuousSections
@@ -728,13 +728,22 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     const value = String(input || '');
     if (/(?:创建|制作|生成|重做|改造).{0,16}(?:整套|课件|PPT|幻灯片|\d{1,2}\s*页)/i.test(value)) return true;
     if (/(?:整套|整体|全部|所有|逐页).{0,10}(?:修改|重写|检查|优化|生成)/i.test(value)) return true;
+    if (/(?:重新)?规划.{0,12}(?:课件|课件内容)|(?:课件|PPT|幻灯片).{0,12}(?:重新规划|重写|重做|改造)/i.test(value)) return true;
+    if (/(?:目录|章节|母版|模板).{0,18}(?:多余|残留|不应|不该).{0,12}(?:出现|保留)?/i.test(value)) return true;
     return /(?:检查|校验|审查).{0,8}(?:一下|整个|整套|整体)?\s*(?:课件|PPT|幻灯片)|(?:课件|PPT|幻灯片).{0,8}(?:问题|检查|校验)/i.test(value);
   },
 
   _requiresDeckPlan(input) {
     const value = String(input || '');
     if (/(?:创建|制作|生成|重做|改造).{0,16}(?:整套|课件|PPT|幻灯片|\d{1,2}\s*页)/i.test(value)) return true;
-    return /(?:整套|整体|全部|所有|逐页).{0,10}(?:修改|重写|优化|生成)/i.test(value);
+    if (/(?:整套|整体|全部|所有|逐页).{0,10}(?:修改|重写|优化|生成)/i.test(value)) return true;
+    return /(?:重新)?规划.{0,12}(?:课件|课件内容)|(?:课件|PPT|幻灯片).{0,12}(?:重新规划|重写|重做|改造)/i.test(value);
+  },
+
+  _isOutlineOnlyTask(input) {
+    const value = String(input || '');
+    if (!/(?:大纲|章纲|outline\.md|outline)/i.test(value)) return false;
+    return !/(?:创建|制作|生成|重做|改造|重写).{0,16}(?:课件|PPT|幻灯片)|(?:课件|PPT|幻灯片).{0,16}(?:创建|制作|生成|重做|改造|重写)/i.test(value);
   },
 
   // ---- @-mention resolution (fetch slide HTML via RPC) ----
@@ -883,7 +892,11 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         document.content,
       ].join('\n')).join('\n\n');
     }
-    const taskInitialization = this._taskInitialization(input);
+    const outlineOnly = slash ? false : this._isOutlineOnlyTask(input);
+    const outlineBoundary = outlineOnly
+      ? '[大纲任务边界]\n本轮只整理并写入 outline.md。可读取现有页面，但不得规划、插入、重排、渲染或改写任何页面；完成前必须调用 write_outline。'
+      : '';
+    const taskInitialization = [this._taskInitialization(input), outlineBoundary].filter(Boolean).join('\n\n');
     const deckLevel = slash ? false : this._isDeckLevelTask(input);
     const requiresPlan = slash ? false : this._requiresDeckPlan(input);
     this._activeTask = {
@@ -900,6 +913,8 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       continuousSections: this._continuousSectionRequest(input),
       plan: null,
       harnessEnabled: requiresPlan,
+      outlineOnly,
+      outlineSaved: !outlineOnly,
       userInstruction: input,
     };
     this._stopRequested = false;
@@ -969,6 +984,15 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             }
             continue;
           }
+          if (this._activeTask?.outlineOnly && !this._activeTask.outlineSaved) {
+            recoveryRounds += 1;
+            if (recoveryRounds > 3) throw new Error('课件大纲连续 3 次未写入，任务已停止，请重试');
+            this.history.push({
+              role: 'user',
+              content: '[大纲完成门禁] 本轮只需要保存课件大纲。请立即调用 write_outline，把最终 Markdown 写入 outline.md，不要生成或修改页面。',
+            });
+            continue;
+          }
           if (this._activeTask?.deckLevel && !this._activeTask.deckValidated) {
             recoveryRounds += 1;
             if (recoveryRounds > 3) throw new Error('整套校验连续 3 次未通过或未执行，任务已停止，请查看校验结果后重试');
@@ -1015,7 +1039,11 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         let terminalToolFailure = '';
         for (const a of actions) {
           if (this._stopRequested) break;
-          if (this._activeTask?.requiresPlan && ['render_template', 'write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.planSaved) {
+          if (this._activeTask?.outlineOnly && !['read_slide', 'write_outline', 'load_skill', 'read_skill_resource'].includes(a.tool)) {
+            results.push(`[大纲任务边界] 本轮只允许读取页面并写入 outline.md，拒绝执行 ${this._toolDisplayName(a.tool)}。`);
+            break;
+          }
+          if (this._activeTask?.requiresPlan && ['render_template', 'write_slide', 'insert_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !this._activeTask.planSaved) {
             results.push('[规划门禁] 这是整套课件任务，第一次修改前必须先调用 set_deck_plan。请现在输出 set_deck_plan action，不要开始写页。');
             break;
           }
@@ -1033,7 +1061,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             }
             a.plan.sectionPolicy = { explicit: explicitSections || continuousSections, mode: continuousSections ? 'continuous' : explicitSections ? 'custom' : 'default', source: 'desktop-client' };
           }
-          if (this._activeTask?.commandCheck && ['render_template', 'write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !this._activeTask.commandInspected) {
+          if (this._activeTask?.commandCheck && ['render_template', 'write_slide', 'insert_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !this._activeTask.commandInspected) {
             results.push(`[命令门禁] 必须先调用 inspect_slides，check 必须为 ${this._activeTask.commandCheck}，确认问题后再修改。`);
             break;
           }
@@ -1049,7 +1077,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
               break;
             }
           }
-          if (this._activeTask?.commandPages?.length && ['insert_slide', 'reorder_slides'].includes(a.tool)) {
+          if (this._activeTask?.commandPages?.length && ['insert_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool)) {
             results.push(`[命令门禁] 当前命令限定第 ${this._activeTask.commandPages.join('、')} 页，不能插页或重排整套课件。`);
             break;
           }
@@ -1083,12 +1111,13 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             // Keep the local context in sync so later rounds see the new outline
             this.manifest = this.manifest || {};
             this.manifest.outline = String(a.content ?? '');
+            this._activeTask.outlineSaved = true;
           }
           if (a.tool === 'set_deck_plan' && !/失败|出错|错误/.test(String(result || ''))) {
             this._activeTask.planSaved = true;
             this._activeTask.plan = a.plan;
           }
-          if (['render_template', 'write_slide', 'insert_slide', 'reorder_slides'].includes(a.tool) && !/失败|出错|错误/.test(String(result || ''))) {
+          if (['render_template', 'write_slide', 'insert_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !/失败|出错|错误/.test(String(result || ''))) {
             this._activeTask.deckValidated = false;
             if (this._activeTask.commandCheck) {
               this._activeTask.commandInspected = false;
@@ -1237,6 +1266,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     const directive = this._harnessMutationDirective(planSlide);
     const templateId = planSlide.templateId || planSlide.template_id || '';
     const templateVersion = planSlide.templateVersion || planSlide.template_version || '';
+    const templateVariant = planSlide.templateVariant || planSlide.template_variant || '';
     const outlineBlock = this._outlinePromptBlock();
     return `[整套任务原始目标]\n${this._activeTask?.userInstruction || ''}${outlineBlock ? `\n\n${outlineBlock}` : ''}
 
@@ -1258,6 +1288,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
 ${directive.mode === 'insert' ? `- 必须使用 after=${directive.after}，插入后即为第 ${page} 页` : `- 必须使用 page=${page}`}
 - 页面角色：${planSlide.role || 'content'}
 ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templateVersion}` : ''}` : `- 自定义原因：${planSlide.customLayoutReason || '角色母版页'}`}
+${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
 - 本页完成后必须调用 validate_slide {"page":${page}}
 
 不要携带或索取其他页面完整 HTML。现在完成且只完成这一页。`;
@@ -1296,8 +1327,9 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     const hasTemplate = !!String(planSlide.templateId || planSlide.template_id || '').trim();
     const role = String(planSlide.role || 'content').toLowerCase();
     const templateRole = role === 'ending' ? 'finish' : role === 'toc' ? 'catalog' : role;
+    const templateVariant = planSlide.templateVariant || planSlide.template_variant || null;
     if (directive.mode === 'replace' && !hasTemplate && ['cover', 'catalog', 'chapter', 'finish'].includes(templateRole) && directive.currentRole !== templateRole) {
-      const action = { tool: 'apply_role_template', page: Number(planSlide.page), role: templateRole, title: planSlide.title };
+      const action = { tool: 'apply_role_template', page: Number(planSlide.page), role: templateRole, template_variant: templateVariant, title: planSlide.title };
       counters.tools += 1;
       const actionStartedAt = this._now();
       const actionEl = this._logAction(action, counters.tools);
@@ -1313,6 +1345,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
       tool: 'insert_slide',
       after: directive.after,
       template_role: ['cover', 'catalog', 'chapter', 'content', 'finish'].includes(templateRole) ? templateRole : 'content',
+      template_variant: templateVariant,
       slide_type: templateRole,
       title: planSlide.title,
     };
@@ -1417,6 +1450,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
           type: 'start_page', session_id: sessionId, deck_id: deckId,
           plan, page, directive: {
             page, templateId: planSlide.templateId || planSlide.template_id || '',
+            templateVariant: planSlide.templateVariant || planSlide.template_variant || '',
             mode: directive.mode, after: directive.after,
           },
           user_instruction: [this._activeTask?.userInstruction || '生成整套课件', this._outlinePromptBlock()].filter(Boolean).join('\n\n'),
@@ -1665,6 +1699,15 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
           });
         }
       }
+      const finalizeAction = { tool: 'finalize_deck', plan };
+      counters.tools += 1;
+      const finalizeStartedAt = this._now();
+      const finalizeEl = this._logAction(finalizeAction, counters.tools);
+      const finalizeResult = await this._rpc('execute-action', { action: finalizeAction });
+      this._finishAction(finalizeEl, finalizeStartedAt, finalizeResult);
+      this._logResult(finalizeResult);
+      if (this._isTerminalToolFailure(finalizeResult) || this._resultIsError(finalizeResult)) throw new Error(String(finalizeResult));
+      await this._refreshContext();
       const validation = await this._validateAndRepairHarness(plan, {
         completedPages, summaries, stageReviews, userInstruction,
       }, counters);
@@ -1790,7 +1833,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   },
 
   _isRetryableModelError(message) {
-    return /HTTP\s*50[234]|LLM 服务请求失败|LectureAI 服务暂时不可用|LectureAI 上游模型暂时不可用|网络请求失败|连接.*失败/i.test(String(message || ''));
+    return /HTTP\s*50[234]|LLM 服务请求失败|LectureAI 服务暂时不可用|LectureAI 上游模型暂时不可用|网络请求失败|连接.*失败|模型只返回了思考过程|模型未返回可执行内容|输出达到长度上限/i.test(String(message || ''));
   },
 
   _friendlyModelError(message, retried = false) {
@@ -1815,7 +1858,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   // progressively. Tool-round prose stays compressed in the status line: as
   // soon as a complete ```action block exists, the bubble is removed.
   _renderStreamingBubble() {
-    if (/```action\s*[\s\S]*?```/i.test(this._streamFull)) {
+    if (/```action\s*[\s\S]*?```|<tool_call>/i.test(this._streamFull)) {
       this._removeStreamBubble();
       return;
     }
@@ -1899,24 +1942,37 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
   },
   _parseActions(text) {
     const actions = [];
+    const append = rawValue => {
+      const raw = String(rawValue || '').trim();
+      const { obj, error } = this._parseActionJson(raw);
+      if (error) actions.push({ tool: '_parse_error', error, raw });
+      else if (obj && obj.tool) actions.push(obj);
+      else actions.push({ tool: '_parse_error', error: '缺少 tool 字段', raw });
+    };
     const re = /```action\s*([\s\S]*?)```/gi;
     let m;
     while ((m = re.exec(text))) {
-      const raw = m[1].trim();
-      const { obj, error } = this._parseActionJson(raw);
-      if (error) {
-        actions.push({ tool: '_parse_error', error, raw });
-      } else if (obj && obj.tool) {
-        actions.push(obj);
-      } else {
-        actions.push({ tool: '_parse_error', error: '缺少 tool 字段', raw });
-      }
+      append(m[1]);
+    }
+    // Some OpenAI-compatible reasoning models emit the same JSON action in a
+    // native XML envelope. Accept the variants observed in real sessions,
+    // including a missing </tool_call> or a misplaced </action> terminator.
+    const xml = /<tool_call>\s*([\s\S]*?)(?:<\/tool_call>|(?=<tool_call>)|$)/gi;
+    while ((m = xml.exec(String(text || '')))) {
+      const raw = m[1]
+        .replace(/^\s*(?:<action>\s*|action\b\s*)/i, '')
+        .replace(/\s*<\/action>\s*$/i, '')
+        .trim();
+      append(raw);
     }
     return actions;
   },
 
   _stripActions(text) {
-    return text.replace(/```action\s*[\s\S]*?```/gi, '').trim();
+    return String(text || '')
+      .replace(/```action\s*[\s\S]*?```/gi, '')
+      .replace(/<tool_call>\s*[\s\S]*?(?:<\/tool_call>|(?=<tool_call>)|$)/gi, '')
+      .trim();
   },
 
   // True when the reply carries a tool-call JSON payload that never made it
@@ -1939,7 +1995,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
 
   _isTerminalToolFailure(result) {
     const text = String(result || '');
-    return /(?:write_slide|insert_slide|apply_role_template|reorder_slides|set_deck_plan) 保存失败|已恢复执行前状态|文件冲突/.test(text);
+    return /(?:write_slide|insert_slide|apply_role_template|reorder_slides|finalize_deck|set_deck_plan) 保存失败|已恢复执行前状态|文件冲突/.test(text);
   },
 
   // ---- terminal log ----
@@ -2080,6 +2136,7 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
     write_slide: '写入页面内容',
     insert_slide: '插入新页面',
     reorder_slides: '调整页面顺序',
+    finalize_deck: '整理成品页序',
     validate_slide: '校验页面',
     validate_deck: '校验整套课件',
     inspect_slides: '检查页面',
@@ -2127,8 +2184,8 @@ ${templateId ? `- 必须使用模板 ${templateId}${templateVersion ? `@${templa
 
   _resultIsError(value) {
     const text = String(value || '').trim();
-    return /(?:执行出错|保存失败|文件冲突|超出范围|缺少 tool|action 解析失败|未知工具)/.test(text)
-      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|reorder_slides|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(text);
+    return /(?:执行出错|保存失败|文件冲突|超出范围|缺少 tool|action 解析失败|未知工具|整理成品页序失败)/.test(text)
+      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(text);
   },
 
   _appendDiff(before, after) {

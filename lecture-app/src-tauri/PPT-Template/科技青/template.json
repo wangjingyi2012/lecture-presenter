@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "tech-cyan",
+  "name": "科技青",
+  "version": "1.0.0",
+  "description": "深色青蓝科技风，适合技术架构、数据产品与创新主题",
+  "tags": [
+    "科技",
+    "深色",
+    "数据"
+  ],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {
+        "id": "text",
+        "file": "content.html",
+        "title": "要点正文"
+      },
+      {
+        "id": "visual",
+        "file": "content-visual.html",
+        "title": "图文对照"
+      }
+    ],
+    "finish": "finish.html"
+  }
+}

@@ -205,6 +205,8 @@ assert.equal(wb._hasUnexecutedToolIntent('检查结果：课件结构完整，�
 assert.equal(wb._isHarnessResumeRequest('继续'), true);
 assert.equal(wb._isHarnessResumeRequest('继续生成课件'), true);
 assert.equal(wb._isHarnessResumeRequest('继续修改第3页'), false);
+assert.equal(wb._isRetryableModelError('上游模型只返回了思考过程，未返回可执行内容'), true);
+assert.equal(wb._isRetryableModelError('上游模型输出达到长度上限，但未返回可执行内容'), true);
 
 const starterSlides = [
   { file: 'slide01.html', title: '封面', slide_type: 'cover', html: '<link rel="stylesheet" href="style.css"><h1>PPT主标题</h1>' },
@@ -256,8 +258,9 @@ const fixedDirective = { mode: 'replace', page: 3, after: null };
 assert.equal(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 3, template_id: 'template-3' }, harnessPlan.slides[2], fixedDirective, false), '');
 assert.match(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 4, template_id: 'template-3' }, harnessPlan.slides[2], fixedDirective, false), /第 3 页/);
 assert.match(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 3, template_id: 'template-4' }, harnessPlan.slides[2], fixedDirective, false), /规划模板 template-3/);
-assert.match(wb._systemPrompt(), /五页母版/);
+assert.match(wb._systemPrompt(), /角色母版起始课件/);
 assert.match(wb._systemPrompt(), /template_role/);
+assert.match(wb._systemPrompt(), /template_variant/);
 assert.match(wb._systemPrompt(), /chapter\.css/);
 assert.match(wb._systemPrompt(), /结束页必须是最后一页/);
 assert.match(wb._systemPrompt(), /set_deck_plan/);
@@ -299,6 +302,11 @@ assert.match(wb._taskInitialization('创建一个15页的关于 AI 发展史的�
 assert.equal(wb._isDeckLevelTask('检查一下课件'), true);
 assert.equal(wb._requiresDeckPlan('检查一下课件'), false);
 assert.equal(wb._requiresDeckPlan('创建一个15页的课件'), true);
+assert.equal(wb._isDeckLevelTask('重新规划课件内容并重写。'), true, 'rewrite wording from a real failed session is deck-level');
+assert.equal(wb._requiresDeckPlan('重新规划课件内容并重写。'), true, 'whole-deck rewrite needs the paged Harness');
+assert.equal(wb._isDeckLevelTask('目录和模板文件是不是多余了，完成后不应该出现'), true, 'starter-page cleanup is a deck-level task');
+assert.equal(wb._isOutlineOnlyTask('要讲AI对文档处理的帮助，帮我写个大纲'), true, 'outline wording from a real failed session must stay outline-only');
+assert.equal(wb._isOutlineOnlyTask('根据大纲重写整套课件'), false, 'an outline used to rewrite slides is not outline-only');
 
 const slashFont = slash.parse('@3 /font-check', { currentPage: 8 });
 assert.equal(slashFont.command.name, 'font-check');
@@ -549,6 +557,49 @@ const legacyBlueprint = agent._templateBlueprint(pb);
 assert.equal(legacyBlueprint.isStarter, true, 'legacy five-page decks should be recognized as starter templates');
 assert.deepEqual(Array.from(legacyBlueprint.roles, r => r.slideType), ['cover', 'catalog', 'chapter', 'content', 'finish']);
 
+const v2Deck = {
+  manifest: {
+    title: '多变体课件',
+    agentTemplate: {
+      schemaVersion: 2,
+      template: { id: 'scholar-blue', name: '学术蓝', version: '1.1.0', digest: 'sha256:test' },
+      state: 'starter',
+      roles: {
+        cover: { blueprintFile: '.ppte-template/roles/cover.html', starterFile: 'slide01.html' },
+        catalog: { blueprintFile: '.ppte-template/roles/catalog.html', starterFile: 'slide02.html' },
+        chapter: { blueprintFile: '.ppte-template/roles/chapter.html', starterFile: 'slide03.html' },
+        content: [
+          { id: 'text', title: '要点正文', blueprintFile: '.ppte-template/roles/content-text.html', starterFile: 'slide04.html' },
+          { id: 'visual', title: '图文对照', blueprintFile: '.ppte-template/roles/content-visual.html', starterFile: 'slide05.html' },
+        ],
+        finish: { blueprintFile: '.ppte-template/roles/finish.html', starterFile: 'slide06.html' },
+      },
+    },
+  },
+  slides: [
+    { file: 'slide01.html', title: '封面', slide_type: 'cover', html: 'edited-cover' },
+    { file: 'slide02.html', title: '目录', slide_type: 'catalog', html: 'edited-catalog' },
+    { file: 'slide03.html', title: '章节', slide_type: 'chapter', html: 'edited-chapter' },
+    { file: 'slide04.html', title: '正文', slide_type: 'content', html: 'edited-text' },
+    { file: 'slide05.html', title: '图文', slide_type: 'content', html: 'edited-visual' },
+    { file: 'slide06.html', title: '总结', slide_type: 'finish', html: 'edited-finish' },
+  ],
+  templateBlueprintSnapshot: {
+    roles: {
+      'cover.html': '<link rel="stylesheet" href="theme.css"><main>original-cover</main>',
+      'catalog.html': '<main>original-catalog</main>',
+      'chapter.html': '<main>original-chapter</main>',
+      'content-text.html': '<main>original-text</main>',
+      'content-visual.html': '<main>original-visual</main>',
+      'finish.html': '<main>original-finish</main>',
+    },
+  },
+};
+const v2Blueprint = agent._templateBlueprint(v2Deck);
+assert.equal(v2Blueprint.name, '学术蓝');
+assert.deepEqual(Array.from(v2Blueprint.roles.filter(role => role.slideType === 'content'), role => role.variantId), ['text', 'visual']);
+assert.equal(agent._roleTemplateHtml(v2Deck, 'content', 'visual'), '<main>original-visual</main>', 'v2 roles must read the immutable snapshot, not an edited starter page');
+
 const validConceptAnimation = `
 <style>
 .ppte-click-layer { position:absolute; opacity:0; }
@@ -664,6 +715,40 @@ async function testStarterDeckExpandsToExactlyFifteenPages() {
   assert.equal(deck.slides.filter(s => s.slide_type === 'chapter').length, 3);
   assert.ok(deck.slides.filter(s => s.slide_type === 'chapter').every(s => s.html.includes('chapter.css')));
   assert.ok(deck.slides.filter(s => s.slide_type === 'content').every(s => s.html.includes('content.css')));
+}
+
+async function testFinalizeDeckRemovesOnlyUnplannedStarterPages() {
+  const plannedTitles = ['封面', ...Array.from({ length: 10 }, (_, index) => `正文 ${index + 1}`), '谢谢'];
+  const slides = [
+    { id: 'cover', file: 'slide01.html', title: '封面', slide_type: 'cover', html: '<h1>封面</h1>' },
+    ...Array.from({ length: 10 }, (_, index) => ({
+      id: `content-${index + 1}`, file: `generated-${index + 1}.html`, title: `正文 ${index + 1}`,
+      slide_type: 'content', html: `<h1>正文 ${index + 1}</h1>`,
+    })),
+    { id: 'starter-catalog', file: 'slide02.html', title: '目录', slide_type: 'catalog', html: '<h1>目录</h1>' },
+    { id: 'starter-chapter', file: 'slide03.html', title: '章节', slide_type: 'chapter', html: '<h1>章节</h1>' },
+    { id: 'starter-content-1', file: 'slide04.html', title: '起始正文一', slide_type: 'content', html: '<h1>样例</h1>' },
+    { id: 'starter-content-2', file: 'slide05.html', title: '起始正文二', slide_type: 'content', html: '<h1>样例</h1>' },
+    { id: 'finish', file: 'slide06.html', title: '谢谢', slide_type: 'finish', html: '<h1>谢谢</h1>' },
+  ];
+  const deck = {
+    folderPath: '/tmp/finalize-deck',
+    manifest: { title: '智能文档', slides }, slides,
+    currentSlideIndex: 12, manifestDirty: false, templateFilesDirty: false, fileStats: {},
+  };
+  const plan = {
+    targetSlideCount: 12,
+    slides: plannedTitles.map((title, index) => ({ page: index + 1, title, role: index === 0 ? 'cover' : index === 11 ? 'finish' : 'content' })),
+  };
+  agentContext.window.Settings._pptBuilder = deck;
+  agentContext.window.Settings._savePptBuilderData = successfulSave;
+  const result = await agent._toolFinalizeDeck(deck, { tool: 'finalize_deck', plan });
+  assert.equal(deck.slides.length, 12, 'the final manifest must match the plan target');
+  assert.equal(deck.slides.at(-1).id, 'finish', 'the finish role must be matched and moved to the final planned slot');
+  assert.deepEqual(Array.from(deck.slides, slide => slide.title), plannedTitles);
+  assert.equal(slides.length, 16, 'source slide objects/files are not deleted by manifest cleanup');
+  assert.match(result, /4 个起始占位页已从成品页序移除/);
+  assert.match(result, /源文件和隐藏母版快照仍保留/);
 }
 
 async function testCancelledSaveRollsBackAgentMutation() {
@@ -823,6 +908,33 @@ async function testDeckInspectionRequiresValidationButNotPlan() {
 
   assert.deepEqual(executed, ['validate_deck']);
   assert.equal(wb.history.some(x => String(x.content).includes('[规划门禁]')), false);
+}
+
+async function testOutlineOnlyTaskCannotMutateSlides() {
+  const replies = [
+    `错误规划\n\`\`\`action\n${JSON.stringify({ tool: 'set_deck_plan', plan: { targetSlideCount: 1, slides: [{ page: 1, role: 'cover' }] } })}\n\`\`\``,
+    `保存大纲\n\`\`\`action\n${JSON.stringify({ tool: 'write_outline', content: '# AI 文档处理\n\n- 写作辅助\n- 信息提取' })}\n\`\`\``,
+    '大纲已经保存。',
+  ];
+  const executed = [];
+  let aiCalls = 0;
+  wb._activeTask = {
+    deckLevel: false, requiresPlan: false, planSaved: true, deckValidated: false,
+    outlineOnly: true, outlineSaved: false,
+  };
+  wb.history = [{ role: 'system', content: 'test' }];
+  wb._callAI = async () => replies[aiCalls++];
+  wb._rpc = async (_type, payload) => { executed.push(payload.action.tool); return 'write_outline 已保存课件大纲。'; };
+  wb._appendAssistantMarkdown = () => {};
+  wb._log = () => {};
+  wb._logAction = () => {};
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  wb._setBusy = () => {};
+  await wb._runTurn();
+  assert.deepEqual(executed, ['write_outline'], 'outline-only requests must not plan or mutate slides');
+  assert.equal(wb._activeTask.outlineSaved, true);
+  assert.equal(wb.history.some(item => String(item.content).includes('[大纲任务边界]')), true);
 }
 
 async function testSlashCommandRequiresInspectionAndReinspection() {
@@ -1024,7 +1136,7 @@ async function testPrivateTemplateRenderUsesServerHtmlAndSafeSave() {
   assert.equal(deck.slides[0].title, '灰度发布');
   assert.equal(calls[0].command, 'list_ppte_resources');
   assert.equal(calls[1].command, 'lectureai_render_template');
-  assert.deepEqual(Object.keys(calls[1].payload.request).sort(), ['available_assets', 'host_stylesheets', 'payload', 'role', 'template_id', 'template_version']);
+  assert.deepEqual(Object.keys(calls[1].payload.request).sort(), ['available_assets', 'host_stylesheets', 'payload', 'role', 'template_id', 'template_variant', 'template_version']);
   assert.deepEqual(Array.from(calls[1].payload.request.available_assets), ['images/demo.png']);
   assert.deepEqual(Array.from(calls[1].payload.request.host_stylesheets), []);
   assert.equal('skeleton' in calls[1].payload.request, false);
@@ -1076,6 +1188,49 @@ async function testPageHarnessResetsMessagesBetweenSlides() {
   assert.equal(calls[3].messages.some((message) => String(message.content).includes('当前页工具回执')), false, 'second page must not inherit first page tool receipts');
   assert.deepEqual(calls[0].templateIds, ['template-1']);
   assert.deepEqual(calls[3].templateIds, ['template-2']);
+}
+
+async function testHarnessFinalizesBeforeDeckValidation() {
+  const originalPersist = wb._persistHarnessExecution;
+  const originalValidate = wb._validateAndRepairHarness;
+  const originalRpc = wb._rpc;
+  const originalRefresh = wb._refreshContext;
+  const originalAppend = wb._appendAssistantMarkdown;
+  const originalLog = wb._log;
+  const originalLogAction = wb._logAction;
+  const originalFinish = wb._finishAction;
+  const originalLogResult = wb._logResult;
+  const calls = [];
+  const plan = {
+    targetSlideCount: 1,
+    slides: [{ page: 1, role: 'cover', title: '封面' }],
+    execution: { schemaVersion: 1, completedPages: [1], summaries: { 1: '完成' }, stageReviews: [] },
+  };
+  try {
+    wb._activeTask = { userInstruction: '测试收尾' };
+    wb._stopRequested = false;
+    wb._persistHarnessExecution = async () => {};
+    wb._validateAndRepairHarness = async () => { calls.push('validate'); return { passed: true, metrics: {} }; };
+    wb._rpc = async (_type, payload) => { calls.push(payload.action.tool); return '已确认成品页序与蓝图一致（共 1 页）。'; };
+    wb._refreshContext = async () => {};
+    wb._appendAssistantMarkdown = () => {};
+    wb._log = () => {};
+    wb._logAction = () => null;
+    wb._finishAction = () => {};
+    wb._logResult = () => {};
+    await wb._runPlannedHarness(plan, '测试收尾');
+    assert.deepEqual(calls, ['finalize_deck', 'validate'], 'deterministic page cleanup must run before whole-deck validation');
+  } finally {
+    wb._persistHarnessExecution = originalPersist;
+    wb._validateAndRepairHarness = originalValidate;
+    wb._rpc = originalRpc;
+    wb._refreshContext = originalRefresh;
+    wb._appendAssistantMarkdown = originalAppend;
+    wb._log = originalLog;
+    wb._logAction = originalLogAction;
+    wb._finishAction = originalFinish;
+    wb._logResult = originalLogResult;
+  }
 }
 
 async function testPiWebSocketReturnsMatchingToolResult() {
@@ -1280,6 +1435,15 @@ function testActionJsonTolerantParsing() {
   const ansiGarbage = wb._parseActions('```action\n{"tool":"validate_deck"\x1b[118;1:3u}\n```');
   assert.equal(ansiGarbage[0].tool, 'validate_deck', 'ANSI escape bytes leaked by the model are stripped before parsing');
 
+  const nativeMissingClose = wb._parseActions('<tool_call>action\n{"tool":"read_slide","page":1}\n</action>');
+  assert.equal(nativeMissingClose[0].tool, 'read_slide', 'native XML action without </tool_call> parses');
+  assert.equal(nativeMissingClose[0].page, 1);
+  const nativeClosed = wb._parseActions('<tool_call>action\n{"tool":"read_slide","page":2}\n</action>\n</tool_call>');
+  assert.equal(nativeClosed[0].tool, 'read_slide', 'fully closed native XML action parses');
+  const nativeMisclosed = wb._parseActions('<tool_call>action\n{"tool":"read_slide","page":2}\n</tool_call>');
+  assert.equal(nativeMisclosed[0].tool, 'read_slide', 'native XML action closed directly by </tool_call> parses');
+  assert.equal(wb._stripActions('状态\n<tool_call>action\n{"tool":"read_slide","page":2}\n</tool_call>'), '状态');
+
   assert.equal(wb._hasBareToolPayload('{"tool":"set_deck_plan","plan":{}}'), true, 'bare JSON tool payload detected');
   assert.equal(wb._hasBareToolPayload('任务完成，无需修改。'), false);
   assert.equal(wb._hasBareToolPayload('```action\n{"tool":"validate_deck"}\n```'), false, 'fenced actions are not bare');
@@ -1328,17 +1492,20 @@ async function testBareToolJsonTriggersProtocolCorrection() {
   await testConceptAnimationContextIncludesCurrentNeighborsAndStylesheet();
   await testTemplateAwareInsertKeepsFinishLast();
   await testStarterDeckExpandsToExactlyFifteenPages();
+  await testFinalizeDeckRemovesOnlyUnplannedStarterPages();
   await testCancelledSaveRollsBackAgentMutation();
   await testWorkbenchStopsAfterDiskSaveFailure();
   await testLongDeckJobRunsToCompletion();
   await testDeckTaskRequiresPlanBeforeMutationAndValidationBeforeFinish();
   await testDeckInspectionRequiresValidationButNotPlan();
+  await testOutlineOnlyTaskCannotMutateSlides();
   await testSlashCommandRequiresInspectionAndReinspection();
   await testSlashCommandKeepsPageScope();
   await testOptionalPlanToolsUseSeparateTauriStorage();
   await testPlannedPlaceholderRoleConversion();
   await testPrivateTemplateRenderUsesServerHtmlAndSafeSave();
   await testPageHarnessResetsMessagesBetweenSlides();
+  await testHarnessFinalizesBeforeDeckValidation();
   await testPiWebSocketReturnsMatchingToolResult();
   await testAgentImportsSelectedExternalSkillFolder();
   testStreamingBubbleRendersFinalAnswerProgressively();

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "scholar-blue",
+  "name": "学术蓝",
+  "version": "1.1.0",
+  "description": "适合课程讲授、研究报告与知识梳理的理性蓝色模板",
+  "tags": ["教学", "学术", "简洁"],
+  "roles": {
+    "cover": "cover.html",
+    "catalog": "catalog.html",
+    "chapter": "chapter.html",
+    "content": [
+      {"id": "text", "file": "content.html", "title": "要点正文"},
+      {"id": "visual", "file": "content-visual.html", "title": "图文对照"}
+    ],
+    "finish": "finish.html"
+  }
+}
