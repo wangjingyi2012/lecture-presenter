@@ -66,14 +66,22 @@ Tag 推送会触发两个 workflow，并自动创建/更新同名的 GitHub Rele
   "version": "2.2.1",
   "download_url": "https://github.com/wangjingyi2012/lecture-presenter/releases/latest",
   "changelog": "## Lecture Presenter 2.2.1\n\n<更新内容，Markdown>",
-  "force_update": false
+  "force_update": false,
+  "release_date": "2026-08-19 10:30"
 }
 ```
 
+- `release_date` 填发布当时的本地时间（`date "+%Y-%m-%d %H:%M"`），每次发版必须同步更新。
 - 等 GitHub Release 构建完成、DMG 上架后再改，避免用户点了「立即更新」却下载不到新包。
 - 验证：`curl "https://design.hz-study-system.com/api/version/check?current=2.2.0"` 应返回 `has_update: true`；`current=2.2.1` 应返回 `false`。
 - 版本比较按数字段进行（2.10.0 > 2.9.0）；`force_update: true` 时客户端只保留「立即更新」按钮。
 - 本地模板在 `tmp/desktop-release.json`。
+
+## 下载页版本展示 / Download Page Version
+
+`https://design.hz-study-system.com/app/download.html` 的版本徽标和「当前版本 vX.Y.Z · 更新于 …」一行是**动态读取** `/api/version/check` 的，数据源就是上面的 `desktop-release.json`——所以发版时只要按上一节更新了 `version` 和 `release_date`，下载页会自动显示新版本号和更新时间，无需改任何页面代码。
+
+发版后人工验证一次：打开下载页，确认徽标和版本行显示的是刚发布的版本号与日期；若显示旧值，通常是 `desktop-release.json` 没更新或浏览器缓存，强制刷新（Cmd+Shift+R）再确认。
 
 ## 本地打包与安装 / Local Build & Install
 
@@ -117,8 +125,9 @@ cp -a "Lecture Presenter.app" /Applications/
 2. ☐ 两处版本号 bump 并推送 main
 3. ☐ `git tag v*` 并推送，Actions 两个 workflow 全绿
 4. ☐ GitHub Release 页面确认 DMG/安装包已上架
-5. ☐ 更新服务器 `desktop-release.json` 并用 curl 双向验证（旧版本 true / 新版本 false）
-6. ☐ 本机 `/Applications` 替换为新版（重签名 + 退出旧进程 + 清 NetworkCache 备选）
+5. ☐ 更新服务器 `desktop-release.json`（`version` + `changelog` + `release_date`）并用 curl 双向验证（旧版本 true / 新版本 false）
+6. ☐ 打开 `https://design.hz-study-system.com/app/download.html`，确认页面显示的版本号和更新日期是新版本
+7. ☐ 本机 `/Applications` 替换为新版（重签名 + 退出旧进程 + 清 NetworkCache 备选）
 
 ## 单项目 Git 身份 / Per-Repository Git Identity
 
