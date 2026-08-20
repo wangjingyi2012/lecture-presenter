@@ -11,6 +11,7 @@
 //        get-command-context {command, pages} -> target + adjacent slide/CSS context
 //        import-skill     -> imported external SKILL metadata
 //        execute-action {action} -> result string (runs the tool against PpteEditor)
+//        execute-task-action {action,envelope} -> structured receipt
 //
 // Tool execution goes through PpteEditor._pptBuilder + _savePptBuilderData +
 // _renderPptBuilderInContent, never bypassing the editor (so the file watcher
@@ -18,6 +19,8 @@
 window.PpteWorkbenchAgent = {
   appConfig: null,
   _pendingPrefill: null,
+  _taskReceipts: new Map(),
+  _taskInflight: new Map(),
 
   init(appConfig) {
     this.appConfig = appConfig || window.CourseLoader?.appConfig || {};
@@ -42,6 +45,13 @@ window.PpteWorkbenchAgent = {
       else if (type === 'read-skill') result = await this._readSkill(req.payload);
       else if (type === 'import-skill') result = await this._importSkill();
       else if (type === 'execute-action') result = await this._executeAction(req.payload?.action);
+      else if (type === 'execute-task-action') result = await this._executeTaskAction(req.payload);
+      else if (type === 'task-journal-start') result = await this._taskJournalRpc('ppte_task_journal_start', req.payload);
+      else if (type === 'task-journal-update') result = await this._taskJournalRpc('ppte_task_journal_update', req.payload);
+      else if (type === 'task-journal-list') result = await this._taskJournalRpc('ppte_task_journal_list', req.payload);
+      else if (type === 'task-journal-read') result = await this._taskJournalRpc('ppte_task_journal_read', req.payload);
+      else if (type === 'task-journal-clear') result = await this._taskJournalRpc('ppte_task_journal_clear', req.payload);
+      else if (type === 'task-journal-revert') result = await this._taskJournalRevert(req.payload);
       else if (type === 'pick-ppte') result = await this._pickPpte(req.payload);
       else if (type === 'recent-ppte') result = this._recentPpte();
       else result = { error: '未知请求类型 ' + type };
@@ -105,12 +115,18 @@ window.PpteWorkbenchAgent = {
       ? 'settings'
       : (token ? 'lectureai' : null);
     let deckPlan = { plan: null, status: 'missing' };
+    let deckRevision = null;
     let skills = [];
     if (pb?.folderPath && window.__TAURI__?.core?.invoke) {
       try {
         deckPlan = await window.__TAURI__.core.invoke('ppte_agent_plan_read', { folderPath: pb.folderPath });
       } catch (error) {
         console.warn('Failed to read optional LectureAI plan', error);
+      }
+      try {
+        deckRevision = await window.__TAURI__.core.invoke('ppte_agent_revision_get', { folderPath: pb.folderPath });
+      } catch (error) {
+        console.warn('Failed to read LectureAI deck revision', error);
       }
     }
     if (window.__TAURI__?.core?.invoke) {
@@ -134,14 +150,17 @@ window.PpteWorkbenchAgent = {
     }
     const ctx = {
       title: pb?.manifest?.title || '',
+      deckId: pb?.manifest?.deckId || null,
       folderPath: pb?.folderPath || null,
       slides: (pb?.slides || []).map(s => ({
+        id: s.id || null,
         title: s.title || '（无标题）',
         slideType: s.slide_type || 'content',
         file: s.file || '',
       })),
       templateBlueprint: this._templateBlueprint(pb),
       deckPlan,
+      deckRevision,
       skills,
       outline,
       aiConfig: settingsConfig,
@@ -411,6 +430,326 @@ window.PpteWorkbenchAgent = {
   },
 
   // ---- tool execution (delegated from the workbench window) ----
+  _taskMutationTools: new Set([
+    'set_deck_plan', 'write_outline', 'render_template', 'apply_role_template',
+    'write_slide', 'insert_slide', 'delete_slide', 'reorder_slides', 'finalize_deck', 'use_icon',
+  ]),
+
+  _taskResultIsError(value) {
+    const text = String(value || '').trim();
+    return /(?:执行出错|保存失败|文件冲突|超出范围|缺少 tool|action 解析失败|未知工具|整理成品页序失败|未打开课件)/.test(text)
+      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_outline|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(text);
+  },
+
+  _taskToolDetails(action, value, pb = null) {
+    const text = String(value ?? '');
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch (_) { /* text result */ }
+    const details = parsed && typeof parsed === 'object' ? parsed : { message: text };
+    if (action.page != null && Number.isFinite(Number(action.page))) details.page = Number(action.page);
+    if (action.tool === 'render_template') details.page = Number(action.page || Number(action.after) + 1);
+    if (action.tool === 'insert_slide' && details.page == null) details.page = Number(action.after) + 1;
+    if (action.tool === 'delete_slide' && details.page == null) details.page = Number(action.page);
+    if (['write_slide', 'render_template', 'validate_slide', 'delete_slide'].includes(action.tool) && details.page != null) {
+      const page = Number(details.page);
+      const slide = pb?.slides?.[page - 1];
+      details.pageId = details.pageId || action.page_id || action.source_page_id || action.target_page_id || slide?.id || null;
+    }
+    if (action.tool === 'insert_slide') {
+      const page = Number(details.page);
+      const target = String(action.target_page_id || '').trim();
+      const slide = target
+        ? pb?.slides?.find(item => String(item?.id || '') === target)
+        : pb?.slides?.[page - 1];
+      details.pageId = details.pageId || slide?.id || target || null;
+      details.inserted = details.inserted !== false;
+      details.mode = details.mode || 'insert';
+    }
+    if (action.tool === 'delete_slide') {
+      details.deleted = details.deleted !== false;
+      details.pageId = details.pageId || action.page_id || null;
+    }
+    if (action.tool === 'reorder_slides' && Array.isArray(action.order)) {
+      // The local executor accepts human-facing 1-based page numbers; the
+      // server acceptance contract records a complete 0-based permutation.
+      details.order = action.order.map(value => Number(value) - 1);
+      details.reordered = true;
+    }
+    if (action.tool === 'finalize_deck') {
+      const plan = action.plan || this._activeDeckPlan?.plan;
+      const planned = Array.isArray(plan?.slides) ? plan.slides : [];
+      const order = planned.map(item => String(item?.sourcePageId || item?.targetPageId || item?.pageId || '').trim()).filter(Boolean);
+      details.order = order.length ? order : (pb?.slides || []).map(item => String(item?.id || '')).filter(Boolean);
+      details.deletedPageIds = Array.isArray(plan?.deletedPageIds)
+        ? [...new Set(plan.deletedPageIds.map(value => String(value || '').trim()).filter(Boolean))]
+        : [];
+    }
+    if (action._taskReceiptDetails && typeof action._taskReceiptDetails === 'object') {
+      Object.assign(details, action._taskReceiptDetails);
+    }
+    if (action.tool === 'validate_slide') {
+      details.passed = details.passed === true || /合规：未发现|校验通过|"passed"\s*:\s*true/.test(text);
+    }
+    details.label = details.label || text.split('\n')[0].slice(0, 160) || 'LectureAI 已完成当前步骤';
+    return details;
+  },
+
+  async _taskDeckRevision(pb, required = false) {
+    try {
+      const revision = await window.__TAURI__.core.invoke('ppte_agent_revision_get', { folderPath: pb.folderPath });
+      return String(revision?.deckHash || '');
+    } catch (error) {
+      if (required) {
+        const failure = new Error('无法确认课件版本，LectureAI 未继续写入。');
+        failure.code = 'CLIENT_REVISION_UNAVAILABLE';
+        throw failure;
+      }
+      return '';
+    }
+  },
+
+  _taskTouchedPaths(pb, action) {
+    const paths = new Set(['manifest.json']);
+    const tool = String(action?.tool || '');
+    const pagePath = page => {
+      const slide = pb?.slides?.[Number(page) - 1];
+      if (slide?.file) paths.add(String(slide.file));
+    };
+    if (['write_slide', 'validate_slide', 'render_template', 'apply_role_template'].includes(tool)) pagePath(action.page);
+    // An insert render creates a new slide file through _toolInsertSlide. The
+    // file does not exist yet, so predict its stable name and record it as a
+    // missing path before the mutation.
+    const templateInsert = tool === 'render_template'
+      && (action.mode === 'insert' || (!action.mode && !Number.isInteger(action.page)));
+    if (templateInsert) {
+      (pb.slides || []).forEach(slide => slide?.file && paths.add(String(slide.file)));
+      const nextFile = this._editor()._nextPpteSlideFile?.(pb);
+      if (nextFile) paths.add(String(nextFile));
+    }
+    if (tool === 'insert_slide') {
+      (pb.slides || []).forEach(slide => slide?.file && paths.add(String(slide.file)));
+      const nextFile = this._editor()._nextPpteSlideFile?.(pb);
+      if (nextFile) paths.add(String(nextFile));
+    }
+    if (tool === 'write_outline') paths.add('outline.md');
+    if (tool === 'set_deck_plan') paths.add('.lectureai/deck-plan.json');
+    if (tool === 'use_icon' && /^[^/\\]+$/.test(String(action.file || ''))) paths.add(`resources/${action.file}`);
+    return [...paths];
+  },
+
+  async _taskJournalStart(pb, taskSpec) {
+    if (!pb?.folderPath || !taskSpec?.runId || !window.__TAURI__?.core?.invoke) return null;
+    try {
+      const revision = await this._taskDeckRevision(pb, false);
+      return await window.__TAURI__.core.invoke('ppte_task_journal_start', {
+        folderPath: pb.folderPath,
+        runId: taskSpec.runId,
+        taskSpec,
+        deckRevision: revision || null,
+      });
+    } catch (error) {
+      const failure = new Error('无法建立安全恢复点，LectureAI 未开始写入。');
+      failure.code = 'JOURNAL_UNAVAILABLE';
+      failure.cause = error;
+      throw failure;
+    }
+  },
+
+  async _taskJournalRpc(command, payload = {}) {
+    const pb = this._editor()._pptBuilder;
+    if (!pb?.folderPath || !window.__TAURI__?.core?.invoke) throw new Error('课件窗口暂时不可用');
+    const args = { ...(payload || {}), folderPath: pb.folderPath };
+    return window.__TAURI__.core.invoke(command, args);
+  },
+
+  async _taskJournalRevert(payload = {}) {
+    const editor = this._editor();
+    const pb = editor._pptBuilder;
+    if (!pb?.folderPath) throw new Error('课件窗口暂时不可用');
+    const result = await this._taskJournalRpc('ppte_task_journal_revert', payload);
+    await editor._reloadPptBuilderFromDisk?.(pb);
+    editor._renderPptBuilderInContent?.();
+    return result;
+  },
+
+  async _taskJournalUpdate(pb, runId, patch) {
+    if (!pb?.folderPath || !runId || !window.__TAURI__?.core?.invoke) return null;
+    return window.__TAURI__.core.invoke('ppte_task_journal_update', {
+      folderPath: pb.folderPath,
+      runId,
+      patch,
+    });
+  },
+
+  async _taskJournalReceipt(pb, runId, receipt) {
+    if (!pb?.folderPath || !runId || !window.__TAURI__?.core?.invoke) return receipt;
+    try {
+      return await window.__TAURI__.core.invoke('ppte_task_journal_append_receipt', {
+        folderPath: pb.folderPath,
+        runId,
+        receipt,
+      });
+    } catch (error) {
+      const failure = new Error('任务回执未能安全落盘，LectureAI 已暂停后续写入。');
+      failure.code = 'RECEIPT_UNAVAILABLE';
+      failure.cause = error;
+      throw failure;
+    }
+  },
+
+  async _taskJournalReceiptRetry(pb, runId, receipt, attempts = 3) {
+    let lastError;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await this._taskJournalReceipt(pb, runId, receipt);
+      } catch (error) {
+        lastError = error;
+        if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 40 * (attempt + 1)));
+      }
+    }
+    const failure = new Error('任务回执未能安全落盘，LectureAI 已暂停后续写入。');
+    failure.code = 'RECEIPT_UNAVAILABLE';
+    failure.cause = lastError;
+    throw failure;
+  },
+
+  async _executeTaskAction(payload) {
+    const actionId = String(payload?.envelope?.actionId || '');
+    const pb = this._editor()._pptBuilder;
+    const inflightKey = `${pb?.folderPath || ''}\u0000${actionId}`;
+    if (actionId && this._taskInflight.has(inflightKey)) return this._taskInflight.get(inflightKey);
+    const operation = this._executeTaskActionOnce(payload);
+    if (actionId) {
+      this._taskInflight.set(inflightKey, operation);
+      operation.then(() => {
+        if (this._taskInflight.get(inflightKey) === operation) this._taskInflight.delete(inflightKey);
+      }, () => {
+        if (this._taskInflight.get(inflightKey) === operation) this._taskInflight.delete(inflightKey);
+      });
+    }
+    return operation;
+  },
+
+  async _executeTaskActionOnce(payload) {
+    const pb = this._editor()._pptBuilder;
+    const action = payload?.action;
+    const envelope = payload?.envelope || {};
+    const runId = String(payload?.runId || '');
+    const actionId = String(envelope.actionId || '');
+    const argsHash = String(envelope.argsHash || '');
+    const expectedDeckRevision = String(envelope.expectedDeckRevision || '');
+    if (!pb) return { ok: false, error: { code: 'CLIENT_UNAVAILABLE', category: 'client_unavailable', retryable: true, userMessage: '课件窗口暂时不可用，任务进度已保存。' } };
+    if (!action?.tool || !runId || !actionId.startsWith(`${runId}:`) || !/^sha256:[a-fA-F0-9]{64}$/.test(argsHash)) {
+      return { ok: false, actionId, argsHash, error: { code: 'PROTOCOL_ACTION_INVALID', category: 'protocol', retryable: false, userMessage: '任务动作格式异常，LectureAI 已停止写入。' } };
+    }
+    const taskAction = { ...action, _taskRunId: runId, _taskSpec: payload?.taskSpec || null };
+    const taskSpec = payload?.taskSpec || null;
+    if (action.tool === 'delete_slide' && taskSpec?.targets?.allowDelete !== true) {
+      return { ok: false, actionId, argsHash, error: { code: 'TASK_MUTATION_NOT_AUTHORIZED', category: 'permission', retryable: false, userMessage: '当前 LectureAI 任务未授权删除页面。' } };
+    }
+    const receiptKey = `${pb.folderPath}\u0000${actionId}`;
+    let existing = this._taskReceipts.get(receiptKey);
+    if (!existing && window.__TAURI__?.core?.invoke) {
+      try {
+        const persisted = await window.__TAURI__.core.invoke('ppte_task_journal_receipt_get', {
+          folderPath: pb.folderPath, runId, actionId,
+        });
+        if (persisted && typeof persisted === 'object') {
+          existing = persisted;
+          this._taskReceipts.set(receiptKey, persisted);
+        }
+      } catch (error) {
+        return { ok: false, actionId, argsHash, error: { code: 'RECEIPT_UNAVAILABLE', category: 'client_unavailable', retryable: true, userMessage: '无法读取任务进度，LectureAI 已暂停写入。' } };
+      }
+    }
+    if (existing) {
+      if (existing.argsHash !== argsHash) {
+        return { ok: false, actionId, argsHash, error: { code: 'PROTOCOL_ACTION_CONFLICT', category: 'protocol', retryable: false, userMessage: '任务回执不一致，LectureAI 已停止写入。' } };
+      }
+      if (existing.ok === true) return { ...existing, replayed: true };
+      if (existing.status === 'failed' || existing.error) return existing;
+      // A pending line means the app may have stopped after the write but
+      // before the final receipt. Re-check the revision below; only an
+      // unchanged deck may safely retry the action.
+    }
+
+    try {
+      // Keep the task context attached only in memory; it is never written to
+      // the deck. Finalization uses it to enable the strict stable-id path.
+      await this._taskJournalStart(pb, payload?.taskSpec || { runId, intent: 'answer', scope: 'none', executionStrategy: 'bounded_tool_loop' });
+    } catch (error) {
+      return { ok: false, actionId, argsHash, error: { code: error.code || 'JOURNAL_UNAVAILABLE', category: 'client_unavailable', retryable: true, userMessage: error.message } };
+    }
+
+    const mutates = this._taskMutationTools.has(action.tool);
+    let currentDeckRevision;
+    try {
+      currentDeckRevision = await this._taskDeckRevision(pb, mutates || !!expectedDeckRevision);
+    } catch (error) {
+      return { ok: false, actionId, argsHash, error: { code: error.code || 'CLIENT_REVISION_UNAVAILABLE', category: 'client_unavailable', retryable: true, userMessage: error.message } };
+    }
+    if (expectedDeckRevision && currentDeckRevision && expectedDeckRevision !== currentDeckRevision) {
+      return { ok: false, actionId, argsHash, error: { code: 'STALE_DECK', category: 'stale_state', retryable: false, userMessage: '课件已发生变化，LectureAI 已暂停写入。' } };
+    }
+
+    if (mutates) {
+      try {
+        await window.__TAURI__.core.invoke('ppte_task_journal_before_write', {
+          folderPath: pb.folderPath,
+          runId,
+          paths: this._taskTouchedPaths(pb, action),
+        });
+      } catch (error) {
+        return { ok: false, actionId, argsHash, error: { code: error?.code || 'JOURNAL_UNAVAILABLE', category: 'client_unavailable', retryable: true, userMessage: error?.message || '无法建立安全恢复点，LectureAI 未写入。' } };
+      }
+    }
+
+    try {
+      await this._taskJournalReceipt(pb, runId, {
+        actionId,
+        argsHash,
+        expectedDeckRevision: expectedDeckRevision || null,
+        tool: action.tool,
+        status: 'pending',
+      });
+    } catch (error) {
+      return { ok: false, actionId, argsHash, error: { code: error.code || 'RECEIPT_UNAVAILABLE', category: 'client_unavailable', retryable: true, userMessage: error.message } };
+    }
+
+    const raw = await this._executeAction(taskAction);
+    if (this._taskResultIsError(raw)) {
+      const failed = {
+        ok: false,
+        actionId,
+        argsHash,
+        error: { code: 'CLIENT_TOOL_FAILED', category: 'client_unavailable', retryable: false, userMessage: String(raw).slice(0, 500) },
+      };
+      this._taskReceipts.set(receiptKey, failed);
+      try { await this._taskJournalReceiptRetry(pb, runId, failed); } catch (_) { /* the in-memory failed receipt still prevents a repeat */ }
+      return failed;
+    }
+    const newDeckRevision = await this._taskDeckRevision(pb, mutates || !!expectedDeckRevision);
+    const receipt = {
+      ok: true,
+      actionId,
+      argsHash,
+      tool: action.tool,
+      expectedDeckRevision: expectedDeckRevision || null,
+      newDeckRevision: newDeckRevision || currentDeckRevision || null,
+      result: this._taskToolDetails(taskAction, raw, pb),
+    };
+    this._taskReceipts.set(receiptKey, receipt);
+    try {
+      await this._taskJournalReceiptRetry(pb, runId, receipt);
+    } catch (error) {
+      // The local mutation is already complete. Keep the successful receipt
+      // in the process cache so reconnects cannot execute the mutation twice;
+      // the caller can send it to the server for reconciliation.
+      return { ...receipt, receiptPending: true };
+    }
+    return receipt;
+  },
+
   async _executeAction(a) {
     const pb = this._editor()._pptBuilder;
     if (!pb) return `[${a?.tool}] 失败：未打开课件`;
@@ -427,6 +766,7 @@ window.PpteWorkbenchAgent = {
         case 'apply_role_template': return await this._toolApplyRoleTemplate(pb, a);
         case 'write_slide': return await this._toolWriteSlide(pb, a);
         case 'insert_slide': return await this._toolInsertSlide(pb, a);
+        case 'delete_slide': return await this._toolDeleteSlide(pb, a);
         case 'reorder_slides': return await this._toolReorderSlides(pb, a);
         case 'finalize_deck': return await this._toolFinalizeDeck(pb, a);
         case 'read_slide': return this._toolReadSlide(pb, a);
@@ -568,7 +908,7 @@ window.PpteWorkbenchAgent = {
     }
     const title = String(a.title || a.payload.title || '模板页面').trim() || '模板页面';
     if (mode === 'replace') {
-      return this._toolWriteSlide(pb, {
+      const delegated = {
         tool: 'write_slide',
         page,
         html: rendered.html,
@@ -576,17 +916,32 @@ window.PpteWorkbenchAgent = {
         slide_type: a.slide_type || 'content',
         note: a.note,
         _templateId: rendered.template_id,
-      }).then(result => result.replace(/^write_slide/, `render_template(${rendered.template_id})`));
+      };
+      const result = await this._toolWriteSlide(pb, delegated);
+      a._taskReceiptDetails = {
+        ...(delegated._taskReceiptDetails || {}),
+        mode: 'replace',
+        templateId: rendered.template_id,
+      };
+      return result.replace(/^write_slide/, `render_template(${rendered.template_id})`);
     }
-    return this._toolInsertSlide(pb, {
+    const delegated = {
       tool: 'insert_slide',
       after: Number(a.after || 0),
       title,
       html: rendered.html,
       slide_type: a.slide_type || 'content',
       note: a.note,
+      target_page_id: a.target_page_id || null,
       _templateId: rendered.template_id,
-    }).then(result => result.replace(/^insert_slide/, `render_template(${rendered.template_id})`));
+    };
+    const result = await this._toolInsertSlide(pb, delegated);
+    a._taskReceiptDetails = {
+      ...(delegated._taskReceiptDetails || {}),
+      mode: 'insert',
+      templateId: rendered.template_id,
+    };
+    return result.replace(/^insert_slide/, `render_template(${rendered.template_id})`);
   },
 
   async _refreshAgentPlanRevision(pb) {
@@ -690,6 +1045,13 @@ window.PpteWorkbenchAgent = {
     });
     if (!commit.ok) return `write_slide 保存失败：${commit.error}。已恢复执行前状态，本轮必须停止。`;
     await this._refreshAgentPlanRevision(pb);
+    a._taskReceiptDetails = {
+      page,
+      pageId: String(pb.slides[i]?.id || '') || null,
+      saved: true,
+      mode: 'replace',
+      ...(a._templateId ? { templateId: a._templateId } : {}),
+    };
     const lint = window.PpteRules ? await window.PpteRules.lintSummary(pb.slides[i].html) : '';
     return `write_slide(第${page}页「${pb.slides[i].title}」) 已保存，主窗口已刷新预览。\n规范检查：\n${lint}`;
   },
@@ -815,7 +1177,14 @@ window.PpteWorkbenchAgent = {
     // finish page. This keeps the ending last even when the model says after=5
     // while expanding the original five-page starter deck.
     if (slideType !== 'finish' && finishIndex >= 0 && idx > finishIndex) idx = finishIndex;
-    const newId = this._editor()._newPpteId?.('slide')
+    const requestedId = String(a.target_page_id || '').trim();
+    if (requestedId && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(requestedId)) {
+      return 'insert_slide 失败：新增页面稳定标识格式无效';
+    }
+    if (requestedId && pb.slides.some(slide => String(slide?.id || '') === requestedId)) {
+      return 'insert_slide 失败：新增页面稳定标识已存在，未重复插入';
+    }
+    const newId = requestedId || this._editor()._newPpteId?.('slide')
       || `slide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const newFile = this._editor()._nextPpteSlideFile ? this._editor()._nextPpteSlideFile(pb) : `slide-${pb.slides.length + 1}.html`;
     const newSlide = {
@@ -843,11 +1212,73 @@ window.PpteWorkbenchAgent = {
     });
     if (!commit.ok) return `insert_slide 保存失败：${commit.error}。已恢复执行前状态，本轮必须停止。`;
     await this._refreshAgentPlanRevision(pb);
+    a._taskReceiptDetails = {
+      page: idx + 1,
+      pageId: newId,
+      inserted: true,
+      mode: 'insert',
+      ...(a._templateId ? { templateId: a._templateId } : {}),
+    };
     const cloned = templateHtml
       ? `，继承 ${slideType}${templateVariant ? `/${templateVariant}` : ''} 母版快照`
       : (templateSlide ? `，继承第${templatePage}页 ${slideType} 模板` : '');
     const finishPage = pb.slides.findIndex(slide => slide.slide_type === 'finish') + 1;
     return `insert_slide 已插入「${newSlide.title}」（现为第${idx + 1}页，类型 ${slideType}${cloned}，共 ${pb.slides.length} 页${finishPage ? `，结束页为第${finishPage}页` : ''}）。`;
+  },
+
+  _slideDeletionProtection(pb, slide) {
+    if (slide?.linkedFrom) return '共享页面不能单独删除，请先断开引用';
+    if ((pb?.manifest?.sharedGroups || []).some(group => (group.slideIds || []).includes(slide?.id))) {
+      return '此页面是共享真源，请先取消共享';
+    }
+    return '';
+  },
+
+  async _toolDeleteSlide(pb, a) {
+    const taskSpec = a._taskSpec;
+    if (!a._taskRunId || taskSpec?.targets?.allowDelete !== true) {
+      return 'delete_slide 失败：当前 LectureAI 任务未授权删除页面';
+    }
+    const page = Number(a.page);
+    const index = page - 1;
+    if (!Number.isInteger(page) || index < 0 || index >= pb.slides.length) {
+      return `delete_slide 失败：页码 ${a.page} 超出范围（共 ${pb.slides.length} 页）`;
+    }
+    if (pb.slides.length <= 1) return 'delete_slide 失败：课件至少需要保留一页';
+    const slide = pb.slides[index];
+    const pageId = String(slide?.id || '').trim();
+    if (!pageId || String(a.page_id || '').trim() !== pageId) {
+      return 'delete_slide 失败：页面稳定标识与当前页不一致，LectureAI 未删除页面';
+    }
+    const protection = this._slideDeletionProtection(pb, slide);
+    if (protection) return `delete_slide 失败：${protection}`;
+
+    let plan = this._activeDeckPlan?.folderPath === pb.folderPath ? this._activeDeckPlan.plan : null;
+    if (!plan) {
+      try {
+        plan = (await window.__TAURI__.core.invoke('ppte_agent_plan_read', { folderPath: pb.folderPath }))?.plan;
+      } catch (_) { /* reported below */ }
+    }
+    const planRunId = String(plan?.taskSpecRef?.runId || '').trim();
+    const deletedPageIds = Array.isArray(plan?.deletedPageIds)
+      ? plan.deletedPageIds.map(value => String(value || '').trim()).filter(Boolean)
+      : [];
+    if (plan?.planVersion !== 3 || planRunId !== String(a._taskRunId) || !deletedPageIds.includes(pageId)) {
+      return 'delete_slide 失败：课件蓝图未明确授权删除当前稳定页面';
+    }
+
+    const commit = await this._commitAgentMutation(pb, () => {
+      pb.slides.splice(index, 1);
+      pb.manifest.slides = pb.slides;
+      if ((pb.currentSlideIndex || 0) > index) pb.currentSlideIndex -= 1;
+      else if ((pb.currentSlideIndex || 0) === index) pb.currentSlideIndex = Math.min(index, pb.slides.length - 1);
+      pb.manifestDirty = true;
+      return { requiredFiles: [] };
+    });
+    if (!commit.ok) return `delete_slide 保存失败：${commit.error}。已恢复执行前状态，本轮必须停止。`;
+    await this._refreshAgentPlanRevision(pb);
+    a._taskReceiptDetails = { page, pageId, deleted: true };
+    return `delete_slide 已将第${page}页从成品页序移除；源文件仍保留在磁盘中。`;
   },
 
   async _toolReorderSlides(pb, a) {
@@ -877,6 +1308,7 @@ window.PpteWorkbenchAgent = {
     });
     if (!commit.ok) return `reorder_slides 保存失败：${commit.error}。已恢复执行前状态，本轮必须停止。`;
     await this._refreshAgentPlanRevision(pb);
+    a._taskReceiptDetails = { order: order.map(value => Number(value) - 1), reordered: true };
     return `reorder_slides 已重排为 [${order.join(',')}]。`;
   },
 
@@ -905,21 +1337,29 @@ window.PpteWorkbenchAgent = {
     }
 
     const current = [...pb.slides];
+    const strictStableIds = Boolean(plan?.taskSpecRef?.runId || a?._taskRunId);
+    if (strictStableIds && current.some(slide => !String(slide?.id || '').trim())) {
+      return '整理成品页序失败：当前课件存在缺少稳定标识的页面，LectureAI 未修改页序';
+    }
     const used = new Set();
     const selected = [];
     for (let index = 0; index < plannedSlides.length; index += 1) {
       const planned = plannedSlides[index] || {};
       const expectedRole = this._normalizedPlanRole(planned.role || planned.slide_type);
       const expectedTitle = String(planned.title || '').trim();
+      const stableId = String(planned.sourcePageId || planned.targetPageId || '').trim();
+      if (strictStableIds && !stableId) return `整理成品页序失败：蓝图第 ${index + 1} 页缺少稳定页面标识`;
       const usable = slideIndex => slideIndex >= 0
         && slideIndex < current.length
         && !used.has(slideIndex)
         && this._normalizedPlanRole(current[slideIndex]?.slide_type) === expectedRole;
-      let match = usable(index) ? index : -1;
-      if (match < 0 && expectedTitle) {
+      let match = strictStableIds
+        ? current.findIndex((slide, slideIndex) => usable(slideIndex) && String(slide?.id || '') === stableId)
+        : (usable(index) ? index : -1);
+      if (!strictStableIds && match < 0 && expectedTitle) {
         match = current.findIndex((slide, slideIndex) => usable(slideIndex) && String(slide?.title || '').trim() === expectedTitle);
       }
-      if (match < 0) match = current.findIndex((_slide, slideIndex) => usable(slideIndex));
+      if (!strictStableIds && match < 0) match = current.findIndex((_slide, slideIndex) => usable(slideIndex));
       if (match < 0) {
         return `整理成品页序失败：找不到蓝图第 ${index + 1} 页所需的 ${expectedRole} 页面，请先完成该页再整理`;
       }
@@ -933,8 +1373,29 @@ window.PpteWorkbenchAgent = {
 
     const oldCurrentId = current[pb.currentSlideIndex]?.id;
     const removed = current.filter((_slide, index) => !used.has(index));
+    const protectedRemoved = removed.find(slide => this._slideDeletionProtection(pb, slide));
+    if (protectedRemoved) {
+      return `整理成品页序失败：${this._slideDeletionProtection(pb, protectedRemoved)}，LectureAI 未修改页序`;
+    }
+    if (strictStableIds) {
+      const declared = new Set((Array.isArray(plan?.deletedPageIds) ? plan.deletedPageIds : []).map(value => String(value).trim()).filter(Boolean));
+      const actual = new Set(removed.map(slide => String(slide?.id || '').trim()).filter(Boolean));
+      if ([...actual].some(id => !declared.has(id))) {
+        return '整理成品页序失败：蓝图删除集合与当前多余页面不一致，LectureAI 未修改页序';
+      }
+    }
     const unchanged = removed.length === 0 && selected.every((slide, index) => slide === current[index]);
-    if (unchanged) return `已确认成品页序与蓝图一致（共 ${target} 页）。`;
+    const receiptDetails = {
+      order: selected.map(slide => String(slide?.id || '')).filter(Boolean),
+      deletedPageIds: strictStableIds
+        ? [...new Set((plan?.deletedPageIds || []).map(value => String(value || '').trim()).filter(Boolean))]
+        : removed.map(slide => String(slide?.id || '')).filter(Boolean),
+      changed: !unchanged,
+    };
+    if (unchanged) {
+      a._taskReceiptDetails = receiptDetails;
+      return `已确认成品页序与蓝图一致（共 ${target} 页）。`;
+    }
     const commit = await this._commitAgentMutation(pb, () => {
       this._markTemplateInitialized(pb);
       pb.slides = selected;
@@ -946,6 +1407,7 @@ window.PpteWorkbenchAgent = {
     });
     if (!commit.ok) return `整理成品页序保存失败：${commit.error}。已恢复执行前状态，本轮必须停止。`;
     await this._refreshAgentPlanRevision(pb);
+    a._taskReceiptDetails = receiptDetails;
     return `已按蓝图整理为 ${target} 页，${removed.length} 个起始占位页已从成品页序移除；对应源文件和隐藏母版快照仍保留在磁盘中。`;
   },
 
@@ -1305,52 +1767,193 @@ window.PpteWorkbenchAgent = {
   },
 
   async _toolValidateSlide(pb, a) {
-    let html, label;
+    let html, label, slide = null, page = null;
     if (a.page != null) {
-      const page = (a.page | 0);
+      page = (a.page | 0);
       const i = page - 1;
       if (i < 0 || i >= pb.slides.length) return `validate_slide 失败：页码 ${page} 超出范围`;
-      html = pb.slides[i].html;
-      label = `第${page}页「${pb.slides[i].title}」`;
+      slide = pb.slides[i];
+      html = slide.html;
+      label = `第${page}页「${slide.title}」`;
     } else if (a.html) {
       html = a.html; label = '提供的 HTML';
     } else {
       return `validate_slide 失败：需指定 page 或 html`;
     }
-    const lint = window.PpteRules ? await window.PpteRules.lintSummary(html) : 'linter 不可用';
-    return `${label} 规范检查：\n${lint}`;
+    let lintIssues = [];
+    try {
+      if (!window.PpteRules) throw new Error('PPTE 校验器未加载');
+      lintIssues = await window.PpteRules.lint(html || '');
+    } catch (_) {
+      lintIssues = [{ severity: 'error', rule: 'validator-unavailable', message: '页面规范检查暂不可用' }];
+    }
+    const staticErrors = (lintIssues || []).filter(issue => String(issue?.severity || '').toLowerCase() === 'error');
+    const staticWarnings = (lintIssues || []).filter(issue => String(issue?.severity || '').toLowerCase() !== 'error');
+    const issues = [];
+    if (staticErrors.length) {
+      issues.push({
+        code: 'SLIDE_STATIC_VALIDATION_FAILED',
+        severity: 'error',
+        message: '页面未通过规范检查',
+        page,
+        pageId: slide?.id || null,
+        details: staticErrors.map(issue => String(issue?.message || issue?.rule || '页面规范检查未通过')).slice(0, 20),
+      });
+    }
+    const expectedTemplate = this._expectedTemplateForPage(pb, page);
+    const diagnostics = await this._renderDiagnosticsForSlide(pb, slide || { html }, page, expectedTemplate);
+    for (const item of diagnostics.issues || []) {
+      issues.push({ ...item, page, pageId: slide?.id || null });
+    }
+    const errors = issues.filter(item => item.severity === 'error').map(item => item.message);
+    const result = {
+      schemaVersion: 1,
+      label,
+      page,
+      pageId: slide?.id || null,
+      passed: errors.length === 0,
+      errors,
+      warnings: staticWarnings.map(issue => String(issue?.message || issue?.rule || '页面规范建议')).slice(0, 30),
+      issues,
+      diagnostics,
+      failedPages: errors.length && page ? [page] : [],
+      failedPageIds: errors.length && slide?.id ? [slide.id] : [],
+    };
+    result.slides = [{
+      page,
+      pageId: slide?.id || null,
+      passed: result.passed,
+      errors: result.errors,
+      warnings: result.warnings,
+      issues,
+      diagnostics,
+    }];
+    return JSON.stringify(result, null, 2);
+  },
+
+  _expectedTemplateForPage(pb, page) {
+    if (!Number.isInteger(page) || page < 1) return '';
+    const plan = this._activeDeckPlan?.folderPath === pb?.folderPath ? this._activeDeckPlan?.plan : null;
+    const planned = (plan?.slides || []).find(item => Number(item?.page) === page);
+    return String(planned?.templateId || planned?.template_id || '');
+  },
+
+  _renderDiagnosticBaseHref(pb) {
+    const folder = `${String(pb?.folderPath || '').replace(/[\\/]+$/, '')}/`;
+    if (window.PptExtraViewer?._assetUrl) return window.PptExtraViewer._assetUrl(folder);
+    const customHost = typeof navigator !== 'undefined'
+      && (/win/i.test(navigator.platform || '') || /windows/i.test(navigator.userAgent || ''));
+    const normalized = folder.replace(/\\/g, '/').replace(/^\/+/, '');
+    const encoded = normalized.split('/').map(part => encodeURIComponent(part)).join('/');
+    return `${customHost ? 'http://slide.localhost/' : 'slide://localhost/'}${encoded}`;
+  },
+
+  async _renderDiagnosticsForSlide(pb, slide, page, expectedTemplate = '') {
+    if (!window.PpteRenderDiagnostics?.diagnose) {
+      return {
+        schemaVersion: 1,
+        available: false,
+        page: Number.isInteger(page) ? page : null,
+        pageId: slide?.id || null,
+        passed: false,
+        issues: [{ code: 'RENDER_DIAGNOSTICS_UNAVAILABLE', severity: 'error', message: '页面渲染诊断暂不可用' }],
+      };
+    }
+    try {
+      return await window.PpteRenderDiagnostics.diagnose({
+        html: slide?.html || '',
+        baseHref: this._renderDiagnosticBaseHref(pb),
+        page,
+        pageId: slide?.id || null,
+        expectedTemplate,
+      });
+    } catch (_) {
+      return {
+        schemaVersion: 1,
+        available: false,
+        page: Number.isInteger(page) ? page : null,
+        pageId: slide?.id || null,
+        passed: false,
+        issues: [{ code: 'RENDER_DIAGNOSTICS_UNAVAILABLE', severity: 'error', message: '页面渲染诊断暂不可用' }],
+      };
+    }
   },
 
   async _toolValidateDeck(pb) {
     const errors = [];
     const warnings = [];
+    const issues = [];
     const slideResults = [];
     const finishPages = [];
-    for (let index = 0; index < pb.slides.length; index++) {
-      const slide = pb.slides[index];
-      if (['finish', 'ending'].includes(slide.slide_type)) finishPages.push(index + 1);
-      let issues;
-      try {
-        if (!window.PpteRules) throw new Error('PPTE 校验器未加载');
-        issues = await window.PpteRules.lint(slide.html || '');
-      } catch (error) {
-        errors.push(`第 ${index + 1} 页无法校验：${String(error)}`);
-        slideResults.push({ page: index + 1, passed: false, issues: [], validationError: String(error) });
-        continue;
-      }
-      const hard = (issues || []).filter(issue => String(issue.severity || '').toLowerCase() === 'error');
-      slideResults.push({ page: index + 1, passed: hard.length === 0, issues });
-      if (hard.length) errors.push(`第 ${index + 1} 页未通过单页校验`);
-    }
-    if (finishPages.length > 1) errors.push('课件包含多个结束页');
-    if (finishPages.length === 1 && finishPages[0] !== pb.slides.length) errors.push('结束页必须位于最后一页');
-
+    const addIssue = (code, message, options = {}) => {
+      const severity = options.severity === 'warning' ? 'warning' : 'error';
+      const item = {
+        code,
+        severity,
+        message,
+        ...(Number.isInteger(options.page) ? { page: options.page, pageId: options.pageId || pb.slides[options.page - 1]?.id || null } : {}),
+        ...(Array.isArray(options.pages) && options.pages.length ? { pages: options.pages } : {}),
+        ...(Array.isArray(options.details) && options.details.length ? { details: options.details.slice(0, 20) } : {}),
+      };
+      issues.push(item);
+      const prefix = Number.isInteger(item.page) ? `第 ${item.page} 页：` : '';
+      if (severity === 'error') errors.push(prefix + message);
+      else warnings.push(prefix + message);
+      return item;
+    };
     let planPayload = { plan: null, status: 'missing' };
     try {
       planPayload = await window.__TAURI__.core.invoke('ppte_agent_plan_read', { folderPath: pb.folderPath });
     } catch (_) { /* old projects have no plan */ }
     const plan = planPayload?.plan;
     const plannedSlides = Array.isArray(plan?.slides) ? plan.slides : [];
+    const renderSlides = [];
+    for (let index = 0; index < pb.slides.length; index++) {
+      const slide = pb.slides[index];
+      const page = index + 1;
+      if (['finish', 'ending'].includes(slide.slide_type)) finishPages.push(page);
+      let lintIssues;
+      try {
+        if (!window.PpteRules) throw new Error('PPTE 校验器未加载');
+        lintIssues = await window.PpteRules.lint(slide.html || '');
+      } catch (_) {
+        lintIssues = [{ severity: 'error', rule: 'validator-unavailable', message: '页面规范检查暂不可用' }];
+      }
+      const hard = (lintIssues || []).filter(issue => String(issue.severity || '').toLowerCase() === 'error');
+      const soft = (lintIssues || []).filter(issue => String(issue.severity || '').toLowerCase() !== 'error');
+      const slideIssues = [];
+      if (hard.length) {
+        slideIssues.push(addIssue('SLIDE_STATIC_VALIDATION_FAILED', '页面未通过规范检查', {
+          page,
+          pageId: slide.id,
+          details: hard.map(item => String(item?.message || item?.rule || '页面规范检查未通过')),
+        }));
+      }
+      const planned = plannedSlides.find(item => Number(item?.page) === page) || plannedSlides[index] || {};
+      const expectedTemplate = String(planned?.templateId || planned?.template_id || '');
+      const diagnostics = await this._renderDiagnosticsForSlide(pb, slide, page, expectedTemplate);
+      renderSlides.push(diagnostics);
+      for (const diagnostic of diagnostics.issues || []) {
+        slideIssues.push(addIssue(diagnostic.code, diagnostic.message, {
+          page,
+          pageId: slide.id,
+          details: diagnostic.resources || diagnostic.selectors || [],
+        }));
+      }
+      slideResults.push({
+        page,
+        pageId: slide.id || null,
+        passed: slideIssues.length === 0,
+        errors: slideIssues.map(item => item.message),
+        warnings: soft.map(item => String(item?.message || item?.rule || '页面规范建议')).slice(0, 30),
+        issues: slideIssues,
+        diagnostics,
+      });
+    }
+    if (finishPages.length > 1) addIssue('DECK_MULTIPLE_FINISH_PAGES', '课件包含多个结束页', { pages: finishPages });
+    if (finishPages.length === 1 && finishPages[0] !== pb.slides.length) {
+      addIssue('DECK_FINISH_NOT_LAST', '结束页必须位于最后一页', { page: finishPages[0] });
+    }
     const plannedLayouts = plannedSlides.map(item => String(item.layoutFamily || item.layout_family || '').toLowerCase());
     const structural = new Set(['cover', 'catalog', 'immersive-chapter', 'ending', 'finish']);
     const actualLayouts = pb.slides.map((slide, index) => {
@@ -1384,28 +1987,51 @@ window.PpteWorkbenchAgent = {
       if (!expectedTemplate) continue;
       const actualTemplate = String(pb.slides[index]?.html || '').match(/\bdata-template\s*=\s*["']([^"']+)["']/i)?.[1] || '';
       if (actualTemplate !== expectedTemplate) {
-        errors.push(`第 ${index + 1} 页实际模板 ${actualTemplate || '未标记'} 与规划 ${expectedTemplate} 不一致`);
+        addIssue('DECK_TEMPLATE_MISMATCH', '实际模板与课件蓝图不一致', { page: index + 1 });
       }
     }
     for (let index = 0; index < Math.min(plannedLayouts.length, actualLayouts.length); index++) {
       if (!structural.has(actualLayouts[index]) && actualLayouts[index] !== 'unclassified' && plannedLayouts[index] && plannedLayouts[index] !== actualLayouts[index]) {
-        warnings.push(`第 ${index + 1} 页实际布局 ${actualLayouts[index]} 与规划 ${plannedLayouts[index]} 不一致`);
+        addIssue('DECK_LAYOUT_MISMATCH', `实际布局 ${actualLayouts[index]} 与规划 ${plannedLayouts[index]} 不一致`, { severity: 'warning', page: index + 1 });
       }
     }
     if (Number(plan?.targetSlideCount) && Number(plan.targetSlideCount) !== pb.slides.length) {
-      errors.push(`当前共 ${pb.slides.length} 页，与规划目标 ${plan.targetSlideCount} 页不一致`);
+      const target = Number(plan.targetSlideCount);
+      const extraPages = pb.slides.length > target ? Array.from({ length: pb.slides.length - target }, (_, offset) => target + offset + 1) : [];
+      addIssue('DECK_SLIDE_COUNT_MISMATCH', `当前共 ${pb.slides.length} 页，与规划目标 ${target} 页不一致`, { pages: extraPages });
     }
-    if (adjacentDuplicateLayouts.length) errors.push(`相邻页面重复主构图：${adjacentDuplicateLayouts.map(page => `第 ${page} 页`).join('、')}`);
-    if (contentLayouts.length >= 8 && families.size < 6) errors.push(`正文仅使用 ${families.size} 种主布局，至少需要 6 种`);
-    if (contentLayouts.length && cardCount / contentLayouts.length > 0.25) errors.push(`卡片类布局占比 ${cardCount}/${contentLayouts.length}，超过 25%`);
-    if (pb.slides.length >= 12 && motionCount < 3) errors.push('动画或交互页面少于 3 页');
-    if (planPayload?.status === 'stale') warnings.push('课件内容已在规划后变化，建议更新规划');
-    if (!plan) warnings.push('当前项目没有 LectureAI 规划，旧项目仍可正常播放和编辑');
+    if (adjacentDuplicateLayouts.length) addIssue('DECK_ADJACENT_LAYOUT_DUPLICATE', '相邻页面重复主构图', { pages: adjacentDuplicateLayouts });
+    const contentPages = pb.slides.map((slide, index) => ({ slide, page: index + 1 })).filter(item => !structural.has(layouts[item.page - 1]));
+    if (contentLayouts.length >= 8 && families.size < 6) {
+      addIssue('DECK_LAYOUT_DIVERSITY_LOW', `正文仅使用 ${families.size} 种主布局，至少需要 6 种`, { pages: contentPages.slice(-5).map(item => item.page) });
+    }
+    if (contentLayouts.length && cardCount / contentLayouts.length > 0.25) {
+      const cardPages = contentPages.filter(item => /card|bento/.test(layouts[item.page - 1]) || layouts[item.page - 1] === 'feature-list').map(item => item.page);
+      addIssue('DECK_CARD_LAYOUT_RATIO_HIGH', `卡片类布局占比 ${cardCount}/${contentLayouts.length}，超过 25%`, { pages: cardPages.slice(0, 5) });
+    }
+    if (pb.slides.length >= 12 && motionCount < 3) {
+      const plannedMotionPages = plannedSlides.filter(item => !['', 'none', 'static'].includes(String(item?.motion || '').toLowerCase())).map(item => Number(item.page)).filter(Number.isInteger);
+      addIssue('DECK_MOTION_COVERAGE_LOW', '动画或交互页面少于 3 页', { pages: plannedMotionPages.slice(0, 5) });
+    }
+    if (planPayload?.status === 'stale') addIssue('DECK_PLAN_STALE', '课件内容已在规划后变化，建议更新规划', { severity: 'warning' });
+    if (!plan) addIssue('DECK_PLAN_MISSING', '当前项目没有 LectureAI 规划，旧项目仍可正常播放和编辑', { severity: 'warning' });
+
+    const failedPages = new Set();
+    for (const item of issues.filter(item => item.severity === 'error')) {
+      if (Number.isInteger(item.page) && item.page >= 1 && item.page <= pb.slides.length) failedPages.add(item.page);
+      for (const page of item.pages || []) if (Number.isInteger(page) && page >= 1 && page <= pb.slides.length) failedPages.add(page);
+    }
+    for (const slide of slideResults) if (!slide.passed) failedPages.add(slide.page);
+    const failedPageIds = [...failedPages].map(page => pb.slides[page - 1]?.id).filter(Boolean);
 
     return JSON.stringify({
+      schemaVersion: 1,
       passed: errors.length === 0,
       errors,
       warnings,
+      issues,
+      failedPages: [...failedPages].sort((a, b) => a - b),
+      failedPageIds: [...new Set(failedPageIds)],
       metrics: {
         slideCount: pb.slides.length,
         layoutFamilies: families.size,
@@ -1415,6 +2041,14 @@ window.PpteWorkbenchAgent = {
         adjacentDuplicateLayouts,
       },
       slides: slideResults,
+      renderDiagnostics: {
+        schemaVersion: 1,
+        available: renderSlides.every(item => item.available !== false),
+        passed: renderSlides.every(item => item.passed === true),
+        failedPages: renderSlides.filter(item => item.passed !== true).map(item => item.page).filter(Number.isInteger),
+        failedPageIds: renderSlides.filter(item => item.passed !== true).map(item => item.pageId).filter(Boolean),
+        slides: renderSlides,
+      },
       planStatus: planPayload?.status || 'missing',
     }, null, 2);
   }

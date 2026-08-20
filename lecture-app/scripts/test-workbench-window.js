@@ -5,6 +5,8 @@ const vm = require('node:vm');
 
 const workbenchPath = path.join(__dirname, '..', 'src', 'js', 'workbench-window.js');
 const source = fs.readFileSync(workbenchPath, 'utf8');
+const taskProtocolSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'js', 'lectureai-task-protocol.js'), 'utf8');
+const renderDiagnosticsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'js', 'ppte-render-diagnostics.js'), 'utf8');
 const slashSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'js', 'ppte-slash-commands.js'), 'utf8');
 const agentPath = path.join(__dirname, '..', 'src', 'js', 'ppte-workbench-agent.js');
 const agentSource = fs.readFileSync(agentPath, 'utf8');
@@ -17,13 +19,18 @@ const context = {
   console,
   window: {},
   document: { addEventListener() {} },
+  crypto: require('node:crypto').webcrypto,
+  TextEncoder,
   setTimeout,
   clearTimeout,
   setInterval,
   clearInterval,
 };
+context.window.crypto = context.crypto;
+context.window.TextEncoder = TextEncoder;
 
 vm.createContext(context);
+vm.runInContext(`${taskProtocolSource}\nglobalThis.LectureAiTaskProtocol = window.LectureAiTaskProtocol;`, context);
 vm.runInContext(`${slashSource}\nglobalThis.PpteSlashCommands = window.PpteSlashCommands;`, context);
 vm.runInContext(`${source}\nglobalThis.WorkbenchWindow = window.WorkbenchWindow;`, context);
 
@@ -42,6 +49,12 @@ assert.match(source, /模型正在准备下一步工具计划/);
 assert.match(source, /用户取消了当前任务/);
 assert.match(source, /_turnGeneration/);
 assert.match(source, /上游模型暂时不可用，1\.2s 后自动重试/, 'transient LectureAI failures should expose the automatic retry phase');
+assert.match(source, /task_resolve/, 'LectureAI turns must resolve a server-owned TaskSpec first');
+assert.match(source, /taskSpec\.scope === 'deck'/, 'TaskSpec scope must drive deck routing');
+assert.match(source, /taskSpec\.requiresDeckPlan === true/, 'TaskSpec must drive the plan requirement');
+assert.doesNotMatch(htmlSource, /课件级 Agent|从其他 Agent/, 'workbench chrome must not expose internal agent terminology');
+assert.doesNotMatch(source, /课件级 Agent|从其他 Agent/, 'dynamic empty states must use the LectureAI assistant name');
+assert.match(source, /const finalText = this\._userFacingText\(this\._stripActions\(text\)\)/, 'stream finalization must keep user-facing terminology sanitized');
 
 const originalLogForUserLine = wb._log;
 const originalAppendMarkdown = wb._appendAssistantMarkdown;
@@ -528,6 +541,7 @@ const agentContext = {
   document: { getElementById() { return null; }, querySelector() { return null; }, createElement() { return {}; }, body: { appendChild() {} } },
 };
 vm.createContext(agentContext);
+vm.runInContext(`${renderDiagnosticsSource}\nglobalThis.PpteRenderDiagnostics = window.PpteRenderDiagnostics;`, agentContext);
 vm.runInContext(`${agentSource}\nglobalThis.PpteWorkbenchAgent = window.PpteWorkbenchAgent;`, agentContext);
 const agent = agentContext.PpteWorkbenchAgent;
 assert.match(agent._protectedRoleWriteError('catalog', '<link rel="stylesheet" href="brand-catalog.css"><style>.catalog-item{color:#000}</style>', ['brand-catalog.css']), /不能新增或修改/);
@@ -749,6 +763,74 @@ async function testFinalizeDeckRemovesOnlyUnplannedStarterPages() {
   assert.equal(slides.length, 16, 'source slide objects/files are not deleted by manifest cleanup');
   assert.match(result, /4 个起始占位页已从成品页序移除/);
   assert.match(result, /源文件和隐藏母版快照仍保留/);
+}
+
+async function testNativeDeleteSlideIsManifestOnlyAndPlanBound() {
+  const originalPlan = agent._activeDeckPlan;
+  const deck = {
+    folderPath: '/tmp/delete-deck',
+    manifest: { title: '删除测试', slides: [] },
+    slides: [
+      { id: 'keep-1', file: 'slide01.html', title: '保留一', slide_type: 'cover', html: '<h1>一</h1>' },
+      { id: 'remove-2', file: 'slide02.html', title: '占位页', slide_type: 'content', html: '<h1>二</h1>' },
+    ],
+    currentSlideIndex: 1,
+    manifestDirty: false,
+    templateFilesDirty: false,
+    fileStats: {},
+  };
+  deck.manifest.slides = deck.slides;
+  const taskSpec = {
+    runId: 'run_delete_slide_12345678',
+    targets: { allowDelete: true, allowInsert: false, allowReorder: true },
+  };
+  agent._activeDeckPlan = {
+    folderPath: deck.folderPath,
+    plan: {
+      planVersion: 3,
+      taskSpecRef: { runId: taskSpec.runId },
+      deletedPageIds: ['remove-2'],
+      slides: [{ page: 1, sourcePageId: 'keep-1', role: 'cover' }],
+      targetSlideCount: 1,
+    },
+  };
+  agentContext.window.Settings._pptBuilder = deck;
+  agentContext.window.Settings._savePptBuilderData = successfulSave;
+  try {
+    const result = await agent._toolDeleteSlide(deck, {
+      tool: 'delete_slide', page: 2, page_id: 'remove-2',
+      _taskRunId: taskSpec.runId, _taskSpec: taskSpec,
+    });
+    assert.match(result, /源文件仍保留/);
+    assert.deepEqual(Array.from(deck.slides, slide => slide.id), ['keep-1']);
+    assert.deepEqual(deck.manifest.slides, deck.slides);
+    assert.equal(deck.currentSlideIndex, 0);
+    const denied = await agent._toolDeleteSlide(deck, {
+      tool: 'delete_slide', page: 1, page_id: 'keep-1',
+      _taskRunId: taskSpec.runId, _taskSpec: { ...taskSpec, targets: { ...taskSpec.targets, allowDelete: false } },
+    });
+    assert.match(denied, /未授权删除/);
+  } finally {
+    agent._activeDeckPlan = originalPlan;
+    agentContext.window.Settings._pptBuilder = pb;
+    agentContext.window.Settings._savePptBuilderData = successfulSave;
+  }
+}
+
+function testStructuredTaskReceiptDetails() {
+  const details = agent._taskToolDetails(
+    { tool: 'reorder_slides', order: [3, 1, 2] },
+    'reorder_slides 已重排',
+    { slides: [{ id: 's1' }, { id: 's2' }, { id: 's3' }] },
+  );
+  assert.deepEqual(details.order, [2, 0, 1], 'server reorder evidence is a complete zero-based permutation');
+  const finalize = agent._taskToolDetails(
+    { tool: 'finalize_deck', plan: { slides: [{ sourcePageId: 's1' }, { targetPageId: 't2' }], deletedPageIds: ['s3'] } },
+    '已整理',
+    { slides: [{ id: 's1' }, { id: 't2' }] },
+  );
+  assert.deepEqual(finalize.order, ['s1', 't2']);
+  assert.deepEqual(finalize.deletedPageIds, ['s3']);
 }
 
 async function testCancelledSaveRollsBackAgentMutation() {
@@ -1200,18 +1282,44 @@ async function testHarnessFinalizesBeforeDeckValidation() {
   const originalLogAction = wb._logAction;
   const originalFinish = wb._finishAction;
   const originalLogResult = wb._logResult;
+  const originalTaskActionRequest = wb._taskActionRequest;
+  const originalSelectedConfig = wb.selectedConfig;
+  const originalTaskCardRun = wb._taskCardRun;
   const calls = [];
   const plan = {
     targetSlideCount: 1,
     slides: [{ page: 1, role: 'cover', title: '封面' }],
+    taskSpecRef: { runId: 'run_finalize_receipt_12345678', revision: 1 },
     execution: { schemaVersion: 1, completedPages: [1], summaries: { 1: '完成' }, stageReviews: [] },
   };
   try {
-    wb._activeTask = { userInstruction: '测试收尾' };
+    wb._activeTask = { userInstruction: '测试收尾', runId: 'run_finalize_receipt_12345678' };
+    wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
+    wb._taskCardRun = { runId: 'run_finalize_receipt_12345678', status: 'running' };
+    wb.manifest = { deckRevision: { deckHash: `sha256:${'a'.repeat(64)}` } };
     wb._stopRequested = false;
     wb._persistHarnessExecution = async () => {};
     wb._validateAndRepairHarness = async () => { calls.push('validate'); return { passed: true, metrics: {} }; };
-    wb._rpc = async (_type, payload) => { calls.push(payload.action.tool); return '已确认成品页序与蓝图一致（共 1 页）。'; };
+    wb._rpc = async (type, payload) => {
+      calls.push(`${type}:${payload.action.tool}`);
+      if (type === 'execute-task-action') {
+        assert.equal(payload.envelope.actionId, 'run_finalize_receipt_12345678:client:finalize:1');
+        assert.match(payload.envelope.argsHash, /^sha256:[a-f0-9]{64}$/);
+        return { ok: true, result: { label: '已确认成品页序与蓝图一致（共 1 页）。' } };
+      }
+      return '已确认成品页序与蓝图一致（共 1 页）。';
+    };
+    wb._taskActionRequest = async (action, payload) => {
+      if (action === 'task_action_start') {
+        assert.equal(payload.actionId, 'run_finalize_receipt_12345678:client:finalize:1');
+        return { decision: 'new', receipt: { claimToken: 'claim-finalize-test' } };
+      }
+      if (action === 'task_action_finish') {
+        assert.equal(payload.claimToken, 'claim-finalize-test');
+        return { decision: 'stored', receipt: { result: payload.result, newDeckRevision: payload.newDeckRevision } };
+      }
+      throw new Error(`unexpected task action ${action}`);
+    };
     wb._refreshContext = async () => {};
     wb._appendAssistantMarkdown = () => {};
     wb._log = () => {};
@@ -1219,7 +1327,7 @@ async function testHarnessFinalizesBeforeDeckValidation() {
     wb._finishAction = () => {};
     wb._logResult = () => {};
     await wb._runPlannedHarness(plan, '测试收尾');
-    assert.deepEqual(calls, ['finalize_deck', 'validate'], 'deterministic page cleanup must run before whole-deck validation');
+    assert.deepEqual(calls, ['execute-task-action:finalize_deck', 'validate'], 'deterministic page cleanup must have its own receipt before whole-deck validation');
   } finally {
     wb._persistHarnessExecution = originalPersist;
     wb._validateAndRepairHarness = originalValidate;
@@ -1230,6 +1338,109 @@ async function testHarnessFinalizesBeforeDeckValidation() {
     wb._logAction = originalLogAction;
     wb._finishAction = originalFinish;
     wb._logResult = originalLogResult;
+    wb._taskActionRequest = originalTaskActionRequest;
+    wb.selectedConfig = originalSelectedConfig;
+    wb._taskCardRun = originalTaskCardRun;
+  }
+}
+
+async function testHarnessCompletionWaitsForServerAuthority() {
+  const originals = {
+    persist: wb._persistHarnessExecution,
+    validate: wb._validateAndRepairHarness,
+    complete: wb._completeLectureAiTaskRun,
+    rpc: wb._rpc,
+    refresh: wb._refreshContext,
+    append: wb._appendAssistantMarkdown,
+    log: wb._log,
+    logAction: wb._logAction,
+    finish: wb._finishAction,
+    logResult: wb._logResult,
+  };
+  const plan = {
+    targetSlideCount: 1,
+    slides: [{ page: 1, role: 'cover', title: '封面' }],
+    execution: { schemaVersion: 1, completedPages: [1], summaries: { 1: '完成' }, stageReviews: [] },
+  };
+  const events = [];
+  try {
+    wb._activeTask = { userInstruction: '测试权威收尾', taskSpec: { runId: 'run_complete_order_12345678' } };
+    wb._stopRequested = false;
+    wb._persistHarnessExecution = async (_plan, execution) => { events.push(execution.status); };
+    wb._validateAndRepairHarness = async () => ({ passed: true, metrics: { pages: 1 } });
+    wb._completeLectureAiTaskRun = async () => { events.push('server-completed'); return { status: 'completed' }; };
+    wb._rpc = async () => '已确认成品页序与蓝图一致（共 1 页）。';
+    wb._refreshContext = async () => {};
+    wb._appendAssistantMarkdown = () => {};
+    wb._log = () => {};
+    wb._logAction = () => null;
+    wb._finishAction = () => {};
+    wb._logResult = () => {};
+    await wb._runPlannedHarness(plan, '测试权威收尾');
+    assert.deepEqual(events, ['validating', 'server-completed', 'completed']);
+
+    events.length = 0;
+    wb._completeLectureAiTaskRun = async () => { throw new Error('服务端确认暂不可用'); };
+    await assert.rejects(wb._runPlannedHarness(plan, '测试权威收尾'), /服务端确认暂不可用/);
+    assert.deepEqual(events, ['validating', 'paused'], 'server failure must never leave a local completed state');
+  } finally {
+    wb._persistHarnessExecution = originals.persist;
+    wb._validateAndRepairHarness = originals.validate;
+    wb._completeLectureAiTaskRun = originals.complete;
+    wb._rpc = originals.rpc;
+    wb._refreshContext = originals.refresh;
+    wb._appendAssistantMarkdown = originals.append;
+    wb._log = originals.log;
+    wb._logAction = originals.logAction;
+    wb._finishAction = originals.finish;
+    wb._logResult = originals.logResult;
+  }
+}
+
+async function testHarnessValidationFailureBecomesRepairable() {
+  const originals = {
+    persist: wb._persistHarnessExecution,
+    validate: wb._validateAndRepairHarness,
+    complete: wb._completeLectureAiTaskRun,
+    rpc: wb._rpc,
+    refresh: wb._refreshContext,
+    log: wb._log,
+    logAction: wb._logAction,
+    finish: wb._finishAction,
+    logResult: wb._logResult,
+  };
+  const plan = {
+    targetSlideCount: 1,
+    slides: [{ page: 1, role: 'content', title: '正文' }],
+    execution: { schemaVersion: 1, completedPages: [1], summaries: { 1: '完成' }, stageReviews: [] },
+  };
+  const statuses = [];
+  try {
+    wb._activeTask = { userInstruction: '测试返工', taskSpec: { runId: 'run_repair_order_12345678' } };
+    wb._stopRequested = false;
+    wb._persistHarnessExecution = async (_plan, execution) => { statuses.push(execution.status); };
+    wb._validateAndRepairHarness = async () => ({ passed: false, errors: ['第 1 页内容溢出'] });
+    wb._completeLectureAiTaskRun = async () => ({ status: 'needs_repair' });
+    wb._rpc = async () => '已确认成品页序与蓝图一致（共 1 页）。';
+    wb._refreshContext = async () => {};
+    wb._log = () => {};
+    wb._logAction = () => null;
+    wb._finishAction = () => {};
+    wb._logResult = () => {};
+    await assert.rejects(wb._runPlannedHarness(plan, '测试返工'), /整套校验未通过/);
+    assert.equal(statuses[0], 'validating');
+    assert.ok(statuses.includes('needs-repair'));
+    assert.equal(statuses.includes('completed'), false);
+  } finally {
+    wb._persistHarnessExecution = originals.persist;
+    wb._validateAndRepairHarness = originals.validate;
+    wb._completeLectureAiTaskRun = originals.complete;
+    wb._rpc = originals.rpc;
+    wb._refreshContext = originals.refresh;
+    wb._log = originals.log;
+    wb._logAction = originals.logAction;
+    wb._finishAction = originals.finish;
+    wb._logResult = originals.logResult;
   }
 }
 
@@ -1259,7 +1470,11 @@ async function testPiWebSocketReturnsMatchingToolResult() {
       sent.push(message);
       if (message.type === 'start_page') {
         setTimeout(() => this.onmessage({ data: JSON.stringify({
-          type: 'tool_call', ['request' + '_id']: 'request-7', tool: 'validate_slide', args: { page: 1 },
+          type: 'tool_call', ['request' + '_id']: 'request-7',
+          actionId: 'run_page_test:page:1:action:1',
+          argsHash: `sha256:${'b'.repeat(64)}`,
+          expectedDeckRevision: `sha256:${'a'.repeat(64)}`,
+          tool: 'validate_slide', args: { page: 1 },
         }) }), 0);
       } else if (message.type === 'tool_result') {
         setTimeout(() => this.onmessage({ data: JSON.stringify({ type: 'page_complete', page: 1, summary: 'Pi 完成' }) }), 0);
@@ -1269,7 +1484,12 @@ async function testPiWebSocketReturnsMatchingToolResult() {
   }
   context.WebSocket = FakeWebSocket;
   wb._prepareHarnessTarget = async () => ({ mode: 'replace', after: null });
-  wb._executePiTool = async () => ({ passed: true });
+  wb._executePiTool = async () => ({
+    passed: true,
+    actionId: 'run_page_test:page:1:action:1',
+    argsHash: `sha256:${'b'.repeat(64)}`,
+    newDeckRevision: `sha256:${'c'.repeat(64)}`,
+  });
   wb._log = () => {};
   wb._startModelStatus = () => {};
   wb._finishModelStatus = () => {};
@@ -1283,6 +1503,9 @@ async function testPiWebSocketReturnsMatchingToolResult() {
   assert.deepEqual(Array.from(FakeWebSocket.last.protocols), ['lectureai.pi.v1', 'lectureai.auth.test-token']);
   assert.equal(sent[1].type, 'tool_result');
   assert.equal(sent[1].request_id, 'request-7');
+  assert.equal(sent[1].actionId, 'run_page_test:page:1:action:1');
+  assert.equal(sent[1].argsHash, `sha256:${'b'.repeat(64)}`);
+  assert.equal(sent[1].newDeckRevision, `sha256:${'c'.repeat(64)}`);
   assert.equal(sent[1].ok, true);
   context.WebSocket = OriginalWebSocket;
   wb._prepareHarnessTarget = originalPrepare;
@@ -1290,6 +1513,299 @@ async function testPiWebSocketReturnsMatchingToolResult() {
   wb._log = originalLog;
   wb._startModelStatus = originalStartStatus;
   wb._finishModelStatus = originalFinishStatus;
+}
+
+async function testNativeTaskWebSocketUsesStructuredReceipts() {
+  const OriginalWebSocket = context.WebSocket;
+  const originalConfig = wb._lecturePiConfig;
+  const originalRpc = wb._rpc;
+  const originalRefresh = wb._refreshContext;
+  const originalAppend = wb._appendAssistantMarkdown;
+  const originalLog = wb._log;
+  const originalLogAction = wb._logAction;
+  const originalFinishAction = wb._finishAction;
+  const originalLogResult = wb._logResult;
+  const originalSetBusy = wb._setBusy;
+  const originalComplete = wb._completeLectureAiTaskRun;
+  const sent = [];
+  const answers = [];
+  const revision = `sha256:${'a'.repeat(64)}`;
+  const hash = `sha256:${'b'.repeat(64)}`;
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    constructor(url, protocols) {
+      this.url = url;
+      this.protocols = protocols;
+      this.readyState = FakeWebSocket.CONNECTING;
+      FakeWebSocket.last = this;
+      setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen(); }, 0);
+    }
+    send(raw) {
+      const message = JSON.parse(raw);
+      sent.push(message);
+      if (message.type === 'start_task') {
+        setTimeout(() => this.onmessage({ data: JSON.stringify({
+          type: 'tool_call', ['request' + '_id']: 'native-request-1',
+          actionId: 'run_native_task_12345678:action:1', argsHash: hash,
+          expectedDeckRevision: revision, tool: 'validate_slide', args: { page: 2 },
+        }) }), 0);
+      } else if (message.type === 'tool_result') {
+        setTimeout(() => this.onmessage({ data: JSON.stringify({
+          type: 'task_complete', runId: 'run_native_task_12345678', summary: '目标页检查通过',
+        }) }), 0);
+      }
+    }
+    close() { this.readyState = 3; }
+  }
+  context.WebSocket = FakeWebSocket;
+  wb._lecturePiConfig = () => ({ url: 'wss://example.test/task', token: 'task-token' });
+  wb._rpc = async (type, payload) => {
+    assert.equal(type, 'execute-task-action');
+    assert.equal(payload.runId, 'run_native_task_12345678');
+    return {
+      ok: true,
+      actionId: payload.envelope.actionId,
+      argsHash: payload.envelope.argsHash,
+      newDeckRevision: `sha256:${'c'.repeat(64)}`,
+      result: { page: 2, passed: true, label: '第 2 页检查通过' },
+    };
+  };
+  wb._refreshContext = async () => {};
+  wb._appendAssistantMarkdown = text => answers.push(text);
+  wb._log = () => {};
+  wb._logAction = () => null;
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  wb._setBusy = () => {};
+  let completionValidation = null;
+  wb._completeLectureAiTaskRun = async (_plan, _pages, validation) => {
+    completionValidation = validation;
+    return { status: 'completed' };
+  };
+  wb.manifest = {
+    deckId: 'deck-native-test',
+    deckRevision: { deckHash: revision },
+    slides: [{ id: 's1', title: '封面', slideType: 'cover' }, { id: 's2', title: '内容', slideType: 'content' }],
+  };
+  const taskSpec = {
+    schemaVersion: 1,
+    runId: 'run_native_task_12345678',
+    intent: 'slide_edit', scope: 'page',
+    targets: { pages: [2], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+    executionStrategy: 'bounded_tool_loop', requiresDeckPlan: false,
+    userFacingGoal: '优化第 2 页', acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页面检查通过' }],
+    requiredCapabilities: ['slide.read'], confidence: 1, requiresClarification: false,
+  };
+  try {
+    await wb._runLectureAiNativeTask(taskSpec, '优化第 2 页');
+    assert.equal(sent[0].type, 'start_task');
+    assert.equal(sent[0].task_spec.runId, taskSpec.runId);
+    assert.equal(sent[0].task_context.deckRevision, revision);
+    assert.equal(sent[1].request_id, 'native-request-1');
+    assert.equal(sent[1].actionId, 'run_native_task_12345678:action:1');
+    assert.equal(sent[1].argsHash, hash);
+    assert.equal(sent[1].newDeckRevision, `sha256:${'c'.repeat(64)}`);
+    assert.equal(sent[1].ok, true);
+    assert.equal(completionValidation.passed, false, 'runtime prose alone is not authoritative validation evidence');
+    assert.match(answers.at(-1), /任务已完成/);
+  } finally {
+    context.WebSocket = OriginalWebSocket;
+    wb._lecturePiConfig = originalConfig;
+    wb._rpc = originalRpc;
+    wb._refreshContext = originalRefresh;
+    wb._appendAssistantMarkdown = originalAppend;
+    wb._log = originalLog;
+    wb._logAction = originalLogAction;
+    wb._finishAction = originalFinishAction;
+    wb._logResult = originalLogResult;
+    wb._setBusy = originalSetBusy;
+    wb._completeLectureAiTaskRun = originalComplete;
+    wb.busy = false;
+  }
+}
+
+async function testAgentTaskActionIsIdempotentAndRevisionSafe() {
+  const originalExecute = agent._executeAction;
+  const originalRevision = agent._taskDeckRevision;
+  agent._taskReceipts.clear();
+  agentContext.window.Settings._pptBuilder = pb;
+  let executions = 0;
+  let currentRevision = `sha256:${'a'.repeat(64)}`;
+  agent._executeAction = async () => { executions += 1; currentRevision = `sha256:${'c'.repeat(64)}`; return 'write_slide 已保存'; };
+  agent._taskDeckRevision = async () => currentRevision;
+  const action = { tool: 'write_slide', page: 2, html: '<html></html>' };
+  const envelope = {
+    actionId: 'run_agent_task_12345678:action:1',
+    argsHash: `sha256:${'b'.repeat(64)}`,
+    expectedDeckRevision: `sha256:${'a'.repeat(64)}`,
+  };
+  try {
+    const first = await agent._executeTaskAction({ runId: 'run_agent_task_12345678', action, envelope });
+    const replay = await agent._executeTaskAction({ runId: 'run_agent_task_12345678', action, envelope });
+    assert.equal(first.ok, true);
+    assert.equal(first.newDeckRevision, `sha256:${'c'.repeat(64)}`);
+    assert.equal(replay.replayed, true);
+    assert.equal(executions, 1, 'a replayed action must not write twice');
+    const conflict = await agent._executeTaskAction({
+      runId: 'run_agent_task_12345678', action,
+      envelope: { ...envelope, argsHash: `sha256:${'d'.repeat(64)}` },
+    });
+    assert.equal(conflict.error.code, 'PROTOCOL_ACTION_CONFLICT');
+    const stale = await agent._executeTaskAction({
+      runId: 'run_agent_task_12345678', action,
+      envelope: {
+        actionId: 'run_agent_task_12345678:action:2',
+        argsHash: `sha256:${'e'.repeat(64)}`,
+        expectedDeckRevision: `sha256:${'a'.repeat(64)}`,
+      },
+    });
+    assert.equal(stale.error.code, 'STALE_DECK');
+    assert.equal(executions, 1, 'a stale action must be rejected before writing');
+  } finally {
+    agent._executeAction = originalExecute;
+    agent._taskDeckRevision = originalRevision;
+    agent._taskReceipts.clear();
+  }
+}
+
+async function testAgentTaskActionPersistsBeforeWritingAndReplaysAfterRestart() {
+  const originalExecute = agent._executeAction;
+  const originalRevision = agent._taskDeckRevision;
+  const originalInvoke = agentContext.window.__TAURI__.core.invoke;
+  agent._taskReceipts.clear();
+  agentContext.window.Settings._pptBuilder = pb;
+  const events = [];
+  const receipts = new Map();
+  let executions = 0;
+  let currentRevision = `sha256:${'1'.repeat(64)}`;
+  agent._taskDeckRevision = async () => currentRevision;
+  agent._executeAction = async () => {
+    events.push('write');
+    executions += 1;
+    currentRevision = `sha256:${'3'.repeat(64)}`;
+    return 'write_slide 已保存';
+  };
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    if (command === 'ppte_task_journal_start') { events.push('start'); return { runId: payload.runId }; }
+    if (command === 'ppte_task_journal_receipt_get') return receipts.get(payload.actionId) || null;
+    if (command === 'ppte_task_journal_before_write') { events.push('backup'); return { ok: true }; }
+    if (command === 'ppte_task_journal_append_receipt') {
+      events.push(payload.receipt.status === 'pending' ? 'pending' : 'receipt');
+      receipts.set(payload.receipt.actionId, { ...payload.receipt });
+      return payload.receipt;
+    }
+    return null;
+  };
+  const runId = 'run_agent_disk_replay_12345678';
+  const action = { tool: 'write_slide', page: 2, html: '<html></html>' };
+  const envelope = {
+    actionId: `${runId}:action:1`,
+    argsHash: `sha256:${'2'.repeat(64)}`,
+    expectedDeckRevision: `sha256:${'1'.repeat(64)}`,
+  };
+  try {
+    const first = await agent._executeTaskAction({ runId, action, envelope });
+    assert.equal(first.ok, true);
+    assert.deepEqual(events, ['start', 'backup', 'pending', 'write', 'receipt']);
+    agent._taskReceipts.clear();
+    const replay = await agent._executeTaskAction({ runId, action, envelope });
+    assert.equal(replay.replayed, true, 'disk receipt must replay after the in-memory cache is lost');
+    assert.equal(executions, 1);
+
+    const secondId = `${runId}:action:2`;
+    receipts.set(secondId, {
+      actionId: secondId,
+      argsHash: `sha256:${'4'.repeat(64)}`,
+      expectedDeckRevision: `sha256:${'1'.repeat(64)}`,
+      tool: 'write_slide',
+      status: 'pending',
+    });
+    agent._taskReceipts.clear();
+    const pending = await agent._executeTaskAction({
+      runId, action,
+      envelope: { actionId: secondId, argsHash: `sha256:${'4'.repeat(64)}`, expectedDeckRevision: `sha256:${'1'.repeat(64)}` },
+    });
+    assert.equal(pending.error.code, 'STALE_DECK');
+    assert.equal(executions, 1, 'an unresolved disk receipt must not repeat a changed-deck write');
+  } finally {
+    agent._executeAction = originalExecute;
+    agent._taskDeckRevision = originalRevision;
+    agentContext.window.__TAURI__.core.invoke = originalInvoke;
+    agent._taskReceipts.clear();
+  }
+}
+
+async function testAgentTaskActionStopsBeforeWriteWhenPendingReceiptCannotPersist() {
+  const originalExecute = agent._executeAction;
+  const originalRevision = agent._taskDeckRevision;
+  const originalInvoke = agentContext.window.__TAURI__.core.invoke;
+  agent._taskReceipts.clear();
+  agentContext.window.Settings._pptBuilder = pb;
+  const events = [];
+  let executions = 0;
+  agent._taskDeckRevision = async () => `sha256:${'6'.repeat(64)}`;
+  agent._executeAction = async () => {
+    executions += 1;
+    return 'write_slide 已保存';
+  };
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    if (command === 'ppte_task_journal_start') { events.push('start'); return { runId: payload.runId }; }
+    if (command === 'ppte_task_journal_receipt_get') return null;
+    if (command === 'ppte_task_journal_before_write') { events.push('backup'); return { ok: true }; }
+    if (command === 'ppte_task_journal_append_receipt' && payload.receipt.status === 'pending') {
+      events.push('pending-failed');
+      throw new Error('disk full');
+    }
+    return null;
+  };
+  const runId = 'run_agent_receipt_failure_12345678';
+  try {
+    const result = await agent._executeTaskAction({
+      runId,
+      action: { tool: 'write_slide', page: 2, html: '<html></html>' },
+      envelope: {
+        actionId: `${runId}:action:1`,
+        argsHash: `sha256:${'7'.repeat(64)}`,
+        expectedDeckRevision: `sha256:${'6'.repeat(64)}`,
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, 'RECEIPT_UNAVAILABLE');
+    assert.deepEqual(events, ['start', 'backup', 'pending-failed']);
+    assert.equal(executions, 0, 'a failed pending receipt must stop before any local file mutation');
+  } finally {
+    agent._executeAction = originalExecute;
+    agent._taskDeckRevision = originalRevision;
+    agentContext.window.__TAURI__.core.invoke = originalInvoke;
+    agent._taskReceipts.clear();
+  }
+}
+
+function testTaskJournalPredictsRenderedInsertFile() {
+  const previousNextFile = agentContext.window.Settings._nextPpteSlideFile;
+  agentContext.window.Settings._nextPpteSlideFile = () => 'slide99.html';
+  try {
+    const paths = agent._taskTouchedPaths(pb, {
+      tool: 'render_template',
+      mode: 'insert',
+      after: 2,
+      template_id: 'content-test',
+      payload: { title: '新增页' },
+    });
+    assert.ok(paths.includes('manifest.json'));
+    assert.ok(paths.includes('slide99.html'), 'render_template insert must journal the predicted new slide file');
+
+    const implicitInsert = agent._taskTouchedPaths(pb, {
+      tool: 'render_template',
+      after: 2,
+      template_id: 'content-test',
+      payload: { title: '新增页' },
+    });
+    assert.ok(implicitInsert.includes('slide99.html'), 'render_template without a page defaults to insert mode');
+  } finally {
+    agentContext.window.Settings._nextPpteSlideFile = previousNextFile;
+  }
 }
 
 async function testAgentImportsSelectedExternalSkillFolder() {
@@ -1414,6 +1930,16 @@ async function testIconToolsSearchAndDownload() {
   assert.match(wb._systemPrompt(), /use_icon \{file\}/);
   assert.equal(wb._toolDisplayNames.search_icons, '检索图标库');
   assert.equal(wb._toolDisplayNames.use_icon, '下载图标');
+  assert.equal(wb._toolDisplayNames.read_outline, '读取课件大纲');
+  assert.equal(wb._toolDisplayNames.apply_role_template, '套用页面母版');
+  assert.equal(wb._toolDisplayNames.delete_slide, '删除页面');
+  assert.equal(wb._toolDisplayNames.load_skill, '加载助教技能');
+  assert.equal(wb._toolDisplayNames.read_skill_resource, '读取技能资料');
+  assert.equal(
+    wb._userFacingText('Pi Runtime write_slide tool_call'),
+    'LectureAI 写入页面内容 任务步骤',
+    'internal runtime and tool terms must not reach workbench output',
+  );
 }
 
 function testActionJsonTolerantParsing() {
@@ -1484,7 +2010,134 @@ async function testBareToolJsonTriggersProtocolCorrection() {
   assert.equal(wb.history.some(x => String(x.content).includes('[工具协议纠正]') && String(x.content).includes('裸 JSON')), true, 'protocol correction is fed back to the model');
 }
 
+async function testLectureAiTaskResolverRequest() {
+  const previousTauri = context.window.__TAURI__;
+  const previousManifest = wb.manifest;
+  const previousConfig = wb.selectedConfig;
+  let request = null;
+  const taskSpec = {
+    schemaVersion: 1,
+    runId: 'run_12345678-1234-1234-1234-123456789abc',
+    intent: 'slide_edit',
+    scope: 'page',
+    targets: { pages: [2], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+    executionStrategy: 'bounded_tool_loop',
+    requiresDeckPlan: false,
+    userFacingGoal: '优化第 2 页',
+    assumptions: [],
+    acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页面检查通过' }],
+    requiredCapabilities: ['slide.read', 'slide.write.transactional', 'deck.validate'],
+    confidence: 0.99,
+    requiresClarification: false,
+    taskSpecVersion: 'task-spec-v1',
+    promptVersion: 'task-resolver-v1',
+  };
+  context.window.__TAURI__ = { core: { invoke: async (command, args) => {
+    request = { command, args };
+    return { ok: true, status: 200, data: { taskSpec, status: 'resolved', missingCapabilities: [] } };
+  } } };
+  wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
+  wb.currentPage = 2;
+  wb.manifest = {
+    folderPath: '/private/local/deck',
+    deckRevision: { deckHash: `sha256:${'a'.repeat(64)}` },
+    slides: [{ id: 's1', title: '封面', slideType: 'cover' }, { id: 's2', title: '内容', slideType: 'content' }],
+    templateBlueprint: { isStarter: false, roles: [] },
+    deckPlan: { plan: null },
+  };
+  try {
+    const resolved = await wb._resolveLectureAiTask('@2 优化这一页');
+    assert.equal(resolved.runId, taskSpec.runId);
+    assert.equal(request.command, 'auth_api_request');
+    assert.equal(request.args.action, 'task_resolve');
+    assert.equal(request.args.payload.clientKind, 'desktop');
+    assert.equal(request.args.payload.deckRevision, `sha256:${'a'.repeat(64)}`);
+    assert.deepEqual(request.args.payload.mentions.pages, [2]);
+    assert.equal(JSON.stringify(request.args.payload).includes('/private/local/deck'), false, 'resolver payload must not contain local paths');
+    assert.ok(request.args.payload.capabilities.includes('task.receipts.v1'));
+  } finally {
+    context.window.__TAURI__ = previousTauri;
+    wb.manifest = previousManifest;
+    wb.selectedConfig = previousConfig;
+  }
+}
+
+async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
+  const previousJournalInvoke = wb._taskJournalInvoke;
+  const previousTaskApi = wb._taskApi;
+  const previousRender = wb._renderTaskCard;
+  const previousLoad = wb._loadTaskJournal;
+  const previousLog = wb._log;
+  const previousConfirm = context.window.confirm;
+  const previousTauri = context.window.__TAURI__;
+  const previousManifest = wb.manifest;
+  const previousDeckPath = wb._deckPath;
+  const previousRun = wb._taskCardRun;
+  const previousSpec = wb._taskCardSpec;
+  const calls = [];
+  const run = {
+    runId: 'run_revert_compensation_12345678',
+    status: 'reverted',
+    currentDeckRevision: `sha256:${'b'.repeat(64)}`,
+    serverSync: { status: 'pending', action: 'revert', attempts: 0, restoredDeckRevision: `sha256:${'b'.repeat(64)}` },
+  };
+  try {
+    wb._deckPath = '/tmp/task-recovery';
+    context.window.__TAURI__ = { core: { invoke: async () => null } };
+    wb.manifest = { deckPlan: {} };
+    wb._taskJournalInvoke = async (command, payload = {}) => {
+      calls.push({ command, payload });
+      if (command === 'ppte_task_journal_list') return [{
+        runId: 'run_resume_local_12345678', status: 'paused', userInstruction: '继续处理',
+        taskSpec: { runId: 'run_resume_local_12345678', intent: 'deck_rewrite', userFacingGoal: '重做课件' },
+        plan: { taskSpecRef: { runId: 'run_resume_local_12345678' }, slides: [{ page: 1 }] },
+      }];
+      if (command === 'ppte_task_journal_clear') return { removed: [{ runId: 'run_old_12345678' }] };
+      return { ...run, ...(payload.patch || {}) };
+    };
+    let rendered = null;
+    wb._renderTaskCard = (value, spec) => { rendered = { value, spec }; wb._taskCardRun = value; };
+    await wb._loadTaskJournal();
+    assert.equal(rendered.spec.intent, 'deck_rewrite', 'local TaskSpec is restored before contacting the server');
+    assert.equal(wb.manifest.deckPlan.plan.slides.length, 1, 'the task plan is restored with the journal');
+
+    calls.length = 0;
+    wb._taskApi = async (action, payload) => {
+      calls.push({ action, payload });
+      return { ok: true, data: { status: 'reverted' } };
+    };
+    const synced = await wb._retryPendingTaskSync(run);
+    assert.equal(synced, true, 'a pending local revert is compensated automatically');
+    assert.ok(calls.some(item => item.action === 'task_revert'), 'the idempotent server revert endpoint is retried');
+    assert.ok(calls.some(item => item.command === 'ppte_task_journal_update' && item.payload.patch.serverSync.status === 'synced'), 'the durable sync marker is cleared after success');
+
+    calls.length = 0;
+    context.window.confirm = () => true;
+    wb._taskCardRun = { runId: 'run_finished_12345678', status: 'completed' };
+    wb._log = () => {};
+    wb._loadTaskJournal = async () => {};
+    await wb._handleTaskCardAction('clear-history');
+    assert.ok(calls.some(item => item.command === 'ppte_task_journal_clear' && item.payload.keepRecent === 0), 'history cleanup only runs after explicit user action');
+  } finally {
+    for (const timer of wb._taskSyncTimers.values()) clearTimeout(timer);
+    wb._taskSyncTimers.clear();
+    wb._taskJournalInvoke = previousJournalInvoke;
+    wb._taskApi = previousTaskApi;
+    wb._renderTaskCard = previousRender;
+    wb._loadTaskJournal = previousLoad;
+    wb._log = previousLog;
+    context.window.confirm = previousConfirm;
+    context.window.__TAURI__ = previousTauri;
+    wb.manifest = previousManifest;
+    wb._deckPath = previousDeckPath;
+    wb._taskCardRun = previousRun;
+    wb._taskCardSpec = previousSpec;
+  }
+}
+
 (async () => {
+  await testLectureAiTaskResolverRequest();
+  await testTaskJournalRecoveryCleanupAndRevertCompensation();
   await testLectureAiRetriesOneTransientUpstreamFailure();
   await testInputUiBindsWithoutTauriEvents();
   await testExternalSkillImportRefreshesCatalog();
@@ -1493,6 +2146,8 @@ async function testBareToolJsonTriggersProtocolCorrection() {
   await testTemplateAwareInsertKeepsFinishLast();
   await testStarterDeckExpandsToExactlyFifteenPages();
   await testFinalizeDeckRemovesOnlyUnplannedStarterPages();
+  await testNativeDeleteSlideIsManifestOnlyAndPlanBound();
+  testStructuredTaskReceiptDetails();
   await testCancelledSaveRollsBackAgentMutation();
   await testWorkbenchStopsAfterDiskSaveFailure();
   await testLongDeckJobRunsToCompletion();
@@ -1506,7 +2161,14 @@ async function testBareToolJsonTriggersProtocolCorrection() {
   await testPrivateTemplateRenderUsesServerHtmlAndSafeSave();
   await testPageHarnessResetsMessagesBetweenSlides();
   await testHarnessFinalizesBeforeDeckValidation();
+  await testHarnessCompletionWaitsForServerAuthority();
+  await testHarnessValidationFailureBecomesRepairable();
   await testPiWebSocketReturnsMatchingToolResult();
+  await testNativeTaskWebSocketUsesStructuredReceipts();
+  await testAgentTaskActionIsIdempotentAndRevisionSafe();
+  await testAgentTaskActionPersistsBeforeWritingAndReplaysAfterRestart();
+  await testAgentTaskActionStopsBeforeWriteWhenPendingReceiptCannotPersist();
+  testTaskJournalPredictsRenderedInsertFile();
   await testAgentImportsSelectedExternalSkillFolder();
   testStreamingBubbleRendersFinalAnswerProgressively();
   testActionJsonTolerantParsing();

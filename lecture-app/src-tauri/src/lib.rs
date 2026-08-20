@@ -3,7 +3,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -236,8 +237,38 @@ fn auth_api_spec(action: &str) -> Result<(reqwest::Method, &'static str), String
         "login" => Ok((reqwest::Method::POST, "/api/web/auth/login")),
         "register" => Ok((reqwest::Method::POST, "/api/web/auth/register")),
         "me" => Ok((reqwest::Method::GET, "/api/web/auth/me")),
+        "features" => Ok((reqwest::Method::GET, "/api/web/features")),
+        "task_resolve" => Ok((reqwest::Method::POST, "/api/web/ai/tasks/resolve")),
         _ => Err("不支持的认证操作".to_string()),
     }
+}
+
+fn task_api_path(action: &str, payload: Option<&serde_json::Value>) -> Result<(reqwest::Method, String), String> {
+    let run_id = payload
+        .and_then(|value| value.get("runId"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if run_id.len() < 12
+        || run_id.len() > 124
+        || !run_id.starts_with("run_")
+        || !run_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err("任务标识无效".to_string());
+    }
+    let suffix = match action {
+        "task_get" => "",
+        "task_resume" => "/resume",
+        "task_cancel" => "/cancel",
+        "task_complete" => "/complete",
+        "task_stage_review" => "/stage-review",
+        "task_revert" => "/revert",
+        "task_action_start" => "/actions/start",
+        "task_action_finish" => "/actions/finish",
+        "task_action_reconcile" => "/actions/reconcile",
+        _ => return Err("不支持的任务操作".to_string()),
+    };
+    let method = if action == "task_get" { reqwest::Method::GET } else { reqwest::Method::POST };
+    Ok((method, format!("/api/web/ai/tasks/{}{}", run_id, suffix)))
 }
 
 fn get_config_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -307,16 +338,24 @@ async fn auth_api_request(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("https://design.hz-study-system.com")
         .trim_end_matches('/');
-    let (method, path) = auth_api_spec(&action)?;
+    let (method, path) = if action.starts_with("task_") && action != "task_resolve" {
+        task_api_path(&action, payload.as_ref())?
+    } else {
+        let (method, path) = auth_api_spec(&action)?;
+        (method, path.to_string())
+    };
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("无法创建认证请求：{}", e))?;
+    let is_get = method == reqwest::Method::GET;
     let mut request = client.request(method, format!("{}{}", server, path));
 
-    if let Some(value) = payload {
-        request = request.json(&value);
+    if !is_get {
+        if let Some(value) = payload {
+            request = request.json(&value);
+        }
     }
     if let Some(value) = token.filter(|value| !value.trim().is_empty()) {
         request = request.bearer_auth(value);
@@ -358,6 +397,35 @@ mod auth_api_tests {
             auth_api_spec("captcha").unwrap(),
             (reqwest::Method::GET, "/api/web/auth/captcha")
         );
+        assert_eq!(
+            auth_api_spec("task_resolve").unwrap(),
+            (reqwest::Method::POST, "/api/web/ai/tasks/resolve")
+        );
+        assert_eq!(
+            auth_api_spec("features").unwrap(),
+            (reqwest::Method::GET, "/api/web/features")
+        );
+        assert_eq!(
+            task_api_path("task_complete", Some(&serde_json::json!({"runId": "run_12345678"}))).unwrap(),
+            (reqwest::Method::POST, "/api/web/ai/tasks/run_12345678/complete".to_string())
+        );
+        assert_eq!(
+            task_api_path("task_stage_review", Some(&serde_json::json!({"runId": "run_12345678"}))).unwrap(),
+            (reqwest::Method::POST, "/api/web/ai/tasks/run_12345678/stage-review".to_string())
+        );
+        assert_eq!(
+            task_api_path("task_action_start", Some(&serde_json::json!({"runId": "run_12345678"}))).unwrap(),
+            (reqwest::Method::POST, "/api/web/ai/tasks/run_12345678/actions/start".to_string())
+        );
+        assert_eq!(
+            task_api_path("task_action_finish", Some(&serde_json::json!({"runId": "run_12345678"}))).unwrap(),
+            (reqwest::Method::POST, "/api/web/ai/tasks/run_12345678/actions/finish".to_string())
+        );
+        assert_eq!(
+            task_api_path("task_action_reconcile", Some(&serde_json::json!({"runId": "run_12345678"}))).unwrap(),
+            (reqwest::Method::POST, "/api/web/ai/tasks/run_12345678/actions/reconcile".to_string())
+        );
+        assert!(task_api_path("task_complete", Some(&serde_json::json!({"runId": "../../etc"}))).is_err());
         assert!(auth_api_spec("https://example.com").is_err());
     }
 }
@@ -1101,6 +1169,11 @@ fn ppte_agent_revision(folder_path: &str) -> Result<serde_json::Value, String> {
         "slideCount": slide_files.len(),
         "slideFiles": slide_files,
     }))
+}
+
+#[tauri::command]
+fn ppte_agent_revision_get(folder_path: String) -> Result<serde_json::Value, String> {
+    ppte_agent_revision(&folder_path)
 }
 
 fn ppte_agent_plan_path(folder_path: &str) -> Result<PathBuf, String> {
@@ -2788,6 +2861,812 @@ fn ppte_safe_destination(root: &Path, relative: &Path) -> Result<PathBuf, String
         }
     }
     Ok(current)
+}
+
+// Task journals are deliberately kept beside the deck. They contain replay
+// metadata plus first-write file backups for recovery, but never model
+// transcripts or unrelated deck content.
+fn valid_task_run_id(run_id: &str) -> bool {
+    run_id.len() >= 12
+        && run_id.len() <= 124
+        && run_id.starts_with("run_")
+        && run_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+fn task_journal_dir(folder_path: &str, run_id: &str) -> Result<PathBuf, String> {
+    if !valid_task_run_id(run_id) {
+        return Err("任务标识无效".to_string());
+    }
+    let root = canonical_ppte_root(folder_path)?;
+    let relative = PathBuf::from(".lectureai").join("task-runs").join(run_id);
+    ppte_safe_destination(&root, &relative)
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| "无法确定任务记录目录".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("无法创建任务记录目录：{}", e))?;
+    let temporary = parent.join(format!(".{}.tmp-{}", path.file_name().and_then(|v| v.to_str()).unwrap_or("journal"), uuid::Uuid::new_v4()));
+    fs::write(&temporary, bytes).map_err(|e| format!("无法写入任务记录：{}", e))?;
+    let backup = parent.join(format!(".{}.bak-{}", path.file_name().and_then(|v| v.to_str()).unwrap_or("journal"), uuid::Uuid::new_v4()));
+    if path.exists() {
+        fs::rename(path, &backup).map_err(|e| {
+            let _ = fs::remove_file(&temporary);
+            format!("无法备份旧任务记录：{}", e)
+        })?;
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        if backup.exists() { let _ = fs::rename(&backup, path); }
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("无法提交任务记录：{}", error));
+    }
+    let _ = fs::remove_file(&backup);
+    Ok(())
+}
+
+fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| format!("任务记录格式错误：{}", e))?;
+    atomic_write_bytes(path, &(bytes.into_iter().chain(std::iter::once(b'\n')).collect::<Vec<_>>()))
+}
+
+fn journal_read_json(path: &Path) -> Result<serde_json::Value, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("无法读取任务记录：{}", e))?;
+    serde_json::from_str(&text).map_err(|e| format!("任务记录损坏：{}", e))
+}
+
+fn journal_run_path(dir: &Path) -> PathBuf { dir.join("run.json") }
+fn journal_index_path(dir: &Path) -> PathBuf { dir.join("before").join("index.json") }
+
+fn journal_safe_text(value: &str, limit: usize) -> String {
+    let mut text = value.replace('\n', " ").replace('\r', " ");
+    for marker in ["/Users/", "/home/", "/var/", "/tmp/", "C:\\", "D:\\"] {
+        if let Some(index) = text.find(marker) {
+            text.replace_range(index.., "[已隐藏]");
+        }
+    }
+    text.chars().take(limit).collect()
+}
+
+fn journal_compact_value(value: &serde_json::Value, depth: usize, budget: &mut usize) -> serde_json::Value {
+    if *budget == 0 || depth > 7 { return serde_json::Value::Null; }
+    match value {
+        serde_json::Value::Null => serde_json::Value::Null,
+        serde_json::Value::Bool(value) => serde_json::Value::Bool(*value),
+        serde_json::Value::Number(value) => serde_json::Value::Number(value.clone()),
+        serde_json::Value::String(value) => {
+            let safe = journal_safe_text(value, 1200);
+            *budget = budget.saturating_sub(safe.len());
+            serde_json::Value::String(safe)
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values.iter().take(80).map(|item| journal_compact_value(item, depth + 1, budget)).collect(),
+        ),
+        serde_json::Value::Object(values) => {
+            let mut output = serde_json::Map::new();
+            for (key, item) in values.iter().take(100) {
+                let normalized = key.to_ascii_lowercase();
+                if ["html", "content", "payload", "raw", "sourcehtml", "screenshot", "transcript", "absolute_path", "folderpath"]
+                    .iter().any(|blocked| normalized == *blocked)
+                    || normalized.ends_with("html")
+                    || normalized.ends_with("path")
+                { continue; }
+                output.insert(journal_safe_text(key, 100), journal_compact_value(item, depth + 1, budget));
+                if *budget == 0 { break; }
+            }
+            serde_json::Value::Object(output)
+        }
+    }
+}
+
+fn journal_safe_snapshot(value: &serde_json::Value) -> serde_json::Value {
+    let mut budget = 900_000usize;
+    journal_compact_value(value, 0, &mut budget)
+}
+
+fn journal_safe_receipt(receipt: &serde_json::Value) -> serde_json::Value {
+    let mut output = serde_json::Map::new();
+    let object = receipt.as_object().cloned().unwrap_or_default();
+    for key in ["ok", "replayed"] {
+        if let Some(value) = object.get(key).and_then(|value| value.as_bool()) {
+            output.insert(key.to_string(), serde_json::json!(value));
+        }
+    }
+    for key in ["actionId", "argsHash", "expectedDeckRevision", "newDeckRevision", "tool", "status", "errorCode"] {
+        if let Some(value) = object.get(key).and_then(|value| value.as_str()) {
+            output.insert(key.to_string(), serde_json::json!(journal_safe_text(value, 180)));
+        }
+    }
+    if let Some(error) = object.get("error").and_then(|value| value.as_object()) {
+        let mut safe = serde_json::Map::new();
+        for key in ["code", "category", "userMessage"] {
+            if let Some(value) = error.get(key).and_then(|value| value.as_str()) {
+                safe.insert(key.to_string(), serde_json::json!(journal_safe_text(value, 500)));
+            }
+        }
+        if let Some(value) = error.get("retryable").and_then(|value| value.as_bool()) {
+            safe.insert("retryable".to_string(), serde_json::json!(value));
+        }
+        output.insert("error".to_string(), serde_json::Value::Object(safe));
+    }
+    if let Some(result) = object.get("result").and_then(|value| value.as_object()) {
+        let mut safe = serde_json::Map::new();
+        for key in ["page", "index", "passed", "saved", "inserted", "reordered", "count", "mode"] {
+            if let Some(value) = result.get(key) {
+                if value.is_boolean() || value.is_number() { safe.insert(key.to_string(), value.clone()); }
+            }
+        }
+        for key in ["label", "message"] {
+            if let Some(value) = result.get(key).and_then(|value| value.as_str()) {
+                safe.insert(key.to_string(), serde_json::json!(journal_safe_text(value, 300)));
+            }
+        }
+        for key in ["metrics", "diagnostics"] {
+            if let Some(value) = result.get(key).and_then(|value| value.as_object()) {
+                let mut compact = serde_json::Map::new();
+                for (name, item) in value {
+                    if item.is_boolean() || item.is_number() || item.is_null() {
+                        compact.insert(name.chars().take(80).collect(), item.clone());
+                    }
+                }
+                safe.insert(key.to_string(), serde_json::Value::Object(compact));
+            }
+        }
+        output.insert("result".to_string(), serde_json::Value::Object(safe));
+    }
+    output.insert("recordedAt".to_string(), serde_json::json!(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()));
+    serde_json::Value::Object(output)
+}
+
+fn journal_read_index(dir: &Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let path = journal_index_path(dir);
+    if !path.exists() { return Ok(serde_json::Map::new()); }
+    let value = journal_read_json(&path)?;
+    Ok(value.get("files").and_then(|value| value.as_object()).cloned().unwrap_or_default())
+}
+
+fn journal_write_index(dir: &Path, files: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let path = journal_index_path(dir);
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+    atomic_write_json(&path, &serde_json::json!({"schemaVersion": 1, "files": files}))
+}
+
+fn journal_commit_staged_backups<F>(
+    dir: &Path,
+    files: serde_json::Map<String, serde_json::Value>,
+    staged_files: &[(String, PathBuf)],
+    write_index: F,
+) -> Result<(), String>
+where
+    F: FnOnce(serde_json::Map<String, serde_json::Value>) -> Result<(), String>,
+{
+    let mut committed: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let result: Result<(), String> = (|| {
+        for (name, staged) in staged_files {
+            let backup = dir.join("before").join("files").join(name);
+            if let Some(parent) = backup.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+            fs::rename(staged, &backup).map_err(|e| format!("无法提交 {} 的恢复副本：{}", name, e))?;
+            committed.push((backup, staged.clone()));
+        }
+        write_index(files)
+    })();
+    if result.is_err() {
+        // The index is the commit point. Restore staged copies on failure so
+        // the caller can remove the whole staging directory without leaving
+        // an unindexed backup behind.
+        for (backup, staged) in committed.iter().rev() {
+            if backup.exists() {
+                if let Some(parent) = staged.parent() { let _ = fs::create_dir_all(parent); }
+                let _ = fs::rename(backup, staged);
+            }
+        }
+    }
+    result
+}
+
+fn journal_update_run_file(dir: &Path, patch: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let path = journal_run_path(dir);
+    let mut run = if path.exists() { journal_read_json(&path)? } else { serde_json::json!({}) };
+    let object = run.as_object_mut().ok_or_else(|| "任务记录必须是对象".to_string())?;
+    if let Some(patch_object) = patch.as_object() {
+        for key in [
+            "status", "nextPage", "currentDeckRevision", "lastEventSeq", "completedPages", "totalPages",
+            "errorCode", "errorStage", "error", "validation", "failedPages", "currentLabel", "userInstruction",
+            "taskSpec", "plan", "summaries", "stageReviews", "piSessionId", "piDeckId", "serverSync",
+            "revertAvailable", "provider", "model", "templateCatalogVersion", "clientVersion", "runtimeVersion",
+        ] {
+            if let Some(value) = patch_object.get(key) {
+                let safe = match key {
+                    "userInstruction" | "currentLabel" | "piSessionId" | "piDeckId" | "provider" | "model"
+                    | "templateCatalogVersion" | "clientVersion" | "runtimeVersion" => {
+                        value.as_str().map(|item| serde_json::json!(journal_safe_text(item, 500))).unwrap_or(serde_json::Value::Null)
+                    }
+                    "taskSpec" | "plan" | "summaries" | "stageReviews" | "serverSync" | "error" | "validation" => journal_safe_snapshot(value),
+                    _ => journal_safe_snapshot(value),
+                };
+                object.insert(key.to_string(), safe);
+            }
+        }
+    }
+    object.insert("updatedAt".to_string(), serde_json::json!(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()));
+    atomic_write_json(&path, &run)?;
+    Ok(run)
+}
+
+fn task_journal_retention(root: &Path) {
+    let task_root = root.join(".lectureai").join("task-runs");
+    let Ok(entries) = fs::read_dir(&task_root) else { return; };
+    let mut candidates: Vec<(u64, u64, PathBuf, String)> = Vec::new();
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() { continue; }
+        let size = journal_dir_size(&dir);
+        total = total.saturating_add(size);
+        let run = journal_run_path(&dir);
+        let Ok(value) = journal_read_json(&run) else { continue; };
+        let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let updated = value.get("updatedAt").and_then(|v| v.as_u64()).unwrap_or(0);
+        if matches!(status.as_str(), "completed" | "reverted") {
+            candidates.push((updated, size, dir, status));
+        }
+    }
+    candidates.sort_by_key(|item| item.0);
+    let mut removable = candidates.len().saturating_sub(5);
+    for (_, size, dir, _) in candidates {
+        if removable == 0 && total <= 500 * 1024 * 1024 { break; }
+        if removable > 0 || total > 500 * 1024 * 1024 {
+            let _ = fs::remove_dir_all(&dir);
+            total = total.saturating_sub(size);
+            removable = removable.saturating_sub(1);
+        }
+    }
+}
+
+fn journal_dir_size(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else { return 0; };
+    entries.flatten().map(|entry| {
+        let item = entry.path();
+        if item.is_dir() { journal_dir_size(&item) } else { entry.metadata().map(|m| m.len()).unwrap_or(0) }
+    }).sum()
+}
+
+type RevertInstall = (PathBuf, Option<PathBuf>, bool);
+
+fn restore_revert_install(installed: &[RevertInstall]) -> Result<(), String> {
+    for (destination, live_backup, installed_file) in installed.iter().rev() {
+        if *installed_file && fs::symlink_metadata(destination).is_ok() {
+            fs::remove_file(destination)
+                .map_err(|e| format!("无法移除撤销期间安装的文件 {}：{}", destination.display(), e))?;
+        }
+        if let Some(backup) = live_backup {
+            if !backup.is_file() {
+                return Err(format!("撤销事务中的当前文件副本缺失：{}", backup.display()));
+            }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("无法恢复文件目录：{}", e))?;
+            }
+            fs::rename(backup, destination)
+                .map_err(|e| format!("无法恢复撤销前的文件 {}：{}", destination.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+fn finalize_revert_transaction<F>(
+    transaction: &Path,
+    installed: &[RevertInstall],
+    update_run: F,
+) -> Result<serde_json::Value, String>
+where
+    F: FnOnce() -> Result<serde_json::Value, String>,
+{
+    match update_run() {
+        Ok(updated) => {
+            let _ = fs::remove_dir_all(transaction);
+            Ok(updated)
+        }
+        Err(error) => {
+            let rollback = restore_revert_install(installed);
+            let _ = fs::remove_dir_all(transaction);
+            match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "{}；恢复撤销前版本失败：{}",
+                    error, rollback_error
+                )),
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn ppte_task_journal_start(folder_path: String, run_id: String, task_spec: serde_json::Value, deck_revision: Option<String>) -> Result<serde_json::Value, String> {
+    let dir = task_journal_dir(&folder_path, &run_id)?;
+    fs::create_dir_all(dir.join("before").join("files")).map_err(|e| format!("无法建立任务恢复目录：{}", e))?;
+    let path = journal_run_path(&dir);
+    if path.exists() {
+        return journal_read_json(&path);
+    }
+    let spec = task_spec.as_object().cloned().unwrap_or_default();
+    let safe = serde_json::json!({
+        "schemaVersion": 1,
+        "runId": run_id,
+        "intent": spec.get("intent").and_then(|v| v.as_str()).unwrap_or("answer"),
+        "scope": spec.get("scope").and_then(|v| v.as_str()).unwrap_or("none"),
+        "executionStrategy": spec.get("executionStrategy").and_then(|v| v.as_str()).unwrap_or("direct_reply"),
+        "userFacingGoal": journal_safe_text(spec.get("userFacingGoal").and_then(|v| v.as_str()).unwrap_or("LectureAI 任务"), 300),
+        "acceptanceCriteria": spec.get("acceptanceCriteria").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "taskSpec": journal_safe_snapshot(&task_spec),
+        "status": "created",
+        "revertAvailable": true,
+        "serverSync": {"status": "synced", "attempts": 0},
+        "currentDeckRevision": deck_revision,
+        "completedPages": [],
+        "totalPages": 0,
+        "lastEventSeq": 0,
+        "createdAt": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+        "updatedAt": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+    });
+    atomic_write_json(&path, &safe)?;
+    task_journal_retention(&canonical_ppte_root(&folder_path)?);
+    Ok(safe)
+}
+
+#[tauri::command]
+fn ppte_task_journal_before_write(folder_path: String, run_id: String, paths: Vec<String>) -> Result<serde_json::Value, String> {
+    let root = canonical_ppte_root(&folder_path)?;
+    let dir = task_journal_dir(&folder_path, &run_id)?;
+    if !journal_run_path(&dir).exists() { return Err("任务恢复点尚未建立".to_string()); }
+    task_journal_retention(&root);
+    let mut files = journal_read_index(&dir)?;
+    let pending_bytes = paths.iter().filter_map(|raw| {
+        let relative = ppte_safe_relative_path(raw).ok()?;
+        let name = relative.to_string_lossy().replace('\\', "/");
+        if files.contains_key(&name) { return None; }
+        fs::metadata(ppte_safe_destination(&root, &relative).ok()?).ok().map(|metadata| metadata.len())
+    }).sum::<u64>();
+    let task_root = root.join(".lectureai").join("task-runs");
+    if journal_dir_size(&task_root).saturating_add(pending_bytes) > 500 * 1024 * 1024 {
+        return Err("任务恢复副本将超过 500MB 上限，LectureAI 未写入".to_string());
+    }
+    let stage = dir.join(format!(".before-stage-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&stage).map_err(|e| format!("无法建立恢复副本暂存区：{}", e))?;
+    let mut new_files: Vec<(String, PathBuf)> = Vec::new();
+    let result: Result<(), String> = (|| {
+        for raw in paths {
+            let relative = ppte_safe_relative_path(&raw)?;
+            let name = relative.to_string_lossy().replace('\\', "/");
+            if files.contains_key(&name) { continue; }
+            let source = ppte_safe_destination(&root, &relative)?;
+            if source.is_file() {
+                let staged = stage.join(&relative);
+                if let Some(parent) = staged.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+                fs::copy(&source, &staged).map_err(|e| format!("无法建立 {} 的恢复副本：{}", name, e))?;
+                new_files.push((name.clone(), staged));
+                files.insert(name, serde_json::json!({"exists": true, "backup": format!("files/{}", relative.to_string_lossy().replace('\\', "/"))}));
+            } else {
+                files.insert(name, serde_json::json!({"exists": false}));
+            }
+        }
+        journal_commit_staged_backups(&dir, files, &new_files, |files| journal_write_index(&dir, files))
+    })();
+    let _ = fs::remove_dir_all(&stage);
+    result?;
+    Ok(serde_json::json!({"ok": true}))
+}
+
+#[tauri::command]
+fn ppte_task_journal_receipt_get(folder_path: String, run_id: String, action_id: String) -> Result<Option<serde_json::Value>, String> {
+    let dir = task_journal_dir(&folder_path, &run_id)?;
+    let path = dir.join("receipts.jsonl");
+    if !path.exists() { return Ok(None); }
+    let text = fs::read_to_string(path).map_err(|e| format!("无法读取任务回执：{}", e))?;
+    for line in text.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
+        if value.get("actionId").and_then(|v| v.as_str()) == Some(action_id.as_str()) { return Ok(Some(value)); }
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+fn ppte_task_journal_append_receipt(folder_path: String, run_id: String, receipt: serde_json::Value) -> Result<serde_json::Value, String> {
+    let dir = task_journal_dir(&folder_path, &run_id)?;
+    if !journal_run_path(&dir).exists() { return Err("任务恢复点尚未建立".to_string()); }
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe = journal_safe_receipt(&receipt);
+    let mut file = OpenOptions::new().create(true).append(true).open(dir.join("receipts.jsonl"))
+        .map_err(|e| format!("无法打开任务回执日志：{}", e))?;
+    let line = serde_json::to_string(&safe).map_err(|e| e.to_string())? + "\n";
+    file.write_all(line.as_bytes()).map_err(|e| format!("无法写入任务回执：{}", e))?;
+    file.sync_data().map_err(|e| format!("无法确认任务回执已落盘：{}", e))?;
+    let status = if safe.get("ok").and_then(|v| v.as_bool()) == Some(false) { "failed" } else { "running" };
+    let mut patch = serde_json::json!({"status": status});
+    if let Some(revision) = safe.get("newDeckRevision").and_then(|v| v.as_str()) {
+        patch["currentDeckRevision"] = serde_json::json!(revision);
+    }
+    journal_update_run_file(&dir, &patch)?;
+    Ok(safe)
+}
+
+#[tauri::command]
+fn ppte_task_journal_update(folder_path: String, run_id: String, patch: serde_json::Value) -> Result<serde_json::Value, String> {
+    let dir = task_journal_dir(&folder_path, &run_id)?;
+    if !journal_run_path(&dir).exists() { return Err("任务记录不存在".to_string()); }
+    let result = journal_update_run_file(&dir, &patch)?;
+    if matches!(patch.get("status").and_then(|v| v.as_str()), Some("completed" | "failed" | "cancelled" | "reverted")) {
+        if let Ok(root) = canonical_ppte_root(&folder_path) { task_journal_retention(&root); }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn ppte_task_journal_read(folder_path: String, run_id: String) -> Result<serde_json::Value, String> {
+    let dir = task_journal_dir(&folder_path, &run_id)?;
+    let run = journal_read_json(&journal_run_path(&dir))?;
+    let receipts = fs::read_to_string(dir.join("receipts.jsonl")).unwrap_or_default().lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()).collect::<Vec<_>>();
+    Ok(serde_json::json!({"run": run, "receipts": receipts}))
+}
+
+#[tauri::command]
+fn ppte_task_journal_list(folder_path: String) -> Result<Vec<serde_json::Value>, String> {
+    let root = canonical_ppte_root(&folder_path)?;
+    let task_root = root.join(".lectureai").join("task-runs");
+    let mut result = Vec::new();
+    if let Ok(entries) = fs::read_dir(task_root) {
+        for entry in entries.flatten() {
+            let path = entry.path().join("run.json");
+            if path.is_file() { if let Ok(value) = journal_read_json(&path) { result.push(value); } }
+        }
+    }
+    result.sort_by(|a, b| b.get("updatedAt").and_then(|v| v.as_u64()).cmp(&a.get("updatedAt").and_then(|v| v.as_u64())));
+    Ok(result)
+}
+
+#[tauri::command]
+fn ppte_task_journal_clear(folder_path: String, keep_recent: Option<usize>) -> Result<serde_json::Value, String> {
+    let root = canonical_ppte_root(&folder_path)?;
+    let task_root = root.join(".lectureai").join("task-runs");
+    if !task_root.exists() { return Ok(serde_json::json!({"removed": [], "freedBytes": 0, "preservedActive": 0})); }
+    let keep = keep_recent.unwrap_or(5).min(50);
+    let mut terminal: Vec<(u64, u64, PathBuf, String)> = Vec::new();
+    let mut preserved_active = 0usize;
+    for entry in fs::read_dir(&task_root).map_err(|e| format!("无法读取助教任务历史：{}", e))?.flatten() {
+        let dir = entry.path();
+        let metadata = fs::symlink_metadata(&dir).map_err(|e| format!("无法检查任务历史：{}", e))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() { continue; }
+        let path = journal_run_path(&dir);
+        let Ok(value) = journal_read_json(&path) else { continue; };
+        let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "reverted") {
+            let updated = value.get("updatedAt").and_then(|v| v.as_u64()).unwrap_or(0);
+            terminal.push((updated, journal_dir_size(&dir), dir, status));
+        } else {
+            preserved_active += 1;
+        }
+    }
+    terminal.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut removed = Vec::new();
+    for (index, (_, size, dir, status)) in terminal.into_iter().enumerate() {
+        // Keep the newest five recoverable journals. Reverted journals no
+        // longer have a local undo action and can be removed explicitly.
+        if index < keep && status != "reverted" { continue; }
+        let run_id = dir.file_name().and_then(|v| v.to_str()).unwrap_or("").to_string();
+        fs::remove_dir_all(&dir).map_err(|e| format!("无法清理任务 {}：{}", run_id, e))?;
+        removed.push(serde_json::json!({"runId": run_id, "status": status, "bytes": size}));
+    }
+    let freed = removed.iter().filter_map(|item| item.get("bytes").and_then(|v| v.as_u64())).sum::<u64>();
+    Ok(serde_json::json!({"removed": removed, "freedBytes": freed, "preservedActive": preserved_active}))
+}
+
+#[tauri::command]
+fn ppte_task_journal_revert(folder_path: String, run_id: String, expected_deck_revision: Option<String>) -> Result<serde_json::Value, String> {
+    let root = canonical_ppte_root(&folder_path)?;
+    let dir = task_journal_dir(&folder_path, &run_id)?;
+    let run = journal_read_json(&journal_run_path(&dir))?;
+    let current = ppte_agent_revision(&folder_path)?.get("deckHash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let expected = expected_deck_revision.or_else(|| run.get("currentDeckRevision").and_then(|v| v.as_str()).map(str::to_string));
+    if let Some(expected) = expected.filter(|v| !v.is_empty()) {
+        if expected != current { return Err("TASK_REVERT_CONFLICT:课件在任务后又发生了修改，未覆盖当前内容".to_string()); }
+    }
+    let files = journal_read_index(&dir)?;
+    let transaction = root.join(format!(".lectureai-revert-{}", uuid::Uuid::new_v4()));
+    let staged = transaction.join("staged");
+    let live_backups = transaction.join("live");
+    fs::create_dir_all(&staged).map_err(|e| format!("无法准备任务撤销：{}", e))?;
+    let mut entries: Vec<(String, PathBuf, Option<PathBuf>)> = Vec::new();
+    for (name, info) in files {
+        let relative = ppte_safe_relative_path(&name)?;
+        let destination = ppte_safe_destination(&root, &relative)?;
+        let exists = info.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+        let staged_file = if exists {
+            // index.json is local, user-editable metadata. Derive backup paths
+            // from the validated deck-relative name instead of trusting it.
+            let backup_root = dir.join("before").join("files");
+            let backup_root_metadata = fs::symlink_metadata(&backup_root)
+                .map_err(|e| format!("恢复副本目录缺失：{}", e))?;
+            if !backup_root_metadata.is_dir() || backup_root_metadata.file_type().is_symlink() {
+                let _ = fs::remove_dir_all(&transaction);
+                return Err("恢复副本目录无效".to_string());
+            }
+            let backup = ppte_safe_destination(&backup_root, &relative)?;
+            if !backup.is_file() { let _ = fs::remove_dir_all(&transaction); return Err(format!("恢复副本缺失：{}", name)); }
+            let target = staged.join(&relative);
+            if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+            fs::copy(&backup, &target).map_err(|e| format!("无法准备 {} 的恢复内容：{}", name, e))?;
+            Some(target)
+        } else { None };
+        entries.push((name, destination, staged_file));
+    }
+    let mut installed: Vec<RevertInstall> = Vec::new();
+    let install: Result<(), String> = (|| {
+        for (index, (name, destination, staged_file)) in entries.iter().enumerate() {
+            if let Some(parent) = destination.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+            let live_backup = if destination.is_file() {
+                fs::create_dir_all(&live_backups).map_err(|e| e.to_string())?;
+                let backup = live_backups.join(index.to_string());
+                fs::rename(destination, &backup).map_err(|e| format!("无法暂存 {} 的当前版本：{}", name, e))?;
+                Some(backup)
+            } else { None };
+            if let Some(source) = staged_file {
+                if let Err(error) = fs::rename(source, destination) {
+                    if let Some(ref backup) = live_backup { let _ = fs::rename(backup, destination); }
+                    return Err(format!("无法恢复 {}：{}", name, error));
+                }
+            }
+            installed.push((destination.clone(), live_backup, staged_file.is_some()));
+        }
+        Ok(())
+    })();
+    if let Err(error) = install {
+        let _ = restore_revert_install(&installed);
+        let _ = fs::remove_dir_all(&transaction);
+        return Err(error);
+    }
+    let restored_revision = match ppte_agent_revision(&folder_path) {
+        Ok(value) => value.get("deckHash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        Err(error) => {
+            let rollback = restore_revert_install(&installed);
+            let _ = fs::remove_dir_all(&transaction);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!("{}；恢复撤销前版本失败：{}", error, rollback_error)),
+            };
+        }
+    };
+    let updated = finalize_revert_transaction(&transaction, &installed, || journal_update_run_file(&dir, &serde_json::json!({
+        "status": "reverted",
+        "currentDeckRevision": restored_revision,
+        "revertAvailable": false,
+        "serverSync": {
+            "status": "pending",
+            "action": "revert",
+            "attempts": 0,
+            "restoredDeckRevision": restored_revision,
+        },
+    })))?;
+    task_journal_retention(&root);
+    Ok(updated)
+}
+
+#[cfg(test)]
+mod task_journal_tests {
+    use super::*;
+
+    fn deck(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("lecture-task-journal-{}-{}", name, uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("slide01.html"), "<h1>before</h1>").unwrap();
+        fs::write(root.join("manifest.json"), r#"{"title":"Test","slides":[{"id":"s1","file":"slide01.html","title":"Before","slide_type":"content"}]}"#).unwrap();
+        root
+    }
+
+    #[test]
+    fn journal_replays_receipt_and_reverts_first_write_backups() {
+        let root = deck("revert");
+        let folder = root.to_string_lossy().to_string();
+        let run_id = "run_journal_revert_12345678".to_string();
+        let initial = ppte_agent_revision(&folder).unwrap()["deckHash"].as_str().unwrap().to_string();
+        ppte_task_journal_start(
+            folder.clone(),
+            run_id.clone(),
+            serde_json::json!({"runId": run_id, "intent": "slide_edit", "scope": "page", "executionStrategy": "bounded_tool_loop"}),
+            Some(initial.clone()),
+        ).unwrap();
+        ppte_task_journal_before_write(
+            folder.clone(), run_id.clone(),
+            vec!["manifest.json".to_string(), "slide01.html".to_string(), "outline.md".to_string()],
+        ).unwrap();
+        fs::write(root.join("slide01.html"), "<h1>after</h1>").unwrap();
+        fs::write(root.join("manifest.json"), r#"{"title":"Test","slides":[{"id":"s1","file":"slide01.html","title":"After","slide_type":"content"}]}"#).unwrap();
+        fs::write(root.join("outline.md"), "# New outline").unwrap();
+        let changed = ppte_agent_revision(&folder).unwrap()["deckHash"].as_str().unwrap().to_string();
+        let hash = format!("sha256:{}", "a".repeat(64));
+        ppte_task_journal_append_receipt(
+            folder.clone(), run_id.clone(),
+            serde_json::json!({
+                "ok": true, "actionId": format!("{}:action:1", run_id), "argsHash": hash,
+                "expectedDeckRevision": initial, "newDeckRevision": changed,
+                "tool": "write_slide", "result": {"page": 1, "saved": true, "html": "secret"}
+            }),
+        ).unwrap();
+        let receipt = ppte_task_journal_receipt_get(folder.clone(), run_id.clone(), format!("{}:action:1", run_id)).unwrap().unwrap();
+        assert_eq!(receipt["ok"], true);
+        assert!(receipt.to_string().find("secret").is_none());
+
+        let reverted = ppte_task_journal_revert(folder.clone(), run_id, Some(changed)).unwrap();
+        assert_eq!(reverted["status"], "reverted");
+        assert_eq!(reverted["serverSync"]["status"], "pending");
+        assert_eq!(reverted["revertAvailable"], false);
+        assert_eq!(fs::read_to_string(root.join("slide01.html")).unwrap(), "<h1>before</h1>");
+        assert!(!root.join("outline.md").exists());
+        assert_eq!(ppte_agent_revision(&folder).unwrap()["deckHash"], initial);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn journal_refuses_revert_after_newer_external_change() {
+        let root = deck("conflict");
+        let folder = root.to_string_lossy().to_string();
+        let run_id = "run_journal_conflict_12345678".to_string();
+        let initial = ppte_agent_revision(&folder).unwrap()["deckHash"].as_str().unwrap().to_string();
+        ppte_task_journal_start(
+            folder.clone(), run_id.clone(),
+            serde_json::json!({"runId": run_id, "intent": "slide_edit"}),
+            Some(initial.clone()),
+        ).unwrap();
+        ppte_task_journal_before_write(folder.clone(), run_id.clone(), vec!["slide01.html".to_string()]).unwrap();
+        fs::write(root.join("slide01.html"), "task version").unwrap();
+        let task_revision = ppte_agent_revision(&folder).unwrap()["deckHash"].as_str().unwrap().to_string();
+        ppte_task_journal_update(folder.clone(), run_id.clone(), serde_json::json!({"currentDeckRevision": task_revision})).unwrap();
+        fs::write(root.join("slide01.html"), "user version").unwrap();
+        let error = ppte_task_journal_revert(folder.clone(), run_id, None).unwrap_err();
+        assert!(error.starts_with("TASK_REVERT_CONFLICT:"));
+        assert_eq!(fs::read_to_string(root.join("slide01.html")).unwrap(), "user version");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn journal_revert_ignores_tampered_backup_path() {
+        let root = deck("tampered-index");
+        let folder = root.to_string_lossy().to_string();
+        let run_id = "run_journal_tampered_12345678".to_string();
+        let initial = ppte_agent_revision(&folder).unwrap()["deckHash"].as_str().unwrap().to_string();
+        ppte_task_journal_start(folder.clone(), run_id.clone(), serde_json::json!({"runId": run_id}), Some(initial)).unwrap();
+        ppte_task_journal_before_write(folder.clone(), run_id.clone(), vec!["slide01.html".to_string()]).unwrap();
+
+        let outside = root.parent().unwrap().join(format!("lecture-task-outside-{}.html", uuid::Uuid::new_v4()));
+        fs::write(&outside, "must remain untouched").unwrap();
+        let index_path = root.join(".lectureai").join("task-runs").join(&run_id).join("before").join("index.json");
+        let mut index = journal_read_json(&index_path).unwrap();
+        index["files"]["slide01.html"]["backup"] = serde_json::json!(outside.to_string_lossy());
+        atomic_write_json(&index_path, &index).unwrap();
+        fs::write(root.join("slide01.html"), "task version").unwrap();
+        let changed = ppte_agent_revision(&folder).unwrap()["deckHash"].as_str().unwrap().to_string();
+
+        ppte_task_journal_revert(folder.clone(), run_id, Some(changed)).unwrap();
+
+        assert_eq!(fs::read_to_string(root.join("slide01.html")).unwrap(), "<h1>before</h1>");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "must remain untouched");
+        fs::remove_file(outside).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn journal_records_pending_before_mutation_and_rejects_unsafe_ids() {
+        let root = deck("pending");
+        let folder = root.to_string_lossy().to_string();
+        let run_id = "run_journal_pending_12345678".to_string();
+        ppte_task_journal_start(folder.clone(), run_id.clone(), serde_json::json!({"runId": run_id}), None).unwrap();
+        let action_id = format!("{}:action:1", run_id);
+        ppte_task_journal_append_receipt(
+            folder.clone(), run_id.clone(),
+            serde_json::json!({"actionId": action_id, "argsHash": format!("sha256:{}", "b".repeat(64)), "tool": "write_slide", "status": "pending"}),
+        ).unwrap();
+        let pending = ppte_task_journal_receipt_get(folder.clone(), run_id, action_id).unwrap().unwrap();
+        assert_eq!(pending["status"], "pending");
+        assert!(ppte_task_journal_start(folder, "../../outside".to_string(), serde_json::json!({}), None).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn journal_rolls_back_staged_backup_when_index_commit_fails() {
+        let root = deck("index-failure");
+        let dir = root.join(".lectureai").join("task-runs").join("run_index_failure_12345678");
+        let staged = dir.join("stage").join("slide01.html");
+        fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        fs::write(&staged, "before").unwrap();
+        let mut files = serde_json::Map::new();
+        files.insert("slide01.html".to_string(), serde_json::json!({"exists": true, "backup": "files/slide01.html"}));
+
+        let error = journal_commit_staged_backups(
+            &dir,
+            files,
+            &[("slide01.html".to_string(), staged.clone())],
+            |_| Err("injected index failure".to_string()),
+        ).unwrap_err();
+
+        assert_eq!(error, "injected index failure");
+        assert!(staged.is_file(), "the caller must still own the staged copy after rollback");
+        assert!(!dir.join("before").join("files").join("slide01.html").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn journal_revert_restores_live_files_when_metadata_commit_fails() {
+        let root = deck("metadata-failure");
+        fs::write(root.join("slide01.html"), "task version").unwrap();
+        let transaction = root.join(".lectureai-revert-injected");
+        let live = transaction.join("live").join("0");
+        fs::create_dir_all(live.parent().unwrap()).unwrap();
+        fs::rename(root.join("slide01.html"), &live).unwrap();
+        fs::write(root.join("slide01.html"), "<h1>before</h1>").unwrap();
+        let installed = vec![(root.join("slide01.html"), Some(live), true)];
+
+        let error = finalize_revert_transaction(&transaction, &installed, || {
+            Err("injected journal metadata failure".to_string())
+        }).unwrap_err();
+
+        assert_eq!(error, "injected journal metadata failure");
+        assert_eq!(fs::read_to_string(root.join("slide01.html")).unwrap(), "task version");
+        assert!(!transaction.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn journal_text_truncation_is_unicode_safe() {
+        assert_eq!(journal_safe_text("中文测试文本", 3), "中文测");
+    }
+
+    #[test]
+    fn journal_persists_resumable_contract_and_plan_without_page_html() {
+        let root = deck("resume-state");
+        let folder = root.to_string_lossy().to_string();
+        let run_id = "run_journal_resume_state_12345678".to_string();
+        let started = ppte_task_journal_start(
+            folder.clone(),
+            run_id.clone(),
+            serde_json::json!({
+                "runId": run_id,
+                "intent": "deck_rewrite",
+                "scope": "deck",
+                "executionStrategy": "planned_harness",
+                "userFacingGoal": "重做整套课件",
+                "targets": {"pages": [], "allowInsert": true},
+            }),
+            None,
+        ).unwrap();
+        assert_eq!(started["taskSpec"]["intent"], "deck_rewrite");
+        let updated = ppte_task_journal_update(folder.clone(), run_id, serde_json::json!({
+            "status": "paused",
+            "userInstruction": "继续重做整套课件",
+            "plan": {
+                "targetSlideCount": 1,
+                "slides": [{"page": 1, "contentKind": "concept", "html": "<h1>secret</h1>"}],
+                "execution": {"completedPages": []},
+            },
+        })).unwrap();
+        assert_eq!(updated["plan"]["slides"][0]["contentKind"], "concept");
+        assert!(updated.to_string().find("secret").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_history_cleanup_preserves_active_runs() {
+        let root = deck("clear");
+        let folder = root.to_string_lossy().to_string();
+        for (suffix, status) in [("completed", "completed"), ("failed", "failed"), ("paused", "paused")] {
+            let run_id = format!("run_journal_clear_{}_12345678", suffix);
+            ppte_task_journal_start(folder.clone(), run_id.clone(), serde_json::json!({"runId": run_id}), None).unwrap();
+            ppte_task_journal_update(folder.clone(), run_id, serde_json::json!({"status": status})).unwrap();
+        }
+        let result = ppte_task_journal_clear(folder.clone(), Some(0)).unwrap();
+        assert_eq!(result["removed"].as_array().unwrap().len(), 2);
+        assert_eq!(result["preservedActive"], 1);
+        let remaining = ppte_task_journal_list(folder).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0]["status"], "paused");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn canonical_ppte_root(folder_path: &str) -> Result<PathBuf, String> {
@@ -7664,7 +8543,17 @@ pub fn run() {
             write_text_file,
             ppte_agent_plan_read,
             ppte_agent_plan_write,
+            ppte_agent_revision_get,
             ppte_agent_plan_refresh,
+            ppte_task_journal_start,
+            ppte_task_journal_before_write,
+            ppte_task_journal_receipt_get,
+            ppte_task_journal_append_receipt,
+            ppte_task_journal_update,
+            ppte_task_journal_read,
+            ppte_task_journal_list,
+            ppte_task_journal_clear,
+            ppte_task_journal_revert,
             lectureai_design_examples,
             lectureai_render_template,
             lectureai_icon_search,

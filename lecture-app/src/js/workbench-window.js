@@ -40,6 +40,13 @@ window.WorkbenchWindow = {
   _sessions: [],          // cached session store entries (max 10 kept on disk)
   _sessionSaveTimer: null,
   _restoreToken: 0,
+  _taskCardRun: null,
+  _taskCardSpec: null,
+  _taskSyncTimers: new Map(),
+  _taskJournalLoadSeq: 0,
+  _featureFlags: Object.create(null),
+  _featureFlagsLoaded: false,
+  _featureFlagsToken: '',
 
   async init() {
     // Input discovery must not depend on Tauri event subscriptions. If any
@@ -235,6 +242,351 @@ window.WorkbenchWindow = {
       }
     }
     if (ctx?.prefillPage) this._onPrefill({ page: ctx.prefillPage });
+    if (ctx?.slides?.length) this._loadTaskJournal();
+  },
+
+  _taskStatusLabel(status) {
+    return {
+      created: '正在准备', awaiting_user: '等待补充说明', resolving: '正在理解目标',
+      planning: '正在规划', ready: '等待开始', running: '处理中', paused: '已暂停',
+      repairing: '正在返工', validating: '正在检查', needs_repair: '需要返工',
+      completed: '已完成', failed: '未完成', cancelled: '已停止', reverted: '已撤销',
+    }[String(status || '')] || '任务进行中';
+  },
+
+  _taskCardGoal(run, spec = null) {
+    const intent = {
+      answer: '回答课件问题', outline_write: '整理课件大纲', slide_edit: '修改目标页面',
+      slide_insert: '新增课件页面', deck_cleanup: '整理整套课件', deck_rewrite: '重做整套课件',
+      deck_validate: '检查整套课件', resume_run: '继续上次任务',
+    }[String(run?.intent || spec?.intent || '')];
+    return String(run?.userFacingGoal || spec?.userFacingGoal || intent || 'LectureAI 任务').replace(/[\r\n]+/g, ' ').slice(0, 180);
+  },
+
+  _renderTaskCard(run, spec = null) {
+    const card = document.getElementById?.('wb-task-card');
+    if (!card) return;
+    this._taskCardRun = run || null;
+    if (!this._featureEnabled('lectureai_task_ui_v2') && !run?.runId) { card.hidden = true; card.innerHTML = ''; return; }
+    if (!run) { card.hidden = true; card.innerHTML = ''; return; }
+    const status = String(run.status || 'created');
+    const completed = Number(run.completedPages || run.completed_pages || 0);
+    const total = Number(run.totalPages || run.total_pages || 0);
+    const canContinue = ['paused', 'failed', 'needs_repair', 'ready', 'running', 'repairing'].includes(status);
+    const canRetry = status === 'needs_repair' || status === 'failed';
+    const canRevert = run.revertAvailable !== false
+      && ['completed', 'failed', 'cancelled', 'paused', 'needs_repair'].includes(status);
+    const syncPending = run.serverSync && run.serverSync.status === 'pending';
+    card.hidden = false;
+    card.innerHTML = `
+      <div class="wb-task-card-head"><span class="wb-task-card-title">LectureAI 任务</span><span class="wb-task-card-status">${this._escape(this._taskStatusLabel(status))}</span></div>
+      <div class="wb-task-card-goal" title="${this._escape(this._taskCardGoal(run, spec))}">${this._escape(this._taskCardGoal(run, spec))}</div>
+      <div class="wb-task-card-meta">${completed || total ? `已完成 ${completed}/${total || '?'} 页` : '进度已保存'}${run.errorCode ? ' · 有待处理项' : ''}${syncPending ? ' · 正在同步恢复状态' : ''}</div>
+      <div class="wb-task-card-actions">
+        ${canContinue ? '<button type="button" data-task-action="continue">继续</button>' : ''}
+        ${canRetry ? '<button type="button" data-task-action="retry">仅重试失败页</button>' : ''}
+        ${canRevert ? '<button type="button" data-task-action="revert">撤销本次任务</button>' : ''}
+        <button type="button" data-task-action="details">查看详情</button>
+        <button type="button" data-task-action="clear-history">清理助教任务历史</button>
+      </div>`;
+    card.querySelectorAll('[data-task-action]').forEach(button => {
+      button.onclick = () => this._handleTaskCardAction(button.dataset.taskAction);
+    });
+  },
+
+  async _loadTaskJournal() {
+    if (!this._deckPath || !window.__TAURI__?.core?.invoke) return;
+    const loadSeq = ++this._taskJournalLoadSeq;
+    try {
+      const runs = await this._taskJournalInvoke('ppte_task_journal_list');
+      if (loadSeq !== this._taskJournalLoadSeq) return;
+      if (!Array.isArray(runs) || !runs.length) {
+        this._taskCardSpec = null;
+        this._renderTaskCard(null, null);
+        return;
+      }
+      if (this.busy && this._taskCardRun?.runId) return;
+      const run = runs.find(item => !['reverted'].includes(String(item?.status || ''))) || runs[0];
+      const spec = run?.taskSpec && typeof run.taskSpec === 'object' ? run.taskSpec : null;
+      this._taskCardSpec = spec;
+      if (run?.plan && typeof run.plan === 'object' && this.manifest) {
+        const currentRef = this.manifest.deckPlan?.plan?.taskSpecRef?.runId;
+        const planRef = run.plan?.taskSpecRef?.runId;
+        if (!currentRef || !planRef || String(currentRef) === String(planRef)) {
+          this.manifest.deckPlan = { ...(this.manifest.deckPlan || {}), plan: run.plan };
+        }
+      }
+      this._renderTaskCard(run, spec);
+      this._retryPendingTaskSync(run).catch(() => {});
+    } catch (_) { /* task history is optional and must not block chat */ }
+  },
+
+  async _retryPendingTaskSync(run) {
+    if (!run?.runId || run.status !== 'reverted' || run.serverSync?.status === 'synced') return false;
+    if (this._taskSyncTimers.has(run.runId)) return false;
+    const attempts = Number(run.serverSync?.attempts || 0);
+    this._taskCardRun = run;
+    const nextAttempts = attempts + 1;
+    const restoredDeckRevision = run.serverSync?.restoredDeckRevision || run.currentDeckRevision || null;
+    try {
+      await this._taskJournalInvoke('ppte_task_journal_update', {
+        runId: run.runId,
+        patch: { serverSync: { status: 'pending', action: 'revert', attempts: nextAttempts, restoredDeckRevision } },
+      });
+      const response = await this._taskApi('task_revert', {
+        runId: run.runId,
+        localReverted: true,
+        restoredDeckRevision,
+      });
+      if (!response?.ok || response.data?.status !== 'reverted') throw new Error('任务状态暂未同步');
+      const synced = { ...run, serverSync: { status: 'synced', action: 'revert', attempts: nextAttempts, restoredDeckRevision } };
+      await this._taskJournalInvoke('ppte_task_journal_update', { runId: run.runId, patch: { serverSync: synced.serverSync } });
+      this._renderTaskCard(synced, this._taskCardSpec);
+      return true;
+    } catch (_) {
+      const delay = Math.min(30000, 1000 * (2 ** Math.min(nextAttempts - 1, 4)));
+      const timer = setTimeout(() => {
+        this._taskSyncTimers.delete(run.runId);
+        this._retryPendingTaskSync({ ...run, serverSync: { ...(run.serverSync || {}), attempts: nextAttempts } }).catch(() => {});
+      }, delay);
+      this._taskSyncTimers.set(run.runId, timer);
+      await this._taskJournalInvoke('ppte_task_journal_update', {
+        runId: run.runId,
+        patch: { serverSync: { status: 'pending', action: 'revert', attempts: nextAttempts, restoredDeckRevision, retryAt: Date.now() + delay } },
+      }).catch(() => {});
+      this._renderTaskCard({ ...run, serverSync: { status: 'pending', attempts: nextAttempts } }, this._taskCardSpec);
+      return false;
+    }
+  },
+
+  async _taskApi(action, payload = {}) {
+    const token = String((this.selectedConfig || this.aiConfig || {}).aiApiKey || '').trim();
+    if (!token || !window.__TAURI__?.core?.invoke) throw new Error('登录状态已失效，请重新登录后重试。');
+    return window.__TAURI__.core.invoke('auth_api_request', { action, token, payload: { ...payload, runId: payload.runId || this._taskCardRun?.runId } });
+  },
+
+  async _taskActionRequest(action, payload = {}) {
+    const response = await this._taskApi(action, payload);
+    if (response?.ok) return response.data || {};
+    const detail = response?.data?.detail;
+    const friendly = window.LectureAiTaskProtocol?.friendlyError(
+      detail && typeof detail === 'object' ? detail : { userMessage: String(detail || 'LectureAI 任务步骤同步失败。') },
+    );
+    const error = new Error(friendly?.userMessage || 'LectureAI 任务步骤同步失败。');
+    error.details = detail;
+    throw error;
+  },
+
+  // Planned desktop mutations need the same server receipt gate as native
+  // bridge tool calls. The local executor remains the only writer; this
+  // wrapper registers the action first and commits the result afterwards.
+  async _executeServerTaskAction(action, runId, taskSpec, envelope) {
+    const baseActionId = String(envelope?.actionId || '');
+    const argsHash = String(envelope?.argsHash || '');
+    const expectedDeckRevision = String(envelope?.expectedDeckRevision || '') || null;
+    if (!runId || !baseActionId || !/^sha256:[a-fA-F0-9]{64}$/.test(argsHash)) {
+      throw new Error('LectureAI 任务步骤缺少有效回执标识。');
+    }
+    let actionId = baseActionId;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      let started;
+      try {
+        started = await this._taskActionRequest('task_action_start', {
+          runId,
+          actionId,
+          argsHash,
+          tool: action.tool,
+          actionMode: action.tool === 'render_template' ? action.mode || null : null,
+          expectedDeckRevision,
+        });
+      } catch (error) {
+        if (error?.details?.code === 'ACTION_PREVIOUSLY_FAILED') {
+          actionId = `${baseActionId}:retry:${attempt + 1}`;
+          continue;
+        }
+        throw error;
+      }
+      const decision = String(started?.decision || '');
+      const serverReceipt = started?.receipt || {};
+      if (decision === 'replay' || serverReceipt.status === 'succeeded') {
+        return {
+          ok: true,
+          replayed: true,
+          actionId,
+          argsHash,
+          result: serverReceipt.result || {},
+          newDeckRevision: serverReceipt.newDeckRevision || null,
+        };
+      }
+      if (decision === 'failed') {
+        actionId = `${baseActionId}:retry:${attempt + 1}`;
+        continue;
+      }
+      if (!['new', 'reclaimed', 'claimed'].includes(decision) || !serverReceipt.claimToken) {
+        throw new Error('LectureAI 未能取得任务步骤执行权。');
+      }
+      let local;
+      try {
+        local = await this._rpc('execute-task-action', {
+          runId,
+          action,
+          taskSpec,
+          envelope: { actionId, argsHash, expectedDeckRevision },
+        });
+      } catch (error) {
+        local = {
+          ok: false,
+          actionId,
+          argsHash,
+          error: { code: error?.code || 'CLIENT_UNAVAILABLE', category: 'client_unavailable', retryable: true, userMessage: this._modelErrorMessage(error) },
+        };
+      }
+      const ok = local?.ok === true;
+      const result = ok && local?.result && typeof local.result === 'object' ? local.result : {};
+      const newDeckRevision = ok ? (local?.newDeckRevision || result.newDeckRevision || null) : null;
+      const errorCode = ok ? null : String(local?.error?.code || 'CLIENT_TOOL_FAILED');
+      const clientReceipt = {
+        ok,
+        actionId,
+        argsHash,
+        result,
+        newDeckRevision,
+        errorCode,
+      };
+      try {
+        const finished = await this._taskActionRequest('task_action_finish', {
+          runId,
+          actionId,
+          argsHash,
+          ok,
+          result,
+          newDeckRevision,
+          errorCode,
+          claimToken: serverReceipt.claimToken,
+        });
+        const receipt = finished?.receipt || {};
+        return {
+          ok,
+          actionId,
+          argsHash,
+          result: receipt.result || result,
+          newDeckRevision: receipt.newDeckRevision || newDeckRevision,
+          error: ok ? null : local?.error,
+        };
+      } catch (finishError) {
+        // The local mutation has already happened. Reconcile the durable
+        // local receipt rather than executing it again on reconnect.
+        if (ok && newDeckRevision) {
+          const reconciled = await this._taskActionRequest('task_action_reconcile', {
+            runId,
+            actionId,
+            argsHash,
+            currentDeckRevision: newDeckRevision,
+            receipt: clientReceipt,
+            claimToken: serverReceipt.claimToken,
+          });
+          const receipt = reconciled?.receipt || {};
+          return { ok: true, actionId, argsHash, result: receipt.result || result, newDeckRevision: receipt.newDeckRevision || newDeckRevision };
+        }
+        throw finishError;
+      }
+    }
+    throw new Error('LectureAI 任务步骤此前失败，已改用新的恢复步骤仍未完成。');
+  },
+
+  _taskJournalInvoke(command, payload = {}) {
+    if (!this._deckPath || !window.__TAURI__?.core?.invoke) return Promise.reject(new Error('课件窗口暂时不可用'));
+    return window.__TAURI__.core.invoke(command, { ...(payload || {}), folderPath: this._deckPath });
+  },
+
+  _featureEnabled(name) {
+    return this._featureFlagsLoaded && this._featureFlags?.[String(name)] === true;
+  },
+
+  _nativeTaskRolloutEnabled() {
+    return this._featureEnabled('lectureai_native_tools_required')
+      && this._featureEnabled('lectureai_action_receipts_v1');
+  },
+
+  async _loadLectureAiFeatures(force = false) {
+    const selected = this.selectedConfig || this.aiConfig || {};
+    const token = String(selected.aiApiKey || '').trim();
+    if (selected.aiProvider !== 'lectureai' || !token || !window.__TAURI__?.core?.invoke) {
+      this._featureFlags = Object.create(null);
+      this._featureFlagsLoaded = true;
+      this._featureFlagsToken = token;
+      return this._featureFlags;
+    }
+    if (!force && this._featureFlagsLoaded && this._featureFlagsToken === token) return this._featureFlags;
+    this._featureFlags = Object.create(null);
+    this._featureFlagsLoaded = false;
+    this._featureFlagsToken = token;
+    try {
+      const response = await window.__TAURI__.core.invoke('auth_api_request', {
+        action: 'features', payload: {}, token,
+      });
+      this._featureFlags = response?.ok && response?.data?.flags && typeof response.data.flags === 'object'
+        ? { ...response.data.flags }
+        : Object.create(null);
+    } catch (_) {
+      this._featureFlags = Object.create(null);
+    }
+    this._featureFlagsLoaded = true;
+    return this._featureFlags;
+  },
+
+  async _handleTaskCardAction(action) {
+    const run = this._taskCardRun;
+    if (!run?.runId || this.busy) return;
+    try {
+      if (action === 'details') {
+        const detail = await this._taskJournalInvoke('ppte_task_journal_read', { runId: run.runId });
+        const count = Array.isArray(detail?.receipts) ? detail.receipts.length : 0;
+        this._log('sys', `${this._taskStatusLabel(run.status)} · 已记录 ${count} 个任务步骤`, { skipRecord: true });
+        return;
+      }
+      if (action === 'clear-history') {
+        const confirm = window.confirm;
+        if (typeof confirm === 'function' && !confirm('清理已结束的助教任务恢复副本？正在运行的任务不会被删除。')) return;
+        const result = await this._taskJournalInvoke('ppte_task_journal_clear', { keepRecent: 0 });
+        const removed = Array.isArray(result?.removed) ? result.removed.length : 0;
+        this._log('sys', removed ? `已清理 ${removed} 条已结束任务历史` : '没有可清理的已结束任务历史', { skipRecord: true });
+        await this._loadTaskJournal();
+        return;
+      }
+      if (action === 'revert') {
+        const revision = this.manifest?.deckRevision?.deckHash || null;
+        const result = await this._rpc('task-journal-revert', { runId: run.runId, expectedDeckRevision: revision });
+        const localRun = result || { ...run, status: 'reverted' };
+        this._renderTaskCard(localRun, this._taskCardSpec);
+        await this._refreshContext();
+        const synced = await this._retryPendingTaskSync(localRun);
+        this._log('sys', synced
+          ? '任务已撤销，课件已恢复到任务开始前的版本'
+          : '课件已恢复到任务开始前的版本，任务状态将在连接恢复后自动同步', { skipRecord: true });
+        return;
+      }
+      const server = await this._taskApi('task_get', { runId: run.runId });
+      if (!server?.ok) throw new Error('LectureAI 暂时无法读取任务状态。');
+      const spec = this._taskCardSpec || run.taskSpec || server.data?.taskSpec;
+      if (!spec) throw new Error('任务合同不可恢复，请重新提交任务。');
+      this._taskCardSpec = spec;
+      await this._taskApi('task_resume', { runId: run.runId });
+      if (action === 'retry') {
+        const plan = this.manifest?.deckPlan?.plan || run.plan;
+        if (!plan?.slides?.length) throw new Error('未找到可恢复的课件规划。');
+        const listed = run.failedPages || run.failed_pages || [];
+        const failed = new Set((listed.length ? listed : this._harnessRepairPages(plan, plan?.execution?.validation || {})).map(Number));
+        if (!failed.size) throw new Error('没有可定位的失败页面，请使用“继续”重新执行验收。');
+        plan.execution = { ...(plan.execution || {}), status: 'repairing', completedPages: (plan.execution?.completedPages || []).filter(page => !failed.has(Number(page))), nextPage: null };
+        this._activeTask = { ...(this._activeTask || {}), taskSpec: spec, runId: run.runId, plan, userInstruction: run.userInstruction || spec.userInstruction || spec.userFacingGoal || '继续处理课件' };
+        await this._runPlannedHarness(plan, this._activeTask.userInstruction);
+      } else {
+        await this._runLectureAiNativeTask(spec, run.userInstruction || spec.userInstruction || spec.userFacingGoal || '继续处理课件', run);
+      }
+    } catch (error) {
+      this._log('err', this._modelErrorMessage(error));
+    }
   },
 
   // ---- session persistence (per deck, <deck>/.lectureai/workbench-sessions.json) ----
@@ -362,7 +714,7 @@ window.WorkbenchWindow = {
     const m = document.getElementById('wb-messages');
     if (!m) return;
     m.innerHTML = `<div class="term-empty">
-      <span class="term-empty-accent">AI 助手</span> · 课件级 Agent<br>
+      <span class="term-empty-accent">LectureAI 助教</span> · 课件工作台<br>
       未连接课件。选择一个 PPTE 课件开始对话。<br>
       <div class="wb-pick-actions">
         <button class="wb-pick-btn" id="wb-pick-ppte">从本地磁盘选择</button>
@@ -406,6 +758,9 @@ window.WorkbenchWindow = {
 
   _applySelectedModel(id) {
     this.selectedConfig = this.providers.find(p => p.id === id)?.config || null;
+    this._featureFlagsLoaded = false;
+    this._featureFlags = Object.create(null);
+    this._loadLectureAiFeatures().then(() => this._loadTaskJournal()).catch(() => {});
   },
 
   // Re-fetch course context from the main window (a PPTE may have been opened
@@ -459,7 +814,7 @@ window.WorkbenchWindow = {
 
   _renderEmpty() {
     const m = document.getElementById('wb-messages');
-    if (m) m.innerHTML = `<div class="wb-empty">课件级对话窗口。<br>输入 / 选择内置命令，@ 定位页面，<br>$ 启用从其他 Agent 导入的 SKILL。<br>改完自动保存并在主窗口预览。</div>`;
+    if (m) m.innerHTML = `<div class="wb-empty">课件助教对话窗口。<br>输入 / 选择内置命令，@ 定位页面，<br>$ 启用已导入的技能。<br>改完自动保存并在主窗口预览。</div>`;
   },
 
   // ---- slash command discovery ----
@@ -746,6 +1101,86 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     return !/(?:创建|制作|生成|重做|改造|重写).{0,16}(?:课件|PPT|幻灯片)|(?:课件|PPT|幻灯片).{0,16}(?:创建|制作|生成|重做|改造|重写)/i.test(value);
   },
 
+  _taskMentions(input) {
+    const pages = [];
+    for (const match of String(input || '').matchAll(/(?:^|\s)[@＠](\d{1,2})(?=\s|$|[，。、,.；;])/gu)) {
+      const page = Number(match[1]);
+      if (page >= 1 && page <= Number(this.manifest?.slides?.length || 0) && !pages.includes(page)) pages.push(page);
+    }
+    return {
+      pages,
+      outline: /[@＠](?:大纲|outline(?:\.md)?)(?=\s|$|[，。、,.；;])/iu.test(String(input || '')),
+    };
+  },
+
+  _taskSpecContext(spec) {
+    if (!spec) return '';
+    return `[LectureAI 任务合同]\n${JSON.stringify({
+      runId: spec.runId,
+      intent: spec.intent,
+      scope: spec.scope,
+      targets: spec.targets,
+      executionStrategy: spec.executionStrategy,
+      requiresDeckPlan: spec.requiresDeckPlan,
+      userFacingGoal: spec.userFacingGoal,
+      acceptanceCriteria: spec.acceptanceCriteria,
+    })}\n任务类型、范围和验收条件由服务端确定；只能在 targets 允许的范围内行动。`;
+  },
+
+  async _resolveLectureAiTask(input, slash = null) {
+    const protocol = window.LectureAiTaskProtocol;
+    if (!protocol) throw new Error('当前客户端缺少 LectureAI 任务协议，请升级后重试。');
+    const selected = this.selectedConfig || this.aiConfig || {};
+    const token = String(selected.aiApiKey || '').trim();
+    if (!token) throw new Error('登录状态已失效，请重新登录后使用 LectureAI。');
+    const revision = String(this.manifest?.deckRevision?.deckHash || '');
+    const manifestDeckId = String(this.manifest?.deckId || this.manifest?.manifest?.deckId || '').trim();
+    // Keep this fallback identical to _nativeTaskDeckId so cancellation and
+    // progress requests address the same server-side task scope.
+    const derivedDeckId = /^sha256:[a-fA-F0-9]{32,64}$/.test(revision) ? `deck-${revision.slice(7, 47)}` : null;
+    const resumePlan = this.manifest?.deckPlan?.plan;
+    const resumable = ['running', 'paused', 'failed', 'repairing', 'needs-repair'].includes(resumePlan?.execution?.status)
+      || ['ready', 'running', 'paused', 'failed', 'repairing', 'needs_repair'].includes(String(this._taskCardRun?.status || ''));
+    const resumeRunId = this._isHarnessResumeRequest(input) && resumable
+      ? String(resumePlan?.taskSpecRef?.runId || resumePlan?.execution?.runId || this._taskCardRun?.runId || '').trim() || protocol.newRunId()
+      : null;
+    const payload = {
+      instruction: input,
+      clientKind: 'desktop',
+      protocolVersion: protocol.CONTRACT.protocolVersion,
+      clientVersion: '2.2.3',
+      deckId: manifestDeckId || derivedDeckId,
+      deckRevision: revision || null,
+      slides: (this.manifest?.slides || []).slice(0, 60).map((slide, index) => ({
+        id: slide.id || null,
+        page: index + 1,
+        title: String(slide.title || '').slice(0, 200),
+        role: String(slide.slideType || slide.slide_type || 'content').slice(0, 30),
+      })),
+      currentPage: this.currentPage,
+      mentions: this._taskMentions(input),
+      slashCommand: slash?.command?.name || null,
+      hasOutline: !!String(this.manifest?.outline || '').trim(),
+      isStarter: this.manifest?.templateBlueprint?.isStarter === true,
+      templateRoles: [...new Set((this.manifest?.templateBlueprint?.roles || []).map(item => item.slideType).filter(Boolean))],
+      capabilities: [...protocol.CONTRACT.capabilities],
+      resumeRunId,
+      failedPages: Array.isArray(resumePlan?.execution?.failedPages) ? resumePlan.execution.failedPages : [],
+    };
+    const response = await window.__TAURI__.core.invoke('auth_api_request', {
+      action: 'task_resolve', payload, token,
+    });
+    if (!response?.ok) {
+      const detail = response?.data?.detail;
+      const structured = detail && typeof detail === 'object' ? detail : response?.data;
+      throw new Error(protocol.friendlyError(structured || { userMessage: String(detail || 'LectureAI 暂时无法识别任务，请稍后重试。') }).userMessage);
+    }
+    const spec = response?.data?.taskSpec;
+    const checked = protocol.validateTaskSpec(spec);
+    if (!checked.valid) throw new Error(`LectureAI 返回的任务合同无效：${checked.errors.join('；')}`);
+    return spec;
+  },
+
   // ---- @-mention resolution (fetch slide HTML via RPC) ----
   async _resolveAt(rawInput) {
     if (!this.manifest?.slides?.length) return { content: rawInput, mentioned: [] };
@@ -841,9 +1276,46 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       alert('未连接课件。请在主窗口打开一个 PPTE 课件进编辑器，再发送指令。');
       return;
     }
+    let taskSpec = null;
+    if (cfg.aiProvider === 'lectureai') {
+      await this._loadLectureAiFeatures();
+      const resumePlan = this.manifest?.deckPlan?.plan;
+      const resumeRequested = this._isHarnessResumeRequest(input);
+      const existingV2Run = Boolean(resumeRequested && (
+        resumePlan?.taskSpecRef?.runId
+        || resumePlan?.execution?.runId
+        || this._taskCardRun?.runId
+      ));
+      if (this._featureEnabled('lectureai_task_spec_v2') || existingV2Run) {
+      try {
+        taskSpec = await this._resolveLectureAiTask(input, slash);
+      } catch (error) {
+        this._appendUser(input, []);
+        this._appendAssistantMarkdown(`### 无法开始任务\n\n${this._modelErrorMessage(error)}`);
+        return;
+      }
+      if (taskSpec.requiresClarification) {
+        this._appendUser(input, []);
+        this._appendAssistantMarkdown(taskSpec.clarificationQuestion || '请再说明希望 LectureAI 修改哪些页面，以及最终需要保留什么内容。');
+        if (inputEl) inputEl.value = '';
+        this._autoResizeInput();
+        this._hideSlashMenu();
+        return;
+      }
+        if (existingV2Run || this._nativeTaskRolloutEnabled()) {
+          this._appendUser(input, []);
+          if (inputEl) inputEl.value = '';
+          this._autoResizeInput();
+          this._hideSlashMenu();
+          await this._runLectureAiNativeTask(taskSpec, input);
+          return;
+        }
+      }
+    }
     const resumablePlan = this.manifest?.deckPlan?.plan;
     const executionStatus = resumablePlan?.execution?.status;
-    if (this._isHarnessResumeRequest(input) && ['running', 'paused', 'failed', 'repairing', 'needs-repair'].includes(executionStatus)) {
+    const resumeRequested = taskSpec ? taskSpec.intent === 'resume_run' : this._isHarnessResumeRequest(input);
+    if (resumeRequested && ['running', 'paused', 'failed', 'repairing', 'needs-repair'].includes(executionStatus)) {
       this._appendUser(input, []);
       if (inputEl) inputEl.value = '';
       this._autoResizeInput();
@@ -892,20 +1364,21 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         document.content,
       ].join('\n')).join('\n\n');
     }
-    const outlineOnly = slash ? false : this._isOutlineOnlyTask(input);
+    const outlineOnly = taskSpec ? taskSpec.intent === 'outline_write' : (slash ? false : this._isOutlineOnlyTask(input));
     const outlineBoundary = outlineOnly
       ? '[大纲任务边界]\n本轮只整理并写入 outline.md。可读取现有页面，但不得规划、插入、重排、渲染或改写任何页面；完成前必须调用 write_outline。'
       : '';
     const taskInitialization = [this._taskInitialization(input), outlineBoundary].filter(Boolean).join('\n\n');
-    const deckLevel = slash ? false : this._isDeckLevelTask(input);
-    const requiresPlan = slash ? false : this._requiresDeckPlan(input);
+    const deckLevel = taskSpec ? taskSpec.scope === 'deck' : (slash ? false : this._isDeckLevelTask(input));
+    const requiresPlan = taskSpec ? taskSpec.requiresDeckPlan === true : (slash ? false : this._requiresDeckPlan(input));
+    const taskPages = taskSpec?.targets?.allowInsert ? [] : (taskSpec?.targets?.pages || []);
     this._activeTask = {
       deckLevel,
       requiresPlan,
       planSaved: !requiresPlan,
       deckValidated: false,
       commandCheck: slash?.command?.check || null,
-      commandPages: slash?.pages || [],
+      commandPages: slash?.pages?.length ? slash.pages : taskPages,
       commandInspected: false,
       commandPassed: false,
       requestedSlideCount: this._requestedSlideCount(input),
@@ -916,11 +1389,13 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       outlineOnly,
       outlineSaved: !outlineOnly,
       userInstruction: input,
+      taskSpec,
+      runId: taskSpec?.runId || null,
     };
     this._stopRequested = false;
     this._appendUser(input, mentioned);
     if (enabledSkills.length) this._log('sys', `本轮启用技能 · ${enabledSkills.join('、')}`);
-    const additions = [skillContext, commandContext, taskInitialization, deckLevel ? this._outlinePromptBlock() : '', slash?.instruction || ''].filter(Boolean).join('\n\n');
+    const additions = [this._taskSpecContext(taskSpec), skillContext, commandContext, taskInitialization, deckLevel ? this._outlinePromptBlock() : '', slash?.instruction || ''].filter(Boolean).join('\n\n');
     this.history.push({ role: 'user', content: additions ? `${content}\n\n${additions}` : content });
     if (inputEl) inputEl.value = '';
     this._autoResizeInput();
@@ -1021,7 +1496,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             const el = this._streamBubble;
             this._streamBubble = null;
             el.classList.remove('wb-streaming');
-            const finalText = this._stripActions(text);
+            const finalText = this._userFacingText(this._stripActions(text));
             if (window.marked) {
               el.innerHTML = this._sanitizeHtml(window.marked.parse(finalText));
             } else {
@@ -1039,20 +1514,58 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         let terminalToolFailure = '';
         for (const a of actions) {
           if (this._stopRequested) break;
+          const spec = this._activeTask?.taskSpec;
+          const mutationTools = ['write_outline', 'render_template', 'write_slide', 'insert_slide', 'delete_slide', 'reorder_slides', 'finalize_deck'];
+          if (spec?.executionStrategy === 'direct_reply' && mutationTools.includes(a.tool)) {
+            results.push('[任务边界] 本轮只回答问题，不允许修改课件。');
+            break;
+          }
+          if (spec && a.tool === 'write_outline' && spec.targets?.outline !== true) {
+            results.push('[任务边界] 本轮未授权修改课件大纲。');
+            break;
+          }
+          if (spec && a.tool === 'insert_slide' && spec.targets?.allowInsert !== true) {
+            results.push('[任务边界] 本轮未授权插入页面。');
+            break;
+          }
+          if (spec && a.tool === 'delete_slide' && spec.targets?.allowDelete !== true) {
+            results.push('[任务边界] 本轮未授权删除页面。');
+            break;
+          }
+          if (spec && a.tool === 'render_template' && (a.mode || 'replace') === 'insert' && spec.targets?.allowInsert !== true) {
+            results.push('[任务边界] 本轮未授权插入页面。');
+            break;
+          }
+          if (spec && a.tool === 'reorder_slides' && spec.targets?.allowReorder !== true) {
+            results.push('[任务边界] 本轮未授权重排页面。');
+            break;
+          }
+          if (spec && a.tool === 'finalize_deck' && spec.targets?.allowDelete !== true && spec.targets?.allowReorder !== true) {
+            results.push('[任务边界] 本轮未授权整理或删除页面。');
+            break;
+          }
           if (this._activeTask?.outlineOnly && !['read_slide', 'write_outline', 'load_skill', 'read_skill_resource'].includes(a.tool)) {
             results.push(`[大纲任务边界] 本轮只允许读取页面并写入 outline.md，拒绝执行 ${this._toolDisplayName(a.tool)}。`);
             break;
           }
-          if (this._activeTask?.requiresPlan && ['render_template', 'write_slide', 'insert_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !this._activeTask.planSaved) {
+          if (this._activeTask?.requiresPlan && ['render_template', 'write_slide', 'insert_slide', 'delete_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !this._activeTask.planSaved) {
             results.push('[规划门禁] 这是整套课件任务，第一次修改前必须先调用 set_deck_plan。请现在输出 set_deck_plan action，不要开始写页。');
             break;
           }
           if (a.tool === 'set_deck_plan') {
             const explicitSections = this._activeTask?.explicitSections === true;
             const continuousSections = this._activeTask?.continuousSections === true;
+            const taskSpec = this._activeTask?.taskSpec;
             a.plan = {
               ...a.plan,
               qualityPolicy: { schemaVersion: 2, source: 'desktop-client' },
+              ...(taskSpec ? {
+                planVersion: 3,
+                taskSpecRef: { runId: taskSpec.runId, revision: 1 },
+                plannedAgainstRevision: this.manifest?.deckRevision?.deckHash || null,
+                acceptanceCriteria: taskSpec.acceptanceCriteria,
+                mutationBudget: taskSpec.targets,
+              } : {}),
             };
             const planError = this._deckPlanGateError(a.plan, this._activeTask?.requestedSlideCount, explicitSections, continuousSections);
             if (planError) {
@@ -1061,7 +1574,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             }
             a.plan.sectionPolicy = { explicit: explicitSections || continuousSections, mode: continuousSections ? 'continuous' : explicitSections ? 'custom' : 'default', source: 'desktop-client' };
           }
-          if (this._activeTask?.commandCheck && ['render_template', 'write_slide', 'insert_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !this._activeTask.commandInspected) {
+          if (this._activeTask?.commandCheck && ['render_template', 'write_slide', 'insert_slide', 'delete_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !this._activeTask.commandInspected) {
             results.push(`[命令门禁] 必须先调用 inspect_slides，check 必须为 ${this._activeTask.commandCheck}，确认问题后再修改。`);
             break;
           }
@@ -1077,7 +1590,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
               break;
             }
           }
-          if (this._activeTask?.commandPages?.length && ['insert_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool)) {
+          if (this._activeTask?.commandPages?.length && ['insert_slide', 'delete_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool)) {
             results.push(`[命令门禁] 当前命令限定第 ${this._activeTask.commandPages.join('、')} 页，不能插页或重排整套课件。`);
             break;
           }
@@ -1117,7 +1630,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
             this._activeTask.planSaved = true;
             this._activeTask.plan = a.plan;
           }
-          if (['render_template', 'write_slide', 'insert_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !/失败|出错|错误/.test(String(result || ''))) {
+          if (['render_template', 'write_slide', 'insert_slide', 'delete_slide', 'reorder_slides', 'finalize_deck'].includes(a.tool) && !/失败|出错|错误/.test(String(result || ''))) {
             this._activeTask.deckValidated = false;
             if (this._activeTask.commandCheck) {
               this._activeTask.commandInspected = false;
@@ -1252,8 +1765,8 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     const currentRole = String(current?.slideType || '').toLowerCase();
     const insert = !current || (['finish', 'ending'].includes(currentRole) && !['finish', 'ending'].includes(plannedRole));
     return insert
-      ? { mode: 'insert', page, after: Math.max(0, page - 1), currentRole: currentRole || null }
-      : { mode: 'replace', page, after: null, currentRole: currentRole || null };
+      ? { mode: 'insert', page, after: Math.max(0, page - 1), currentRole: currentRole || null, targetPageId: planSlide?.targetPageId || null, sourcePageId: planSlide?.sourcePageId || null }
+      : { mode: 'replace', page, after: null, currentRole: currentRole || null, targetPageId: planSlide?.targetPageId || null, sourcePageId: planSlide?.sourcePageId || null };
   },
 
   _harnessPageContext(plan, planSlide, summaries = {}, stageGuidance = '') {
@@ -1309,11 +1822,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       if (String(action.mode || '') !== directive.mode) return `第 ${page} 页必须使用 ${directive.mode} 模式`;
       if (directive.mode === 'replace' && Number(action.page) !== page) return `模板必须替换第 ${page} 页`;
       if (directive.mode === 'insert' && Number(action.after) !== directive.after) return `模板必须在第 ${directive.after} 页后插入`;
+      if (directive.mode === 'insert' && directive.targetPageId && action.target_page_id && String(action.target_page_id) !== String(directive.targetPageId)) return `第 ${page} 页稳定标识与蓝图不一致`;
     }
     if (tool === 'write_slide' && directive.mode === 'insert') return '当前页需要插入，不能用 write_slide 覆盖结束页';
     if (tool === 'insert_slide' && (directive.mode !== 'insert' || Number(action.after) !== directive.after)) {
       return `当前页只能插入到第 ${directive.after} 页之后`;
     }
+    if (tool === 'insert_slide' && directive.targetPageId && action.target_page_id && String(action.target_page_id) !== String(directive.targetPageId)) return `第 ${page} 页稳定标识与蓝图不一致`;
     if (tool === 'search_design_examples' && mutated) return '页面写入后不能再切换设计方向';
     return '';
   },
@@ -1348,6 +1863,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       template_variant: templateVariant,
       slide_type: templateRole,
       title: planSlide.title,
+      target_page_id: directive.targetPageId || null,
     };
     counters.tools += 1;
     const actionStartedAt = this._now();
@@ -1364,7 +1880,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     const selected = this.selectedConfig || this.aiConfig || {};
     if (selected.aiProvider !== 'lectureai') return null;
     const provider = (this.providers || []).find(item => item.id === 'lectureai');
-    const token = String(provider?.config?.aiApiKey || '').trim();
+    const token = String(provider?.config?.aiApiKey || selected.aiApiKey || '').trim();
     if (!token || typeof WebSocket === 'undefined') return null;
     const base = String(this.lectureAiServerUrl || 'https://design.hz-study-system.com').replace(/\/+$/, '');
     const socketBase = base.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
@@ -1402,19 +1918,297 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     return details;
   },
 
-  async _executePiTool(message, planSlide, directive, counters) {
+  _nativeTaskDeckId(taskSpec) {
+    const explicit = String(this.manifest?.deckId || this.manifest?.manifest?.deckId || '').trim();
+    if (/^[a-zA-Z0-9._-]{8,120}$/.test(explicit)) return explicit;
+    const revision = String(this.manifest?.deckRevision?.deckHash || '').replace(/^sha256:/, '');
+    if (/^[a-fA-F0-9]{32,64}$/.test(revision)) return `deck-${revision.slice(0, 40)}`;
+    return `deck-${String(taskSpec?.runId || this._newPiId('task')).replace(/^run_/, '').slice(0, 80)}`;
+  },
+
+  _nativeTaskContext() {
+    return {
+      deckRevision: this.manifest?.deckRevision?.deckHash || null,
+      currentPage: this.currentPage,
+      outline: String(this.manifest?.outline || '').slice(0, 20000),
+      slides: (this.manifest?.slides || []).slice(0, 60).map((slide, index) => ({
+        id: slide.id || null,
+        page: index + 1,
+        title: String(slide.title || '').slice(0, 200),
+        role: String(slide.slideType || slide.slide_type || 'content').slice(0, 30),
+      })),
+    };
+  },
+
+  async _executeNativeTaskTool(message, runId, counters) {
+    const action = { ...(message.args || {}), tool: message.tool };
+    counters.tools += 1;
+    const startedAt = this._now();
+    const actionEl = this._logAction(action, counters.tools);
+    const receipt = await this._rpc('execute-task-action', {
+      runId,
+      action,
+      taskSpec: this._activeTask?.taskSpec || null,
+      envelope: {
+        actionId: message.actionId,
+        argsHash: message.argsHash,
+        expectedDeckRevision: message.expectedDeckRevision || null,
+      },
+    });
+    const display = receipt?.ok === true ? receipt.result : receipt?.error?.userMessage || 'LectureAI 未能完成当前步骤';
+    this._finishAction(actionEl, startedAt, display);
+    this._logResult(display);
+    if (receipt?.ok !== true) {
+      const error = new Error(receipt?.error?.userMessage || 'LectureAI 未能完成当前步骤');
+      error.details = receipt?.error || null;
+      throw error;
+    }
+    if (['render_template', 'write_slide', 'insert_slide', 'delete_slide', 'reorder_slides', 'finalize_deck'].includes(action.tool)) await this._refreshContext();
+    return receipt;
+  },
+
+  _nativeTaskValidation(taskSpec, terminal = {}) {
+    if (terminal?.validation && typeof terminal.validation === 'object') return terminal.validation;
+    const events = Array.isArray(terminal?.tools) ? terminal.tools : [];
+    const slides = [];
+    const failedPages = [];
+    for (const event of events) {
+      const tool = String(event?.tool || event?.name || '');
+      const result = event?.result && typeof event.result === 'object' ? event.result : event;
+      if (tool !== 'validate_slide' || !Number.isInteger(Number(result.page))) continue;
+      const page = Number(result.page);
+      const passed = result.passed === true;
+      slides.push({ page, passed, errors: passed ? [] : ['页面检查未通过'], warnings: [], issues: [] });
+      if (!passed) failedPages.push(page);
+    }
+    const deckEvent = [...events].reverse().find(event => String(event?.tool || event?.name || '') === 'validate_deck');
+    const deckResult = deckEvent?.result && typeof deckEvent.result === 'object' ? deckEvent.result : {};
+    const intent = String(taskSpec?.intent || '');
+    const needsValidation = ['slide_edit', 'slide_insert', 'deck_validate'].includes(intent);
+    if (!needsValidation) return { schemaVersion: 1, passed: true, errors: [], warnings: [], issues: [], failedPages: [], slides: [] };
+    const passed = deckResult.passed === true || (slides.length > 0 && failedPages.length === 0);
+    return {
+      schemaVersion: 1,
+      passed,
+      errors: passed ? [] : ['页面检查未通过'],
+      warnings: [],
+      issues: [],
+      failedPages: [...new Set(failedPages)],
+      slides,
+      metrics: { slideCount: slides.length },
+    };
+  },
+
+  async _runLectureAiNativeTask(taskSpec, instruction, recoveredRun = null) {
+    const config = this._lecturePiConfig();
+    if (!config) {
+      this._appendAssistantMarkdown('### 无法开始任务\n\nLectureAI 暂不可用，请稍后重试。');
+      return;
+    }
+    const protocol = window.LectureAiTaskProtocol;
+    const counters = { tools: 0 };
+    const deckId = this._nativeTaskDeckId(taskSpec);
+    const sessionId = taskSpec.runId;
+    this.busy = true;
+    this._setBusy(true);
+    this._stopRequested = false;
+    const recoveredPlan = recoveredRun?.plan && typeof recoveredRun.plan === 'object' ? recoveredRun.plan : null;
+    this._activeTask = {
+      taskSpec,
+      runId: taskSpec.runId,
+      userInstruction: instruction,
+      deckLevel: taskSpec.scope === 'deck',
+      requiresPlan: taskSpec.requiresDeckPlan === true,
+      harnessEnabled: taskSpec.requiresDeckPlan === true,
+      planSaved: !!recoveredPlan,
+      plan: recoveredPlan,
+      deckValidated: false,
+    };
+    this._taskCardSpec = taskSpec;
+    this._renderTaskCard({ runId: taskSpec.runId, status: 'running', userFacingGoal: taskSpec.userFacingGoal, totalPages: this.manifest?.slides?.length || 0 }, taskSpec);
+    if (window.__TAURI__?.core?.invoke) {
+      try {
+        await this._rpc('task-journal-start', { runId: taskSpec.runId, taskSpec, deckRevision: this.manifest?.deckRevision?.deckHash || null });
+        await this._rpc('task-journal-update', {
+          runId: taskSpec.runId,
+          patch: { status: 'running', taskSpec, userInstruction: instruction, plan: recoveredPlan },
+        });
+      } catch (error) {
+        this._appendAssistantMarkdown(`### 无法开始任务\n\n${this._modelErrorMessage(error) || '无法建立安全恢复点，LectureAI 未开始写入。'}`);
+        this.busy = false;
+        this._setBusy(false);
+        return;
+      }
+    }
+    try {
+      const terminal = await new Promise((resolve, reject) => {
+        const socket = new WebSocket(config.url, ['lectureai.pi.v1', `lectureai.auth.${config.token}`]);
+        this._piSocket = socket;
+        this._piReject = reject;
+        let settled = false;
+        let queue = Promise.resolve();
+        const finish = (error, message) => {
+          if (settled) return;
+          settled = true;
+          if (this._piSocket === socket) this._piSocket = null;
+          if (this._piReject === reject) this._piReject = null;
+          if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'task complete');
+          if (error) reject(error); else resolve(message);
+        };
+        socket.onopen = () => {
+          socket.send(JSON.stringify({
+            type: 'start_task',
+            protocol_version: protocol.CONTRACT.protocolVersion,
+            capabilities: [...protocol.CONTRACT.capabilities],
+            session_id: sessionId,
+            deck_id: deckId,
+            deck_revision: this.manifest?.deckRevision?.deckHash || null,
+            task_spec: taskSpec,
+            task_context: this._nativeTaskContext(),
+            user_instruction: instruction,
+          }));
+        };
+        socket.onmessage = event => {
+          queue = queue.then(async () => {
+            const message = JSON.parse(String(event.data || '{}'));
+            if (message.type === 'tool_call') {
+              try {
+                const receipt = await this._executeNativeTaskTool(message, taskSpec.runId, counters);
+                if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
+                  type: 'tool_result',
+                  ['request_id']: message.request_id,
+                  actionId: receipt.actionId,
+                  argsHash: receipt.argsHash,
+                  newDeckRevision: receipt.newDeckRevision,
+                  ok: true,
+                  result: { ...receipt.result, newDeckRevision: receipt.newDeckRevision },
+                }));
+              } catch (error) {
+                const detail = error?.details || { code: 'CLIENT_TOOL_FAILED', category: 'client_unavailable', retryable: false, userMessage: this._modelErrorMessage(error) };
+                if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
+                  type: 'tool_result',
+                  ['request_id']: message.request_id,
+                  actionId: message.actionId,
+                  argsHash: message.argsHash,
+                  ok: false,
+                  error: detail,
+                }));
+              }
+              return;
+            }
+            if (message.type === 'progress' || message.type === 'session_started') {
+              const label = this._friendlyLabel(message.label || 'LectureAI 正在处理任务');
+              this._log('sys', label);
+              return;
+            }
+            if (['task_ready', 'task_complete', 'paused'].includes(message.type)) {
+              finish(null, message);
+              return;
+            }
+            if (message.type === 'error') {
+              const raw = message.error && typeof message.error === 'object'
+                ? message.error
+                : { userMessage: this._friendlyLabel(message.error || 'LectureAI 任务执行失败') };
+              const friendly = protocol.friendlyError(raw);
+              finish(new Error(friendly.userMessage));
+            }
+          }).catch(error => finish(error));
+        };
+        socket.onerror = () => finish(new Error('无法连接 LectureAI 服务'));
+        socket.onclose = event => {
+          if (!settled) finish(new Error(this._stopRequested ? '用户取消了当前任务' : `LectureAI 连接已中断（${event.code}）`));
+        };
+      });
+
+      await this._refreshContext();
+      if (terminal.type === 'task_ready') {
+        const plan = terminal.plan || this.manifest?.deckPlan?.plan || recoveredPlan;
+        if (!plan || !Array.isArray(plan.slides)) throw new Error('LectureAI 已完成规划，但本地课件蓝图未能载入。');
+        this._activeTask.planSaved = true;
+        this._activeTask.plan = plan;
+        if (window.__TAURI__?.core?.invoke) {
+          await this._rpc('task-journal-update', {
+            runId: taskSpec.runId,
+            patch: { status: 'ready', taskSpec, userInstruction: instruction, plan },
+          });
+        }
+        await this._runPlannedHarness(plan, instruction);
+        return;
+      }
+      if (terminal.type === 'paused') {
+        if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status: 'paused', taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan } }).catch(() => {});
+        this._appendAssistantMarkdown('### 任务已暂停\n\n进度已经保存，下次可继续当前任务。');
+        this._renderTaskCard({ runId: taskSpec.runId, status: 'paused', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
+        return;
+      }
+      const accepted = await this._completeLectureAiTaskRun(
+        null,
+        [],
+        this._nativeTaskValidation(taskSpec, terminal),
+        {},
+        [],
+      );
+      if (accepted?.status !== 'completed') {
+        const status = accepted?.status === 'needs_repair' ? 'needs_repair' : 'paused';
+        if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status, taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan, failedPages: accepted?.failedPages || [] } }).catch(() => {});
+        this._renderTaskCard({ runId: taskSpec.runId, status, userFacingGoal: taskSpec.userFacingGoal, failedPages: accepted?.failedPages || [] }, taskSpec);
+        this._appendAssistantMarkdown(status === 'needs_repair'
+          ? `### 需要继续修复\n\nLectureAI 已定位到需要处理的页面。`
+          : '### 任务已暂停\n\n任务进度已保存，完成状态尚未得到确认。');
+        return;
+      }
+      if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status: 'completed', taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan } }).catch(() => {});
+      const summary = this._friendlyLabel(terminal.summary || '任务已完成并通过检查。');
+      this._renderTaskCard({ runId: taskSpec.runId, status: 'completed', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
+      this._appendAssistantMarkdown(`### 任务已完成\n\n${summary}`);
+    } catch (error) {
+      if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status: this._stopRequested ? 'paused' : 'failed', error: this._modelErrorMessage(error), taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan } }).catch(() => {});
+      if (this._stopRequested) {
+        this._renderTaskCard({ runId: taskSpec.runId, status: 'paused', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
+        this._appendAssistantMarkdown('### 任务已停止\n\n进度已经保存，下次可继续当前任务。');
+      } else {
+        this._renderTaskCard({ runId: taskSpec.runId, status: 'failed', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
+        this._appendAssistantMarkdown(`### 任务未完成\n\n${this._modelErrorMessage(error)}`);
+      }
+    } finally {
+      this.busy = false;
+      this._setBusy(false);
+    }
+  },
+
+  async _executePiTool(message, planSlide, directive, counters, plan = null) {
     const action = { ...(message.args || {}), tool: message.tool };
     const gateError = this._harnessAllowedAction(action, planSlide, directive, false);
     if (gateError) throw new Error(gateError);
     counters.tools += 1;
     const startedAt = this._now();
     const actionEl = this._logAction(action, counters.tools);
-    const result = await this._rpc('execute-action', { action });
+    const runId = String(plan?.taskSpecRef?.runId || this._activeTask?.runId || '').trim();
+    const receipt = runId && message.actionId && message.argsHash
+      ? await this._rpc('execute-task-action', {
+        runId,
+        action,
+        taskSpec: this._activeTask?.taskSpec || null,
+        envelope: {
+          actionId: message.actionId,
+          argsHash: message.argsHash,
+          expectedDeckRevision: message.expectedDeckRevision || null,
+        },
+      })
+      : null;
+    const result = receipt ? (receipt.ok ? receipt.result : receipt.error?.userMessage) : await this._rpc('execute-action', { action });
     this._finishAction(actionEl, startedAt, result);
     this._logResult(result);
+    if (receipt && receipt.ok !== true) {
+      const error = new Error(receipt.error?.userMessage || 'LectureAI 未能完成当前步骤');
+      error.details = receipt.error;
+      throw error;
+    }
     if (this._isTerminalToolFailure(result) || this._resultIsError(result)) throw new Error(String(result));
     if (['render_template', 'write_slide', 'insert_slide'].includes(action.tool)) await this._refreshContext();
-    return this._piToolDetails(action, result);
+    return receipt
+      ? { ...receipt.result, actionId: receipt.actionId, argsHash: receipt.argsHash, newDeckRevision: receipt.newDeckRevision }
+      : this._piToolDetails(action, result);
   },
 
   async _runPiHarnessPage(plan, planSlide, summaries, stageGuidance, counters, piConfig) {
@@ -1452,6 +2246,9 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
             page, templateId: planSlide.templateId || planSlide.template_id || '',
             templateVariant: planSlide.templateVariant || planSlide.template_variant || '',
             mode: directive.mode, after: directive.after,
+            targetPageId: planSlide.targetPageId || null,
+            sourcePageId: planSlide.sourcePageId || null,
+            expectedDeckRevision: this.manifest?.deckRevision?.deckHash || null,
           },
           user_instruction: [this._activeTask?.userInstruction || '生成整套课件', this._outlinePromptBlock()].filter(Boolean).join('\n\n'),
           stage_guidance: stageGuidance || '',
@@ -1464,10 +2261,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
             if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 正在${this._toolDisplayName(message.tool)} · ${this._duration(this._modelStartedAt)}`;
             this._log('sys', `LectureAI · 第 ${page} 页 · ${this._toolDisplayName(message.tool)}`);
             try {
-              const result = await this._executePiTool(message, planSlide, directive, counters);
+              const result = await this._executePiTool(message, planSlide, directive, counters, plan);
               if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
                 type: 'tool_result',
                 ['request_id']: message.request_id,
+                actionId: message.actionId || result.actionId || null,
+                argsHash: message.argsHash || result.argsHash || null,
+                newDeckRevision: result.newDeckRevision || null,
                 ok: true,
                 result,
               }));
@@ -1475,8 +2275,10 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
               if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
                 type: 'tool_result',
                 ['request_id']: message.request_id,
+                actionId: message.actionId || null,
+                argsHash: message.argsHash || null,
                 ok: false,
-                error: this._modelErrorMessage(error),
+                error: error?.details || { code: 'CLIENT_TOOL_FAILED', category: 'client_unavailable', retryable: false, userMessage: this._modelErrorMessage(error) },
               }));
             }
             return;
@@ -1508,6 +2310,9 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   async _runHarnessPage(plan, planSlide, summaries, stageGuidance, counters) {
     const piConfig = this._lecturePiConfig();
     if (piConfig) return this._runPiHarnessPage(plan, planSlide, summaries, stageGuidance, counters, piConfig);
+    if ((this.selectedConfig || this.aiConfig || {}).aiProvider === 'lectureai') {
+      throw new Error('LectureAI 暂不可用，任务进度已保存。请稍后重试，或在模型选择器中明确选择兼容模式。');
+    }
     return this._runLegacyHarnessPage(plan, planSlide, summaries, stageGuidance, counters);
   },
 
@@ -1578,8 +2383,32 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     throw new Error(`第 ${page} 页超过单页执行轮次上限`);
   },
 
-  async _runHarnessStageReview(plan, completedPages, summaries) {
-    const pages = completedPages.slice(-5);
+  async _runHarnessStageReview(plan, completedPages, summaries, stageReviews = []) {
+    const taskSpec = this._activeTask?.taskSpec;
+    const interval = Number(taskSpec?.executionPolicy?.stageReviewInterval || plan?.executionPolicy?.stageReviewInterval || 5);
+    const pages = completedPages.slice(-interval);
+    if ((this.selectedConfig || this.aiConfig || {}).aiProvider === 'lectureai' && taskSpec?.runId) {
+      const token = String((this.selectedConfig || this.aiConfig || {}).aiApiKey || '').trim();
+      const response = await window.__TAURI__.core.invoke('auth_api_request', {
+        action: 'task_stage_review',
+        token,
+        payload: {
+          runId: taskSpec.runId,
+          plan,
+          completedPages,
+          summaries,
+          previousReviews: stageReviews,
+        },
+      });
+      if (!response?.ok) {
+        const detail = response?.data?.detail;
+        const friendly = window.LectureAiTaskProtocol?.friendlyError(
+          detail && typeof detail === 'object' ? detail : { userMessage: String(detail || 'LectureAI 暂时无法完成阶段检查。') },
+        );
+        throw new Error(friendly?.userMessage || 'LectureAI 暂时无法完成阶段检查。');
+      }
+      return String(response?.data?.guidance || '').trim() || '阶段衔接通过';
+    }
     const next = (plan.slides || []).filter(slide => Number(slide.page) > pages[pages.length - 1]).slice(0, 3);
     const messages = [
       { role: 'system', content: '你是课件阶段审查器。只根据规划和页面摘要检查教学递进、概念跳跃、术语漂移和模板节奏。不得调用工具。输出不超过 180 字的具体修正建议；没有问题则输出“阶段衔接通过”。' },
@@ -1594,16 +2423,90 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     plan.execution = { ...(plan.execution || {}), schemaVersion: 1, ...execution, updatedAt: new Date().toISOString() };
     const result = await this._rpc('execute-action', { action: { tool: 'set_deck_plan', plan } });
     if (this._resultIsError(result)) throw new Error(String(result));
+    const runId = String(plan?.taskSpecRef?.runId || this._activeTask?.taskSpec?.runId || this._activeTask?.runId || '').trim();
+    if (runId && window.__TAURI__?.core?.invoke) {
+      const patch = {
+        status: execution.status,
+        nextPage: execution.nextPage ?? null,
+        completedPages: Array.isArray(execution.completedPages) ? execution.completedPages : [],
+        totalPages: Number(plan?.targetSlideCount || 0),
+        currentDeckRevision: this.manifest?.deckRevision?.deckHash || null,
+        validation: execution.validation || null,
+        error: execution.error || null,
+        taskSpec: this._activeTask?.taskSpec || null,
+        userInstruction: this._activeTask?.userInstruction || '',
+        plan,
+        summaries: execution.summaries || {},
+        stageReviews: execution.stageReviews || [],
+        piSessionId: execution.piSessionId || plan?.execution?.piSessionId || this._activeTask?.piSessionId || '',
+        piDeckId: execution.piDeckId || plan?.execution?.piDeckId || this._activeTask?.piDeckId || '',
+      };
+      await this._rpc('task-journal-update', { runId, patch });
+    }
+  },
+
+  async _completeLectureAiTaskRun(plan = null, completedPages = [], validation = {}, summaries = {}, stageReviews = []) {
+    const taskSpec = this._activeTask?.taskSpec;
+    if (!taskSpec?.runId || (this.selectedConfig || this.aiConfig || {}).aiProvider !== 'lectureai') return null;
+    await this._refreshContext();
+    const revision = String(this.manifest?.deckRevision?.deckHash || '');
+    if (!/^sha256:[a-fA-F0-9]{32,64}$/.test(revision)) {
+      throw new Error('无法确认课件最终版本，任务进度已保存。');
+    }
+    const token = String((this.selectedConfig || this.aiConfig || {}).aiApiKey || '').trim();
+    const response = await window.__TAURI__.core.invoke('auth_api_request', {
+      action: 'task_complete',
+      token,
+      payload: {
+        runId: taskSpec.runId,
+        currentDeckRevision: revision,
+        taskSpec,
+        completedPages: [...new Set((completedPages || []).map(Number).filter(Number.isInteger))],
+        plan: plan || null,
+        summaries,
+        stageReviews,
+        finalSummary: `LectureAI 已处理 ${completedPages?.length || 0} 页并完成整套课件检查。`,
+        validation,
+      },
+    });
+    if (!response?.ok) {
+      const detail = response?.data?.detail;
+      const friendly = window.LectureAiTaskProtocol?.friendlyError(
+        detail && typeof detail === 'object' ? detail : { userMessage: String(detail || 'LectureAI 无法确认任务完成状态。') },
+      );
+      throw new Error(friendly?.userMessage || 'LectureAI 无法确认任务完成状态。');
+    }
+    if (!['completed', 'needs_repair'].includes(response?.data?.status)) {
+      throw new Error('LectureAI 返回的任务状态与本地验收结果不一致，任务进度已保存。');
+    }
+    return response.data;
   },
 
   _harnessRepairPages(plan, validation) {
-    const errors = Array.isArray(validation?.errors) ? validation.errors : [];
     const referenced = new Set();
-    for (const error of errors) {
-      for (const match of String(error).matchAll(/第\s*(\d+)\s*页/g)) referenced.add(Number(match[1]));
+    const target = Number(plan?.targetSlideCount || plan?.slides?.length || 0);
+    const addPage = value => {
+      const page = Number(value);
+      if (Number.isInteger(page) && page >= 1 && page <= target) referenced.add(page);
+    };
+    for (const page of validation?.failedPages || []) addPage(page);
+    const pageById = new Map();
+    for (const item of plan?.slides || []) {
+      const id = item?.targetPageId || item?.sourcePageId || item?.pageId || item?.id;
+      if (id) pageById.set(String(id), Number(item.page));
     }
-    if (referenced.size) return [...referenced].filter(page => page >= 1 && page <= Number(plan.targetSlideCount)).slice(0, 5);
-    const motionError = errors.some(error => /动画|交互/.test(String(error)));
+    for (const [index, item] of (this.manifest?.slides || []).entries()) {
+      if (item?.id && !pageById.has(String(item.id))) pageById.set(String(item.id), index + 1);
+    }
+    for (const id of validation?.failedPageIds || []) addPage(pageById.get(String(id)));
+    for (const item of validation?.issues || []) {
+      if (!item || item.severity === 'warning') continue;
+      addPage(item.page);
+      for (const page of item.pages || []) addPage(page);
+    }
+    if (referenced.size) return [...referenced].slice(0, 5);
+    const codes = new Set((validation?.issues || []).map(item => String(item?.code || '')));
+    const motionError = codes.has('DECK_MOTION_COVERAGE_LOW');
     const candidates = (plan.slides || []).filter(slide => String(slide.role || '').toLowerCase() === 'content');
     const preferred = motionError
       ? candidates.filter(slide => !['', 'none', 'static'].includes(String(slide.motion || '').toLowerCase()))
@@ -1617,7 +2520,28 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       counters.tools += 1;
       const actionEl = this._logAction(validationAction, counters.tools);
       const actionStartedAt = this._now();
-      const validationResult = await this._rpc('execute-action', { action: validationAction });
+      let validationResult;
+      const taskSpec = this._activeTask?.taskSpec;
+      const runId = String(taskSpec?.runId || '').trim();
+      const cfg = this.selectedConfig || this.aiConfig || {};
+      const useServerReceipt = Boolean(
+        runId
+        && cfg.aiProvider === 'lectureai'
+        && (this._activeTask?.taskSpec?.runId || this._taskCardRun?.runId),
+      );
+      if (useServerReceipt) {
+        const actionId = `${runId}:client:validate-deck:${attempt + 1}`;
+        const argsHash = await window.LectureAiTaskProtocol.argsHash(validationAction);
+        const receipt = await this._executeServerTaskAction(
+          validationAction,
+          runId,
+          taskSpec,
+          { actionId, argsHash, expectedDeckRevision: this.manifest?.deckRevision?.deckHash || null },
+        );
+        validationResult = JSON.stringify(receipt.result || {});
+      } else {
+        validationResult = await this._rpc('execute-action', { action: validationAction });
+      }
       this._finishAction(actionEl, actionStartedAt, validationResult);
       this._logResult(validationResult);
       let validation = null;
@@ -1652,6 +2576,8 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       deckValidated: false,
       plan,
       harnessEnabled: true,
+      runId: String(plan?.taskSpecRef?.runId || this._taskCardRun?.runId || ''),
+      taskSpec: this._taskCardSpec || plan?.taskSpec || null,
       userInstruction: plan.execution?.userInstruction || input,
     };
     try {
@@ -1677,7 +2603,8 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     this._activeTask.userInstruction = userInstruction;
     this._activeTask.piSessionId = piSessionId;
     this._activeTask.piDeckId = piDeckId;
-    this._log('sys', `分页 Harness 已启动 · ${plan.targetSlideCount} 页 · 每页独立上下文`);
+    const stageInterval = Number(this._activeTask?.taskSpec?.executionPolicy?.stageReviewInterval || plan?.executionPolicy?.stageReviewInterval || 5);
+    this._log('sys', `LectureAI 已启动 · ${plan.targetSlideCount} 页 · 每页独立处理`);
     try {
       for (const planSlide of plan.slides || []) {
         const page = Number(planSlide.page);
@@ -1690,8 +2617,8 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         await this._persistHarnessExecution(plan, {
           status: 'running', nextPage: page + 1, completedPages, summaries, stageReviews, userInstruction,
         });
-        if (completedPages.length % 5 === 0 && page < Number(plan.targetSlideCount)) {
-          const guidance = await this._runHarnessStageReview(plan, completedPages, summaries);
+        if (completedPages.length % stageInterval === 0 && page < Number(plan.targetSlideCount)) {
+          const guidance = await this._runHarnessStageReview(plan, completedPages, summaries, stageReviews);
           stageReviews.push({ throughPage: page, guidance });
           this._log('sys', `阶段审查 · 完成至第 ${page} 页 · ${guidance}`);
           await this._persistHarnessExecution(plan, {
@@ -1703,7 +2630,40 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       counters.tools += 1;
       const finalizeStartedAt = this._now();
       const finalizeEl = this._logAction(finalizeAction, counters.tools);
-      const finalizeResult = await this._rpc('execute-action', { action: finalizeAction });
+      const runId = String(plan?.taskSpecRef?.runId || this._activeTask?.runId || '').trim();
+      let finalizeResult;
+      // Plans created by the legacy compatibility worker may still carry a
+      // run reference, but they do not have the server-owned TaskSpec/lease
+      // contract. Keep those plans on the local executor; only a LectureAI
+      // TaskSpec run is allowed to enter the action-receipt path.
+      const cfg = this.selectedConfig || this.aiConfig || {};
+      const useServerReceipt = Boolean(
+        runId
+        && cfg.aiProvider === 'lectureai'
+        && (this._activeTask?.taskSpec?.runId || this._taskCardRun?.runId),
+      );
+      if (useServerReceipt) {
+        const receipt = await this._executeServerTaskAction(
+          finalizeAction,
+          runId,
+          this._activeTask?.taskSpec || null,
+          {
+            actionId: `${runId}:client:finalize:1`,
+            argsHash: await window.LectureAiTaskProtocol.argsHash(
+              window.LectureAiTaskProtocol.finalizationFingerprint(plan, runId),
+            ),
+            expectedDeckRevision: this.manifest?.deckRevision?.deckHash || null,
+          },
+        );
+        if (receipt?.ok !== true) {
+          const error = new Error(receipt?.error?.userMessage || 'LectureAI 未能整理最终页序');
+          error.details = receipt?.error || null;
+          throw error;
+        }
+        finalizeResult = receipt.result?.label || receipt.result?.message || '已确认最终页序';
+      } else {
+        finalizeResult = await this._rpc('execute-action', { action: finalizeAction });
+      }
       this._finishAction(finalizeEl, finalizeStartedAt, finalizeResult);
       this._logResult(finalizeResult);
       if (this._isTerminalToolFailure(finalizeResult) || this._resultIsError(finalizeResult)) throw new Error(String(finalizeResult));
@@ -1711,7 +2671,17 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       const validation = await this._validateAndRepairHarness(plan, {
         completedPages, summaries, stageReviews, userInstruction,
       }, counters);
+      await this._persistHarnessExecution(plan, {
+        status: 'validating', nextPage: null, completedPages, summaries, stageReviews,
+        validation: validation || { passed: false }, userInstruction,
+      });
       if (!validation?.passed) {
+        try {
+          await this._completeLectureAiTaskRun(plan, completedPages, validation || { passed: false }, summaries, stageReviews);
+        } catch (error) {
+          error.harnessStatus = 'paused';
+          throw error;
+        }
         await this._persistHarnessExecution(plan, {
           status: 'needs-repair', nextPage: null, completedPages, summaries, stageReviews,
           validation, userInstruction,
@@ -1721,12 +2691,23 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         throw failure;
       }
       this._activeTask.deckValidated = true;
+      try {
+        const accepted = await this._completeLectureAiTaskRun(plan, completedPages, validation, summaries, stageReviews);
+        if (accepted?.status === 'needs_repair') {
+          const failure = new Error(`最终验收需要继续修复第 ${(accepted.failedPages || []).join('、') || '相关'} 页`);
+          failure.harnessStatus = 'needs-repair';
+          throw failure;
+        }
+      } catch (error) {
+        error.harnessStatus = 'paused';
+        throw error;
+      }
       await this._persistHarnessExecution(plan, {
         status: 'completed', nextPage: null, completedPages, summaries, stageReviews,
         validation: { passed: true, metrics: validation.metrics || {} }, userInstruction,
       });
-      this._appendAssistantMarkdown(`### 课件生成完成\n\n已按分页 Harness 完成 ${completedPages.length} 页。每页使用独立局部上下文，并在每 5 页后进行一次教学衔接审查；整套校验已通过。`);
-      this._log('sys', `分页 Harness 完成 · ${counters.rounds} 轮模型响应 · ${counters.tools} 次工具调用 · ${this._duration(startedAt)}`);
+      this._appendAssistantMarkdown(`### 课件生成完成\n\nLectureAI 已完成 ${completedPages.length} 页，并按阶段检查教学衔接；整套课件检查已通过。`);
+      this._log('sys', `LectureAI 任务完成 · ${counters.rounds} 轮响应 · ${counters.tools} 次操作 · ${this._duration(startedAt)}`);
     } catch (error) {
       const status = this._stopRequested ? 'paused' : (error?.harnessStatus || 'failed');
       try {
@@ -1829,7 +2810,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   },
 
   _modelErrorMessage(error) {
-    return String(error?.message || error || '未知错误').replace(/^(?:Error:\s*)+/i, '').trim();
+    return this._userFacingText(String(error?.message || error || '未知错误').replace(/^(?:Error:\s*)+/i, '').trim());
   },
 
   _isRetryableModelError(message) {
@@ -1865,7 +2846,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     // Hide an unterminated action fence tail while it is still streaming in.
     const fenceIndex = this._streamFull.indexOf('```action');
     const source = fenceIndex >= 0 ? this._streamFull.slice(0, fenceIndex) : this._streamFull;
-    const visible = this._stripActions(source).trim();
+    const visible = this._userFacingText(this._stripActions(source).trim());
     if (visible.length < 80) return;
     if (!this._streamBubble) {
       const m = document.getElementById('wb-messages');
@@ -1904,7 +2885,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   },
 
   _updateModelStatusFromOutput() {
-    const summary = this._compactStatus(this._stripActions(this._streamFull));
+    const summary = this._compactStatus(this._userFacingText(this._stripActions(this._streamFull)));
     if (summary && this._modelStatusEl) {
       this._modelStatusEl.dataset.summary = summary;
       this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · ${summary} · ${this._modelDuration()}`;
@@ -1995,7 +2976,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
 
   _isTerminalToolFailure(result) {
     const text = String(result || '');
-    return /(?:write_slide|insert_slide|apply_role_template|reorder_slides|finalize_deck|set_deck_plan) 保存失败|已恢复执行前状态|文件冲突/.test(text);
+    return /(?:write_slide|insert_slide|delete_slide|apply_role_template|reorder_slides|finalize_deck|set_deck_plan) 保存失败|已恢复执行前状态|文件冲突/.test(text);
   },
 
   // ---- terminal log ----
@@ -2004,12 +2985,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     if (!m) return;
     const el = document.createElement('div');
     el.className = 'ln ln-' + type;
-    el.textContent = String(text || '');
+    const visibleText = type === 'user' ? String(text || '') : this._userFacingText(text);
+    el.textContent = visibleText;
     m.appendChild(el);
     this._scroll();
     // Persist conversation-relevant lines; 'phase' status lines are transient.
     if (!opts?.skipRecord && ['user', 'sys', 'ok', 'err'].includes(type)) {
-      this._transcript.push({ t: type, text: String(text || '') });
+      this._transcript.push({ t: type, text: visibleText });
       this._scheduleSessionSave();
     }
     return el;
@@ -2027,15 +3009,16 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     if (!m || !markdown) return;
     const el = document.createElement('div');
     el.className = 'ln ln-ai markdown-body';
+    const visibleMarkdown = this._userFacingText(markdown);
     if (window.marked) {
-      el.innerHTML = this._sanitizeHtml(window.marked.parse(markdown));
+      el.innerHTML = this._sanitizeHtml(window.marked.parse(visibleMarkdown));
     } else {
-      el.textContent = markdown;
+      el.textContent = visibleMarkdown;
     }
     m.appendChild(el);
     this._scroll();
     if (!opts?.skipRecord) {
-      this._transcript.push({ t: 'ai', md: String(markdown) });
+      this._transcript.push({ t: 'ai', md: visibleMarkdown });
       this._scheduleSessionSave();
     }
     return el;
@@ -2127,7 +3110,10 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   // User-facing names for internal tool calls; raw tool ids never reach the UI.
   _toolDisplayNames: {
     set_deck_plan: '规划整套大纲',
+    read_outline: '读取课件大纲',
     write_outline: '写入课件大纲',
+    load_skill: '加载助教技能',
+    read_skill_resource: '读取技能资料',
     search_icons: '检索图标库',
     use_icon: '下载图标',
     search_design_examples: '检索设计案例',
@@ -2135,6 +3121,8 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     read_slide: '读取页面',
     write_slide: '写入页面内容',
     insert_slide: '插入新页面',
+    apply_role_template: '套用页面母版',
+    delete_slide: '删除页面',
     reorder_slides: '调整页面顺序',
     finalize_deck: '整理成品页序',
     validate_slide: '校验页面',
@@ -2146,16 +3134,27 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     return this._toolDisplayNames[tool] || '处理页面';
   },
 
+  _userFacingText(value) {
+    let text = String(value || '');
+    for (const [tool, label] of Object.entries(this._toolDisplayNames)) {
+      text = text.replace(new RegExp(`\\b${tool}\\b`, 'gi'), label);
+    }
+    return text
+      .replace(/\bPi\s+(?:Agent|Runtime)\b/gi, 'LectureAI')
+      .replace(/\bPi\b/gi, 'LectureAI')
+      .replace(/\bRuntime\b/gi, 'LectureAI')
+      .replace(/\btool_call\b/gi, '任务步骤')
+      .replace(/\btool_result\b/gi, '步骤结果');
+  },
+
   _friendlyLabel(label) {
-    return String(label || '')
-      .replace(/Pi\s*Agent/g, 'LectureAI')
-      .replace(/\bPi\b/g, 'LectureAI')
+    return this._userFacingText(label)
       .replace(/渲染私有模板/g, '渲染页面模板');
   },
 
   _logAction(a, callNumber) {
     if (a.tool === '_parse_error') {
-      return this._log('err', `action 解析失败：${a.error || ''}`);
+      return this._log('err', `操作解析失败：${a.error || ''}`);
     }
     const page = a.page != null ? ` 第${a.page}页` : '';
     const after = a.after != null ? `（插在第${a.after}页后）` : '';
@@ -2185,7 +3184,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   _resultIsError(value) {
     const text = String(value || '').trim();
     return /(?:执行出错|保存失败|文件冲突|超出范围|缺少 tool|action 解析失败|未知工具|整理成品页序失败)/.test(text)
-      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(text);
+      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(text);
   },
 
   _appendDiff(before, after) {

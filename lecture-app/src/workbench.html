@@ -146,6 +146,15 @@
     .wb-recent-title { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wb-recent-path { font-size: 11px; color: var(--term-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wb-recent-empty { padding: 10px; color: var(--term-muted); font-size: 12px; text-align: center; }
+    .wb-task-card { margin: 8px 14px 0; padding: 9px 10px; border: 1px solid var(--term-border); border-radius: 6px; background: var(--term-surface); }
+    .wb-task-card[hidden] { display: none; }
+    .wb-task-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .wb-task-card-title { font-weight: 650; color: var(--term-fg); }
+    .wb-task-card-status { color: var(--term-accent); font-size: 11px; white-space: nowrap; }
+    .wb-task-card-goal, .wb-task-card-meta { margin-top: 3px; color: var(--term-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wb-task-card-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+    .wb-task-card-actions button { padding: 3px 7px; border: 1px solid var(--term-border); border-radius: 4px; background: var(--term-bg); color: var(--term-fg); font: inherit; font-size: 11px; cursor: pointer; }
+    .wb-task-card-actions button:hover { border-color: var(--term-accent); color: var(--term-accent); }
   </style>
 </head>
 <body>
@@ -163,9 +172,10 @@
         <button class="wb-clear" id="wb-clear" title="清空">清空</button>
       </div>
     </div>
+    <section id="wb-task-card" class="wb-task-card" hidden aria-live="polite"></section>
     <div class="term-log" id="wb-messages">
       <div class="term-empty">
-        <span class="term-empty-accent">LectureAI 工作台</span> · 课件级 Agent<br>
+        <span class="term-empty-accent">LectureAI 助教</span> · 课件工作台<br>
         对整套课件发指令，<span class="term-empty-accent">@3</span> 定位第 3 页<br>
         改完自动保存，主窗口实时预览
       </div>
@@ -184,6 +194,7 @@
     </div>
   </div>
   <script src="vendor/marked.min.js"></script>
+  <script src="js/lectureai-task-protocol.js"></script>
   <script src="js/ppte-rules-prompt.js"></script>
   <script src="js/ppte-slash-commands.js"></script>
   <script src="js/workbench-window.js"></script>
