@@ -258,6 +258,7 @@ fn task_api_path(action: &str, payload: Option<&serde_json::Value>) -> Result<(r
     let suffix = match action {
         "task_get" => "",
         "task_resume" => "/resume",
+        "task_pause" => "/pause",
         "task_cancel" => "/cancel",
         "task_complete" => "/complete",
         "task_stage_review" => "/stage-review",
@@ -408,6 +409,10 @@ mod auth_api_tests {
         assert_eq!(
             task_api_path("task_complete", Some(&serde_json::json!({"runId": "run_12345678"}))).unwrap(),
             (reqwest::Method::POST, "/api/web/ai/tasks/run_12345678/complete".to_string())
+        );
+        assert_eq!(
+            task_api_path("task_pause", Some(&serde_json::json!({"runId": "run_12345678"}))).unwrap(),
+            (reqwest::Method::POST, "/api/web/ai/tasks/run_12345678/pause".to_string())
         );
         assert_eq!(
             task_api_path("task_stage_review", Some(&serde_json::json!({"runId": "run_12345678"}))).unwrap(),
@@ -3072,10 +3077,11 @@ fn journal_update_run_file(dir: &Path, patch: &serde_json::Value) -> Result<serd
             "errorCode", "errorStage", "error", "validation", "failedPages", "currentLabel", "userInstruction",
             "taskSpec", "plan", "summaries", "stageReviews", "piSessionId", "piDeckId", "serverSync",
             "revertAvailable", "provider", "model", "templateCatalogVersion", "clientVersion", "runtimeVersion",
+            "progressSummary",
         ] {
             if let Some(value) = patch_object.get(key) {
                 let safe = match key {
-                    "userInstruction" | "currentLabel" | "piSessionId" | "piDeckId" | "provider" | "model"
+                    "userInstruction" | "currentLabel" | "progressSummary" | "piSessionId" | "piDeckId" | "provider" | "model"
                     | "templateCatalogVersion" | "clientVersion" | "runtimeVersion" => {
                         value.as_str().map(|item| serde_json::json!(journal_safe_text(item, 500))).unwrap_or(serde_json::Value::Null)
                     }
@@ -3644,8 +3650,10 @@ mod task_journal_tests {
                 "slides": [{"page": 1, "contentKind": "concept", "html": "<h1>secret</h1>"}],
                 "execution": {"completedPages": []},
             },
+            "progressSummary": "正在分析页面结构和动效",
         })).unwrap();
         assert_eq!(updated["plan"]["slides"][0]["contentKind"], "concept");
+        assert_eq!(updated["progressSummary"], "正在分析页面结构和动效");
         assert!(updated.to_string().find("secret").is_none());
         fs::remove_dir_all(root).unwrap();
     }

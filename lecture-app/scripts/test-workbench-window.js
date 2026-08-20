@@ -41,6 +41,7 @@ assert.ok(wb, 'WorkbenchWindow should be defined');
 assert.ok(slash, 'PpteSlashCommands should be defined');
 assert.equal('maxToolRounds' in wb, false, 'deck-level Agent must not have a fixed tool-round cap');
 assert.match(htmlSource, /id="wb-stop"/, 'workbench needs a user-visible stop control');
+assert.match(htmlSource, /\.wb-task-card-summary[^}]*white-space:\s*normal[^}]*-webkit-line-clamp:\s*3/s, 'task summaries must remain readable in the narrow workbench window');
 assert.match(source, /recoveryRounds > 3/, 'protocol recovery must stop before an infinite paid loop');
 assert.match(source, /deckValidated = false/, 'deck mutations must invalidate earlier deck validation');
 assert.match(source, /get-command-context/, 'concept animation command must request prepared slide context');
@@ -210,6 +211,10 @@ assert.equal(wb._compactStatus('好的。\n\n现在读取第 3 页。'), '现在
 assert.equal(wb._compactStatus('## 检查结果\n- 已完成全部检查'), '- 已完成全部检查');
 assert.equal(wb._resultIsError('set_deck_plan 已保存课件蓝图（目标 20 页）。'), false);
 assert.equal(wb._resultIsError('set_deck_plan 失败：缺少完整 plan 对象'), true);
+assert.equal(wb._resultIsError({ ok: false, error: { userMessage: '页面暂时无法保存' } }), true);
+assert.equal(wb._resultDisplayText({ page: 2, passed: true }), '第 2 页检查通过');
+assert.equal(wb._resultDisplayText({ ok: true, result: { page: 2, passed: true } }), '第 2 页检查通过');
+assert.doesNotMatch(wb._resultDisplayText({ page: 2, passed: true }), /\[object Object\]/);
 assert.equal(wb._hasUnexecutedToolIntent('先读取第 1 页，确认封面风格。'), true);
 assert.equal(wb._hasUnexecutedToolIntent('现在校验第 3 页。'), true);
 assert.equal(wb._hasUnexecutedToolIntent('查找 DeepSeek 图标资源。'), true);
@@ -832,6 +837,123 @@ function testStructuredTaskReceiptDetails() {
   );
   assert.deepEqual(finalize.order, ['s1', 't2']);
   assert.deepEqual(finalize.deletedPageIds, ['s3']);
+}
+
+function testTaskProgressSummaryIsScopedAndFriendly() {
+  const previousGetElementById = context.document.getElementById;
+  const previousRun = wb._taskCardRun;
+  const previousRunId = wb._taskProgressRunId;
+  const previousSummary = wb._taskProgressSummary;
+  const card = {
+    hidden: true,
+    innerHTML: '',
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+  };
+  try {
+    context.document.getElementById = id => id === 'wb-task-card' ? card : null;
+    wb._taskProgressRunId = 'run_old_task_12345678';
+    wb._taskProgressSummary = '旧任务摘要';
+    wb._renderTaskCard({
+      runId: 'run_new_task_12345678',
+      status: 'running',
+      progressSummary: '正在核对新任务页面',
+    });
+    assert.match(card.innerHTML, /思考过程摘要/);
+    assert.match(card.innerHTML, /正在核对新任务页面/);
+    assert.doesNotMatch(card.innerHTML, /旧任务摘要/, 'switching tasks must not reuse another run summary');
+
+    wb._renderTaskCard({ runId: 'run_new_task_12345678', status: 'paused' });
+    assert.equal(wb._taskCardRun.progressSummary, '正在核对新任务页面', 'same-run status renders must retain the live summary for resume');
+    assert.match(card.innerHTML, /正在核对新任务页面/);
+
+    wb._updateTaskProgressSummary('Pi Runtime 正在调用 write_slide tool_result', 'run_old_task_12345678');
+    assert.equal(wb._taskProgressSummary, '正在核对新任务页面', 'late events from another run must be ignored');
+    wb._updateTaskProgressSummary('Pi Runtime 正在调用 write_slide tool_result', 'run_new_task_12345678');
+    assert.match(wb._taskProgressSummary, /LectureAI/);
+    assert.doesNotMatch(wb._taskProgressSummary, /\bPi\b|Runtime|write_slide|tool_result/i);
+  } finally {
+    context.document.getElementById = previousGetElementById;
+    wb._taskCardRun = previousRun;
+    wb._taskProgressRunId = previousRunId;
+    wb._taskProgressSummary = previousSummary;
+  }
+}
+
+async function testTaskProgressSaveStaysWithOriginalDeck() {
+  const previousTauri = context.window.__TAURI__;
+  const previousDeckPath = wb._deckPath;
+  const previousTimers = wb._taskProgressSaveTimers;
+  const calls = [];
+  try {
+    context.window.__TAURI__ = {
+      core: {
+        invoke(command, payload) {
+          calls.push({ command, payload });
+          return Promise.resolve(null);
+        },
+      },
+    };
+    wb._taskProgressSaveTimers = new Map();
+    wb._deckPath = '/deck-a';
+    wb._queueTaskProgressSave('run_deck_a_12345678', '正在检查课件 A');
+    wb._deckPath = '/deck-b';
+    wb._flushTaskProgressSaves();
+    await Promise.resolve();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].command, 'ppte_task_journal_update');
+    assert.equal(calls[0].payload.folderPath, '/deck-a', 'debounced progress must never follow the active deck path');
+    assert.equal(calls[0].payload.runId, 'run_deck_a_12345678');
+  } finally {
+    for (const item of wb._taskProgressSaveTimers.values()) clearTimeout(item?.timer);
+    wb._taskProgressSaveTimers = previousTimers;
+    wb._deckPath = previousDeckPath;
+    context.window.__TAURI__ = previousTauri;
+  }
+}
+
+async function testValidationDiagnosticsRemainSuccessfulToolReceipts() {
+  const originals = {
+    gate: wb._harnessAllowedAction,
+    rpc: wb._rpc,
+    logAction: wb._logAction,
+    finishAction: wb._finishAction,
+    logResult: wb._logResult,
+    activeTask: wb._activeTask,
+  };
+  try {
+    wb._harnessAllowedAction = () => '';
+    wb._logAction = () => null;
+    wb._finishAction = () => {};
+    wb._logResult = () => {};
+    wb._activeTask = { runId: 'run_validation_receipt_12345678', taskSpec: { runId: 'run_validation_receipt_12345678' } };
+    wb._rpc = async (type) => {
+      assert.equal(type, 'execute-task-action');
+      return {
+        ok: true,
+        actionId: 'run_validation_receipt_12345678:action:1',
+        argsHash: `sha256:${'b'.repeat(64)}`,
+        result: { page: 2, passed: false, issues: [{ code: 'TEXT_OVERFLOW' }] },
+      };
+    };
+    const result = await wb._executePiTool({
+      tool: 'validate_slide',
+      args: { page: 2 },
+      actionId: 'run_validation_receipt_12345678:action:1',
+      argsHash: `sha256:${'b'.repeat(64)}`,
+    }, { page: 2 }, { page: 2, mode: 'replace' }, { tools: 0 }, {
+      taskSpecRef: { runId: 'run_validation_receipt_12345678' },
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.issues[0].code, 'TEXT_OVERFLOW');
+  } finally {
+    wb._harnessAllowedAction = originals.gate;
+    wb._rpc = originals.rpc;
+    wb._logAction = originals.logAction;
+    wb._finishAction = originals.finishAction;
+    wb._logResult = originals.logResult;
+    wb._activeTask = originals.activeTask;
+  }
 }
 
 async function testCancelledSaveRollsBackAgentMutation() {
@@ -1528,8 +1650,10 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
   const originalLogResult = wb._logResult;
   const originalSetBusy = wb._setBusy;
   const originalComplete = wb._completeLectureAiTaskRun;
+  const originalProgress = wb._updateTaskProgressSummary;
   const sent = [];
   const answers = [];
+  const progress = [];
   const revision = `sha256:${'a'.repeat(64)}`;
   const hash = `sha256:${'b'.repeat(64)}`;
   class FakeWebSocket {
@@ -1546,11 +1670,17 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
       const message = JSON.parse(raw);
       sent.push(message);
       if (message.type === 'start_task') {
-        setTimeout(() => this.onmessage({ data: JSON.stringify({
-          type: 'tool_call', ['request' + '_id']: 'native-request-1',
-          actionId: 'run_native_task_12345678:action:1', argsHash: hash,
-          expectedDeckRevision: revision, tool: 'validate_slide', args: { page: 2 },
-        }) }), 0);
+        setTimeout(() => {
+          this.onmessage({ data: JSON.stringify({
+            type: 'progress', runId: 'run_native_task_12345678',
+            label: 'LectureAI 正在处理任务', summary: '正在分析第 2 页的版式和动效',
+          }) });
+          this.onmessage({ data: JSON.stringify({
+            type: 'tool_call', ['request' + '_id']: 'native-request-1',
+            actionId: 'run_native_task_12345678:action:1', argsHash: hash,
+            expectedDeckRevision: revision, tool: 'validate_slide', args: { page: 2 },
+          }) });
+        }, 0);
       } else if (message.type === 'tool_result') {
         setTimeout(() => this.onmessage({ data: JSON.stringify({
           type: 'task_complete', runId: 'run_native_task_12345678', summary: '目标页检查通过',
@@ -1579,6 +1709,10 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
   wb._finishAction = () => {};
   wb._logResult = () => {};
   wb._setBusy = () => {};
+  wb._updateTaskProgressSummary = (value, runId) => {
+    progress.push({ value, runId });
+    return originalProgress.call(wb, value, runId);
+  };
   let completionValidation = null;
   wb._completeLectureAiTaskRun = async (_plan, _pages, validation) => {
     completionValidation = validation;
@@ -1608,6 +1742,8 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
     assert.equal(sent[1].argsHash, hash);
     assert.equal(sent[1].newDeckRevision, `sha256:${'c'.repeat(64)}`);
     assert.equal(sent[1].ok, true);
+    assert.ok(progress.some(item => item.runId === taskSpec.runId && /正在分析第 2 页/.test(item.value)), 'native progress summaries must reach the task card path');
+    assert.doesNotMatch(wb._taskProgressSummary, /\bPi\b|Runtime|validate_slide|tool_result/i);
     assert.equal(completionValidation.passed, false, 'runtime prose alone is not authoritative validation evidence');
     assert.match(answers.at(-1), /任务已完成/);
   } finally {
@@ -1622,6 +1758,7 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
     wb._logResult = originalLogResult;
     wb._setBusy = originalSetBusy;
     wb._completeLectureAiTaskRun = originalComplete;
+    wb._updateTaskProgressSummary = originalProgress;
     wb.busy = false;
   }
 }
@@ -2370,6 +2507,9 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
   await testFinalizeDeckRemovesOnlyUnplannedStarterPages();
   await testNativeDeleteSlideIsManifestOnlyAndPlanBound();
   testStructuredTaskReceiptDetails();
+  testTaskProgressSummaryIsScopedAndFriendly();
+  await testTaskProgressSaveStaysWithOriginalDeck();
+  await testValidationDiagnosticsRemainSuccessfulToolReceipts();
   await testCancelledSaveRollsBackAgentMutation();
   await testWorkbenchStopsAfterDiskSaveFailure();
   await testLongDeckJobRunsToCompletion();
