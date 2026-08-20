@@ -47,6 +47,7 @@ window.WorkbenchWindow = {
   _featureFlags: Object.create(null),
   _featureFlagsLoaded: false,
   _featureFlagsToken: '',
+  _lectureAiWebSocketUrl: '',
 
   async init() {
     // Input discovery must not depend on Tauri event subscriptions. If any
@@ -508,6 +509,20 @@ window.WorkbenchWindow = {
       && this._featureEnabled('lectureai_action_receipts_v1');
   },
 
+  _normalizeLectureAiWebSocketUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw || typeof URL === 'undefined') return '';
+    try {
+      const parsed = new URL(raw);
+      const localHost = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+      if (parsed.protocol !== 'wss:' && !(parsed.protocol === 'ws:' && localHost)) return '';
+      if (parsed.username || parsed.password || parsed.hash) return '';
+      return parsed.toString();
+    } catch (_) {
+      return '';
+    }
+  },
+
   async _loadLectureAiFeatures(force = false) {
     const selected = this.selectedConfig || this.aiConfig || {};
     const token = String(selected.aiApiKey || '').trim();
@@ -515,6 +530,7 @@ window.WorkbenchWindow = {
       this._featureFlags = Object.create(null);
       this._featureFlagsLoaded = true;
       this._featureFlagsToken = token;
+      this._lectureAiWebSocketUrl = '';
       return this._featureFlags;
     }
     if (!force && this._featureFlagsLoaded && this._featureFlagsToken === token) return this._featureFlags;
@@ -528,8 +544,12 @@ window.WorkbenchWindow = {
       this._featureFlags = response?.ok && response?.data?.flags && typeof response.data.flags === 'object'
         ? { ...response.data.flags }
         : Object.create(null);
+      this._lectureAiWebSocketUrl = response?.ok
+        ? this._normalizeLectureAiWebSocketUrl(response?.data?.websocketUrl)
+        : '';
     } catch (_) {
       this._featureFlags = Object.create(null);
+      this._lectureAiWebSocketUrl = '';
     }
     this._featureFlagsLoaded = true;
     return this._featureFlags;
@@ -1884,7 +1904,9 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     if (!token || typeof WebSocket === 'undefined') return null;
     const base = String(this.lectureAiServerUrl || 'https://design.hz-study-system.com').replace(/\/+$/, '');
     const socketBase = base.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
-    return { token, url: `${socketBase}/api/web/ai/pi/bridge` };
+    const fallbackUrl = this._normalizeLectureAiWebSocketUrl(`${socketBase}/api/web/ai/pi/bridge`);
+    const url = this._normalizeLectureAiWebSocketUrl(this._lectureAiWebSocketUrl) || fallbackUrl;
+    return url ? { token, url } : null;
   },
 
   _newPiId(prefix) {

@@ -21,6 +21,7 @@ const context = {
   document: { addEventListener() {} },
   crypto: require('node:crypto').webcrypto,
   TextEncoder,
+  URL,
   setTimeout,
   clearTimeout,
   setInterval,
@@ -2062,6 +2063,58 @@ async function testLectureAiTaskResolverRequest() {
   }
 }
 
+async function testLectureAiWebSocketUrlComesFromAuthenticatedFeatures() {
+  const previousTauri = context.window.__TAURI__;
+  const previousWebSocket = context.WebSocket;
+  const previousProviders = wb.providers;
+  const previousSelected = wb.selectedConfig;
+  const previousServerUrl = wb.lectureAiServerUrl;
+  const previousLoaded = wb._featureFlagsLoaded;
+  const previousToken = wb._featureFlagsToken;
+  const previousFlags = wb._featureFlags;
+  const previousWebSocketUrl = wb._lectureAiWebSocketUrl;
+  try {
+    context.WebSocket = function TestWebSocket() {};
+    wb.providers = [{ id: 'lectureai', config: { aiApiKey: 'feature-token' } }];
+    wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'feature-token' };
+    wb.lectureAiServerUrl = 'https://design.hz-study-system.com';
+    wb._featureFlagsLoaded = false;
+    context.window.__TAURI__ = {
+      core: {
+        invoke: async (command, args) => {
+          assert.equal(command, 'auth_api_request');
+          assert.equal(args.action, 'features');
+          assert.equal(args.token, 'feature-token');
+          return {
+            ok: true,
+            data: {
+              flags: { lectureai_task_spec_v2: true },
+              websocketUrl: 'wss://design.homework.it.com/api/web/ai/pi/bridge',
+            },
+          };
+        },
+      },
+    };
+    await wb._loadLectureAiFeatures(true);
+    assert.equal(wb._lecturePiConfig().url, 'wss://design.homework.it.com/api/web/ai/pi/bridge');
+
+    wb._lectureAiWebSocketUrl = 'ws://remote.example.test/api/web/ai/pi/bridge';
+    assert.equal(wb._lecturePiConfig().url, 'wss://design.hz-study-system.com/api/web/ai/pi/bridge');
+    wb._lectureAiWebSocketUrl = 'ws://localhost:8090/api/web/ai/pi/bridge';
+    assert.equal(wb._lecturePiConfig().url, 'ws://localhost:8090/api/web/ai/pi/bridge');
+  } finally {
+    context.window.__TAURI__ = previousTauri;
+    context.WebSocket = previousWebSocket;
+    wb.providers = previousProviders;
+    wb.selectedConfig = previousSelected;
+    wb.lectureAiServerUrl = previousServerUrl;
+    wb._featureFlagsLoaded = previousLoaded;
+    wb._featureFlagsToken = previousToken;
+    wb._featureFlags = previousFlags;
+    wb._lectureAiWebSocketUrl = previousWebSocketUrl;
+  }
+}
+
 async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
   const previousJournalInvoke = wb._taskJournalInvoke;
   const previousTaskApi = wb._taskApi;
@@ -2137,6 +2190,7 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
 
 (async () => {
   await testLectureAiTaskResolverRequest();
+  await testLectureAiWebSocketUrlComesFromAuthenticatedFeatures();
   await testTaskJournalRecoveryCleanupAndRevertCompensation();
   await testLectureAiRetriesOneTransientUpstreamFailure();
   await testInputUiBindsWithoutTauriEvents();
