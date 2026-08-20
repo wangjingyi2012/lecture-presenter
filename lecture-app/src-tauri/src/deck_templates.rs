@@ -1064,7 +1064,7 @@ mod tests {
             (
                 "安恒",
                 "anheng-classic",
-                "ef0760d5b986da8d9c1a924b2988a3e5235b26641c468e1313d27a3af8099d8e",
+                "f37885205a1934f7d1c1a35ca841d9ece8305be5d4a8206738fc9f25b9680a04",
             ),
             (
                 "学术蓝",

@@ -35,17 +35,17 @@ body {
     color: #000;
     margin: 0;
     font-weight: 900;
-    margin-left: 1.5vw; 
+    margin-left: 1.5vw;
 }
 
 /* --- 正文内容区域 --- */
 .content-area {
     position: absolute;
-    top: 14vh; 
+    top: 14vh;
     bottom: 10vh; /* 增加底部留白，限制最大高度 */
     left: 6vw;
     right: 6vw;
-    
+
     color: #333;
     font-size: 2vw; /* 24px / 1280 ~ 1.8vw, make it slightly larger for readability */
     line-height: 1.6;

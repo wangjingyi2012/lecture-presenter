@@ -2015,7 +2015,10 @@ async function testLectureAiTaskResolverRequest() {
   const previousTauri = context.window.__TAURI__;
   const previousManifest = wb.manifest;
   const previousConfig = wb.selectedConfig;
+  const previousWait = wb._wait;
+  const previousLog = wb._log;
   let request = null;
+  let attempts = 0;
   const taskSpec = {
     schemaVersion: 1,
     runId: 'run_12345678-1234-1234-1234-123456789abc',
@@ -2034,9 +2037,13 @@ async function testLectureAiTaskResolverRequest() {
     promptVersion: 'task-resolver-v1',
   };
   context.window.__TAURI__ = { core: { invoke: async (command, args) => {
+    attempts += 1;
     request = { command, args };
+    if (attempts === 1) throw new Error('认证服务连接失败：error sending request');
     return { ok: true, status: 200, data: { taskSpec, status: 'resolved', missingCapabilities: [] } };
   } } };
+  wb._wait = async () => {};
+  wb._log = () => {};
   wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
   wb.currentPage = 2;
   wb.manifest = {
@@ -2047,11 +2054,14 @@ async function testLectureAiTaskResolverRequest() {
     deckPlan: { plan: null },
   };
   try {
-    const resolved = await wb._resolveLectureAiTask('@2 优化这一页');
+    const resolved = await wb._resolveLectureAiTask('@2 优化这一页', null, 'run_request_12345678');
     assert.equal(resolved.runId, taskSpec.runId);
+    assert.equal(attempts, 2, 'a transient resolve transport failure should retry once with the same request id');
     assert.equal(request.command, 'auth_api_request');
     assert.equal(request.args.action, 'task_resolve');
     assert.equal(request.args.payload.clientKind, 'desktop');
+    assert.equal(request.args.payload.clientVersion, '2.2.4');
+    assert.equal(request.args.payload.requestRunId, 'run_request_12345678');
     assert.equal(request.args.payload.deckRevision, `sha256:${'a'.repeat(64)}`);
     assert.deepEqual(request.args.payload.mentions.pages, [2]);
     assert.equal(JSON.stringify(request.args.payload).includes('/private/local/deck'), false, 'resolver payload must not contain local paths');
@@ -2060,6 +2070,162 @@ async function testLectureAiTaskResolverRequest() {
     context.window.__TAURI__ = previousTauri;
     wb.manifest = previousManifest;
     wb.selectedConfig = previousConfig;
+    wb._wait = previousWait;
+    wb._log = previousLog;
+  }
+}
+
+async function testRapidSubmitIsAcknowledgedAndDeduplicated() {
+  const previousGetElementById = context.document.getElementById;
+  const previousConfig = wb.selectedConfig;
+  const previousManifest = wb.manifest;
+  const previousBusy = wb.busy;
+  const previousRefresh = wb._refreshContext;
+  const previousEnsureHistory = wb._ensureHistory;
+  const previousSystemPrompt = wb._systemPrompt;
+  const previousResolveAt = wb._resolveAt;
+  const previousRunTurn = wb._runTurn;
+  const previousAppendUser = wb._appendUser;
+  const previousAutoResize = wb._autoResizeInput;
+  const previousHideSlashMenu = wb._hideSlashMenu;
+  const input = { value: '@1 封面增加淡入动画', disabled: false, style: {}, scrollHeight: 20 };
+  const send = { disabled: false };
+  const stop = { hidden: true };
+  const userMessages = [];
+  let refreshCalls = 0;
+  let turnCalls = 0;
+  let releaseRefresh;
+  const refreshGate = new Promise(resolve => { releaseRefresh = resolve; });
+  context.document.getElementById = id => ({ 'wb-input': input, 'wb-send': send, 'wb-stop': stop }[id] || null);
+  wb.selectedConfig = { aiProvider: 'deepseek', aiApiKey: 'test-key' };
+  wb.manifest = { slides: [{ id: 's1', title: '封面', slideType: 'cover' }] };
+  wb.busy = false;
+  wb._refreshContext = async () => { refreshCalls += 1; await refreshGate; };
+  wb._ensureHistory = () => { wb.history = [{ role: 'system', content: '' }]; };
+  wb._systemPrompt = () => 'system';
+  wb._resolveAt = async value => ({ content: value, mentioned: [] });
+  wb._runTurn = async () => { turnCalls += 1; };
+  wb._appendUser = value => userMessages.push(value);
+  wb._autoResizeInput = () => {};
+  wb._hideSlashMenu = () => {};
+  let first;
+  let duplicate;
+  try {
+    first = wb._send();
+    duplicate = wb._send();
+    await Promise.resolve();
+    assert.equal(refreshCalls, 1, 'a second click during async preflight must not start another submission');
+    assert.equal(input.value, '', 'the accepted message should leave the input immediately');
+    assert.equal(input.disabled, true, 'the input should lock while the accepted message is being prepared');
+    assert.deepEqual(userMessages, ['@1 封面增加淡入动画'], 'the accepted message should appear exactly once without waiting for preflight');
+    releaseRefresh();
+    await Promise.all([first, duplicate]);
+    assert.equal(turnCalls, 1, 'only the accepted submission may reach the model turn');
+    assert.equal(input.disabled, false, 'the input should unlock when submission finishes');
+  } finally {
+    releaseRefresh();
+    await Promise.allSettled([first, duplicate].filter(Boolean));
+    context.document.getElementById = previousGetElementById;
+    wb.selectedConfig = previousConfig;
+    wb.manifest = previousManifest;
+    wb.busy = previousBusy;
+    wb._refreshContext = previousRefresh;
+    wb._ensureHistory = previousEnsureHistory;
+    wb._systemPrompt = previousSystemPrompt;
+    wb._resolveAt = previousResolveAt;
+    wb._runTurn = previousRunTurn;
+    wb._appendUser = previousAppendUser;
+    wb._autoResizeInput = previousAutoResize;
+    wb._hideSlashMenu = previousHideSlashMenu;
+    wb.history = [];
+  }
+}
+
+async function testTypedRetryResumesSavedTask() {
+  assert.equal(wb._isHarnessResumeRequest('重试。'), true, 'typed retry should resume the saved task instead of creating a context-free task');
+  const previousGetElementById = context.document.getElementById;
+  const previousConfig = wb.selectedConfig;
+  const previousManifest = wb.manifest;
+  const previousBusy = wb.busy;
+  const previousRun = wb._taskCardRun;
+  const previousSpec = wb._taskCardSpec;
+  const previousRefresh = wb._refreshContext;
+  const previousLoadFeatures = wb._loadLectureAiFeatures;
+  const previousFeatureEnabled = wb._featureEnabled;
+  const previousResolveTask = wb._resolveLectureAiTask;
+  const previousTaskApi = wb._taskApi;
+  const previousRunNative = wb._runLectureAiNativeTask;
+  const previousAppendUser = wb._appendUser;
+  const previousAutoResize = wb._autoResizeInput;
+  const previousHideSlashMenu = wb._hideSlashMenu;
+  const input = { value: '重试。', disabled: false, style: {}, scrollHeight: 20 };
+  const send = { disabled: false };
+  const stop = { hidden: true };
+  const originalInstruction = '@1 封面改成动态的，加点动画效果。';
+  const taskSpec = {
+    schemaVersion: 1,
+    runId: 'run_retry_12345678',
+    intent: 'slide_edit',
+    scope: 'page',
+    targets: { pages: [1], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+    executionStrategy: 'bounded_tool_loop',
+    requiresDeckPlan: false,
+    userFacingGoal: originalInstruction,
+    assumptions: [],
+    acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页面检查通过' }],
+    requiredCapabilities: ['slide.read', 'slide.write.transactional', 'deck.validate'],
+    confidence: 1,
+    requiresClarification: false,
+    taskSpecVersion: 'task-spec-v1',
+    promptVersion: 'task-resolver-v1',
+  };
+  const savedRun = { runId: taskSpec.runId, status: 'failed', userInstruction: originalInstruction, taskSpec };
+  const taskApiCalls = [];
+  const nativeCalls = [];
+  context.document.getElementById = id => ({ 'wb-input': input, 'wb-send': send, 'wb-stop': stop }[id] || null);
+  wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
+  wb.manifest = { slides: [{ id: 's1', title: '封面', slideType: 'cover' }], deckPlan: { plan: null } };
+  wb.busy = false;
+  wb._taskCardRun = savedRun;
+  wb._taskCardSpec = taskSpec;
+  wb._refreshContext = async () => {};
+  wb._loadLectureAiFeatures = async () => ({ lectureai_task_spec_v2: true });
+  wb._featureEnabled = name => name === 'lectureai_task_spec_v2';
+  wb._resolveLectureAiTask = async value => {
+    assert.equal(value, '重试。');
+    return taskSpec;
+  };
+  wb._taskApi = async (action, payload) => {
+    taskApiCalls.push({ action, payload });
+    return { ok: true, data: { status: 'running' } };
+  };
+  wb._runLectureAiNativeTask = async (...args) => nativeCalls.push(args);
+  wb._appendUser = () => {};
+  wb._autoResizeInput = () => {};
+  wb._hideSlashMenu = () => {};
+  try {
+    await wb._send();
+    assert.deepEqual(taskApiCalls, [{ action: 'task_resume', payload: { runId: taskSpec.runId } }], 'typed retry must resume the existing server task first');
+    assert.equal(nativeCalls.length, 1);
+    assert.equal(nativeCalls[0][0], taskSpec);
+    assert.equal(nativeCalls[0][1], originalInstruction, 'runtime must receive the saved instruction, not the word retry');
+    assert.equal(nativeCalls[0][2], savedRun, 'the saved local run must be reused for recovery state');
+  } finally {
+    context.document.getElementById = previousGetElementById;
+    wb.selectedConfig = previousConfig;
+    wb.manifest = previousManifest;
+    wb.busy = previousBusy;
+    wb._taskCardRun = previousRun;
+    wb._taskCardSpec = previousSpec;
+    wb._refreshContext = previousRefresh;
+    wb._loadLectureAiFeatures = previousLoadFeatures;
+    wb._featureEnabled = previousFeatureEnabled;
+    wb._resolveLectureAiTask = previousResolveTask;
+    wb._taskApi = previousTaskApi;
+    wb._runLectureAiNativeTask = previousRunNative;
+    wb._appendUser = previousAppendUser;
+    wb._autoResizeInput = previousAutoResize;
+    wb._hideSlashMenu = previousHideSlashMenu;
   }
 }
 
@@ -2189,6 +2355,8 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
 }
 
 (async () => {
+  await testRapidSubmitIsAcknowledgedAndDeduplicated();
+  await testTypedRetryResumesSavedTask();
   await testLectureAiTaskResolverRequest();
   await testLectureAiWebSocketUrlComesFromAuthenticatedFeatures();
   await testTaskJournalRecoveryCleanupAndRevertCompensation();

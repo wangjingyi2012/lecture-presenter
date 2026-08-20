@@ -42,6 +42,7 @@ window.WorkbenchWindow = {
   _restoreToken: 0,
   _taskCardRun: null,
   _taskCardSpec: null,
+  _pendingTaskResolve: null,
   _taskSyncTimers: new Map(),
   _taskJournalLoadSeq: 0,
   _featureFlags: Object.create(null),
@@ -1147,7 +1148,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     })}\n任务类型、范围和验收条件由服务端确定；只能在 targets 允许的范围内行动。`;
   },
 
-  async _resolveLectureAiTask(input, slash = null) {
+  async _resolveLectureAiTask(input, slash = null, requestRunId = null) {
     const protocol = window.LectureAiTaskProtocol;
     if (!protocol) throw new Error('当前客户端缺少 LectureAI 任务协议，请升级后重试。');
     const selected = this.selectedConfig || this.aiConfig || {};
@@ -1168,7 +1169,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       instruction: input,
       clientKind: 'desktop',
       protocolVersion: protocol.CONTRACT.protocolVersion,
-      clientVersion: '2.2.3',
+      clientVersion: '2.2.4',
       deckId: manifestDeckId || derivedDeckId,
       deckRevision: revision || null,
       slides: (this.manifest?.slides || []).slice(0, 60).map((slide, index) => ({
@@ -1184,12 +1185,29 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       isStarter: this.manifest?.templateBlueprint?.isStarter === true,
       templateRoles: [...new Set((this.manifest?.templateBlueprint?.roles || []).map(item => item.slideType).filter(Boolean))],
       capabilities: [...protocol.CONTRACT.capabilities],
+      requestRunId: resumeRunId ? null : (requestRunId || protocol.newRunId()),
       resumeRunId,
       failedPages: Array.isArray(resumePlan?.execution?.failedPages) ? resumePlan.execution.failedPages : [],
     };
-    const response = await window.__TAURI__.core.invoke('auth_api_request', {
-      action: 'task_resolve', payload, token,
-    });
+    let response;
+    try {
+      response = await window.__TAURI__.core.invoke('auth_api_request', {
+        action: 'task_resolve', payload, token,
+      });
+    } catch (firstError) {
+      const retryable = /连接失败|error sending request|network|timed?\s*out|timeout/i.test(String(firstError?.message || firstError || ''));
+      if (!retryable) throw firstError;
+      this._log('phase', 'LectureAI 连接暂时中断，正在自动重试', { skipRecord: true });
+      await this._wait(500);
+      try {
+        response = await window.__TAURI__.core.invoke('auth_api_request', {
+          action: 'task_resolve', payload, token,
+        });
+      } catch (retryError) {
+        console.error('LectureAI task resolution transport failed', retryError);
+        throw new Error('LectureAI 连接暂时中断，未能确认任务状态，请稍后重试。');
+      }
+    }
     if (!response?.ok) {
       const detail = response?.data?.detail;
       const structured = detail && typeof detail === 'object' ? detail : response?.data;
@@ -1290,6 +1308,18 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       alert('请先在主窗口设置中配置 AI，或登录后选择 LectureAI');
       return;
     }
+    // Claim the submission synchronously. Context refresh, feature discovery,
+    // and TaskSpec resolution all await network or main-window RPCs; without
+    // this lock, repeated Enter/click events start duplicate server tasks.
+    this.busy = true;
+    this._stopRequested = false;
+    this._setBusy(true, false);
+    this._appendUser(input, []);
+    this._log('phase', '已收到，正在准备 LectureAI 任务…', { skipRecord: true });
+    if (inputEl) inputEl.value = '';
+    this._autoResizeInput();
+    this._hideSlashMenu();
+    try {
     // refresh context (a PPTE may have been opened in the main window after this window loaded)
     await this._refreshContext();
     if (!this.manifest?.slides?.length) {
@@ -1308,26 +1338,42 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       ));
       if (this._featureEnabled('lectureai_task_spec_v2') || existingV2Run) {
       try {
-        taskSpec = await this._resolveLectureAiTask(input, slash);
+        const resolveKey = [
+          this._deckPath || this.manifest?.deckId || this.manifest?.deckRevision?.deckHash || '',
+          input,
+        ].join('\n');
+        const pending = this._pendingTaskResolve;
+        const requestRunId = existingV2Run
+          ? null
+          : pending?.key === resolveKey
+            ? pending.runId
+            : window.LectureAiTaskProtocol?.newRunId?.();
+        if (requestRunId) this._pendingTaskResolve = { key: resolveKey, runId: requestRunId };
+        taskSpec = await this._resolveLectureAiTask(input, slash, requestRunId);
+        this._pendingTaskResolve = null;
       } catch (error) {
-        this._appendUser(input, []);
         this._appendAssistantMarkdown(`### 无法开始任务\n\n${this._modelErrorMessage(error)}`);
         return;
       }
       if (taskSpec.requiresClarification) {
-        this._appendUser(input, []);
         this._appendAssistantMarkdown(taskSpec.clarificationQuestion || '请再说明希望 LectureAI 修改哪些页面，以及最终需要保留什么内容。');
-        if (inputEl) inputEl.value = '';
-        this._autoResizeInput();
-        this._hideSlashMenu();
         return;
       }
         if (existingV2Run || this._nativeTaskRolloutEnabled()) {
-          this._appendUser(input, []);
-          if (inputEl) inputEl.value = '';
-          this._autoResizeInput();
-          this._hideSlashMenu();
-          await this._runLectureAiNativeTask(taskSpec, input);
+          const recoveredRun = existingV2Run && this._taskCardRun?.runId === taskSpec.runId
+            ? this._taskCardRun
+            : null;
+          if (existingV2Run) {
+            try {
+              const resumed = await this._taskApi('task_resume', { runId: taskSpec.runId });
+              if (!resumed?.ok) throw new Error(resumed?.data?.detail?.userMessage || 'LectureAI 暂时无法恢复原任务。');
+            } catch (error) {
+              this._appendAssistantMarkdown(`### 无法继续任务\n\n${this._modelErrorMessage(error)}`);
+              return;
+            }
+          }
+          const executionInstruction = recoveredRun?.userInstruction || taskSpec.userFacingGoal || input;
+          await this._runLectureAiNativeTask(taskSpec, executionInstruction, recoveredRun);
           return;
         }
       }
@@ -1336,10 +1382,6 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     const executionStatus = resumablePlan?.execution?.status;
     const resumeRequested = taskSpec ? taskSpec.intent === 'resume_run' : this._isHarnessResumeRequest(input);
     if (resumeRequested && ['running', 'paused', 'failed', 'repairing', 'needs-repair'].includes(executionStatus)) {
-      this._appendUser(input, []);
-      if (inputEl) inputEl.value = '';
-      this._autoResizeInput();
-      this._hideSlashMenu();
       await this._resumePlannedHarness(resumablePlan, input);
       return;
     }
@@ -1413,15 +1455,17 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       runId: taskSpec?.runId || null,
     };
     this._stopRequested = false;
-    this._appendUser(input, mentioned);
     if (enabledSkills.length) this._log('sys', `本轮启用技能 · ${enabledSkills.join('、')}`);
     const additions = [this._taskSpecContext(taskSpec), skillContext, commandContext, taskInitialization, deckLevel ? this._outlinePromptBlock() : '', slash?.instruction || ''].filter(Boolean).join('\n\n');
     this.history.push({ role: 'user', content: additions ? `${content}\n\n${additions}` : content });
-    if (inputEl) inputEl.value = '';
-    this._autoResizeInput();
-    this._hideSlashMenu();
 
     await this._runTurn();
+    } catch (error) {
+      this._appendAssistantMarkdown(`### 无法开始任务\n\n${this._modelErrorMessage(error)}`);
+    } finally {
+      this.busy = false;
+      this._setBusy(false);
+    }
   },
 
   async _runTurn() {
@@ -1854,7 +1898,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   },
 
   _isHarnessResumeRequest(input) {
-    return /^(?:请)?(?:继续|恢复|接着)(?:生成|制作|执行|完成)?(?:课件|任务)?[。！!\s]*$/u.test(String(input || '').trim());
+    return /^(?:请)?(?:继续|恢复|接着|重试)(?:生成|制作|执行|完成)?(?:课件|任务)?[。！!\s]*$/u.test(String(input || '').trim());
   },
 
   async _prepareHarnessTarget(planSlide, counters) {
@@ -3243,12 +3287,12 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     return out;
   },
 
-  _setBusy(busy) {
+  _setBusy(busy, cancellable = true) {
     const send = document.getElementById('wb-send');
     const stop = document.getElementById('wb-stop');
     const input = document.getElementById('wb-input');
     if (send) send.disabled = busy;
-    if (stop) stop.hidden = !busy;
+    if (stop) stop.hidden = !busy || !cancellable;
     if (input) input.disabled = busy;
   },
 
