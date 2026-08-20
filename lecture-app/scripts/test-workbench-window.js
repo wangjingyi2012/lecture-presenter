@@ -2089,14 +2089,14 @@ async function testLectureAiWebSocketUrlComesFromAuthenticatedFeatures() {
             ok: true,
             data: {
               flags: { lectureai_task_spec_v2: true },
-              websocketUrl: 'wss://design.homework.it.com/api/web/ai/pi/bridge',
+              websocketUrl: 'wss://design.hz-study-system.com/api/web/ai/pi/bridge',
             },
           };
         },
       },
     };
     await wb._loadLectureAiFeatures(true);
-    assert.equal(wb._lecturePiConfig().url, 'wss://design.homework.it.com/api/web/ai/pi/bridge');
+    assert.equal(wb._lecturePiConfig().url, 'wss://design.hz-study-system.com/api/web/ai/pi/bridge');
 
     wb._lectureAiWebSocketUrl = 'ws://remote.example.test/api/web/ai/pi/bridge';
     assert.equal(wb._lecturePiConfig().url, 'wss://design.hz-study-system.com/api/web/ai/pi/bridge');
