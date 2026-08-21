@@ -30,6 +30,7 @@ const GITEE_KEYRING_USER: &str = "gitee-access-token";
 const CAPTION_KEYRING_SERVICE: &str = "Lecture Presenter";
 const CAPTION_KEYRING_USER: &str = "aliyun-bailian-caption-api-key";
 const CAPTION_WS_URL: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
+static APP_CONFIG_IO_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Default)]
 struct LiveCaptionState {
@@ -281,8 +282,20 @@ fn get_config_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app_data.join("app-config.json"))
 }
 
+fn app_config_io_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    APP_CONFIG_IO_LOCK.lock().map_err(|_| "应用配置读写锁已损坏".to_string())
+}
+
+fn write_app_config_text(path: &Path, content: &str) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(content)
+        .map_err(|e| format!("app-config.json 格式错误：{}", e))?;
+    atomic_write_bytes(path, content.as_bytes())
+        .map_err(|e| format!("无法保存 app-config.json：{}", e))
+}
+
 #[tauri::command]
 fn read_app_config(app_handle: tauri::AppHandle) -> Result<AppConfig, String> {
+    let _guard = app_config_io_guard()?;
     let app_data_config = get_config_path(&app_handle)?;
 
     // 1. Already in app data dir
@@ -292,7 +305,12 @@ fn read_app_config(app_handle: tauri::AppHandle) -> Result<AppConfig, String> {
         // Auto-inject built-in tutorial if not already present
         inject_builtin_course(&app_handle, &mut config);
         let updated = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-        let _ = fs::write(&app_data_config, &updated);
+        // Most callers only need to read the config. Rewriting it on every
+        // request created a truncate/read race between parallel feature/auth
+        // calls, occasionally exposing an empty JSON file to another reader.
+        if content.trim() != updated.trim() {
+            write_app_config_text(&app_data_config, &updated)?;
+        }
         return Ok(config);
     }
 
@@ -304,7 +322,7 @@ fn read_app_config(app_handle: tauri::AppHandle) -> Result<AppConfig, String> {
             let mut config: AppConfig = serde_json::from_str(&content).map_err(|e| e.to_string())?;
             inject_builtin_course(&app_handle, &mut config);
             let updated = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-            let _ = fs::write(&app_data_config, &updated);
+            write_app_config_text(&app_data_config, &updated)?;
             return Ok(config);
         }
     }
@@ -318,7 +336,7 @@ fn read_app_config(app_handle: tauri::AppHandle) -> Result<AppConfig, String> {
         let mut config: AppConfig = serde_json::from_str(&content).map_err(|e| e.to_string())?;
         inject_builtin_course(&app_handle, &mut config);
         let updated = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-        let _ = fs::write(&app_data_config, &updated);
+        write_app_config_text(&app_data_config, &updated)?;
         return Ok(config);
     }
 
@@ -432,6 +450,32 @@ mod auth_api_tests {
         );
         assert!(task_api_path("task_complete", Some(&serde_json::json!({"runId": "../../etc"}))).is_err());
         assert!(auth_api_spec("https://example.com").is_err());
+    }
+
+    #[test]
+    fn app_config_write_rejects_invalid_json_without_clobbering_existing_data() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "lecture-app-config-test-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app-config.json");
+        let original = r#"{"theme":"light","fontSize":16}"#;
+
+        write_app_config_text(&path, original).unwrap();
+        assert!(write_app_config_text(&path, "").is_err());
+        assert!(write_app_config_text(&path, r#"{"theme":"dark""#).is_err());
+
+        let persisted = fs::read_to_string(&path).unwrap();
+        assert_eq!(persisted, original);
+        assert!(serde_json::from_str::<serde_json::Value>(&persisted).is_ok());
+
+        fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -2237,9 +2281,9 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 
 #[tauri::command]
 fn save_app_config(app_handle: tauri::AppHandle, config_json: String) -> Result<(), String> {
+    let _guard = app_config_io_guard()?;
     let path = get_config_path(&app_handle)?;
-    fs::write(&path, &config_json).map_err(|e| e.to_string())?;
-    Ok(())
+    write_app_config_text(&path, &config_json)
 }
 
 #[tauri::command]
@@ -3343,7 +3387,11 @@ fn ppte_task_journal_clear(folder_path: String, keep_recent: Option<usize>) -> R
         let path = journal_run_path(&dir);
         let Ok(value) = journal_read_json(&path) else { continue; };
         let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "reverted") {
+        // `needs_repair` is a stopped, non-running state: the task loop ended
+        // without a clean completion. It is not actively resumable the way
+        // `paused` is, so the user's "清理" action must be able to remove it —
+        // otherwise these cards pile up and the button appears to do nothing.
+        if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "reverted" | "needs_repair") {
             let updated = value.get("updatedAt").and_then(|v| v.as_u64()).unwrap_or(0);
             terminal.push((updated, journal_dir_size(&dir), dir, status));
         } else {
@@ -3662,13 +3710,13 @@ mod task_journal_tests {
     fn explicit_history_cleanup_preserves_active_runs() {
         let root = deck("clear");
         let folder = root.to_string_lossy().to_string();
-        for (suffix, status) in [("completed", "completed"), ("failed", "failed"), ("paused", "paused")] {
+        for (suffix, status) in [("completed", "completed"), ("failed", "failed"), ("needs", "needs_repair"), ("paused", "paused")] {
             let run_id = format!("run_journal_clear_{}_12345678", suffix);
             ppte_task_journal_start(folder.clone(), run_id.clone(), serde_json::json!({"runId": run_id}), None).unwrap();
             ppte_task_journal_update(folder.clone(), run_id, serde_json::json!({"status": status})).unwrap();
         }
         let result = ppte_task_journal_clear(folder.clone(), Some(0)).unwrap();
-        assert_eq!(result["removed"].as_array().unwrap().len(), 2);
+        assert_eq!(result["removed"].as_array().unwrap().len(), 3);
         assert_eq!(result["preservedActive"], 1);
         let remaining = ppte_task_journal_list(folder).unwrap();
         assert_eq!(remaining.len(), 1);
