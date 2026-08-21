@@ -1485,6 +1485,17 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       resumeRunId,
       failedPages: Array.isArray(resumePlan?.execution?.failedPages) ? resumePlan.execution.failedPages : [],
     };
+    if (this._featureEnabled('lectureai_deck_digests_v1')) {
+      // Content digests let the server route purely on local facts (e.g.
+      // untouched starter placeholders) without shipping any detection logic
+      // into the client. Digest collection is best-effort: without it the
+      // server simply falls back to its usual metadata-based routing.
+      try {
+        payload.deckDigests = await this._rpc('deck-digests');
+      } catch (digestError) {
+        console.warn('LectureAI deck digest collection skipped', digestError);
+      }
+    }
     let response;
     try {
       response = await window.__TAURI__.core.invoke('auth_api_request', {
@@ -2290,6 +2301,63 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     return this._harnessMutationDirective(planSlide);
   },
 
+  // Server-side rules tasks: deterministic, zero-model execution expressed as
+  // a fixed mutation list. They run entirely through tool receipts on the
+  // native task socket - never the per-page planned harness.
+  _rulesEngineTask(spec) {
+    return String(spec?.executionStrategy || '') === 'rules_engine';
+  },
+
+  // Errors where the deck's final state is unknown: the connection dropped
+  // mid-run, the acceptance call failed, or the server's completion status
+  // disagreed with local receipts. These get the three-part "saved /
+  // unconfirmed / how to proceed" treatment instead of a single failure line.
+  _isUncertainOutcomeError(error) {
+    if (!error) return false;
+    if (error.uncertain === true) return true;
+    const code = String(error?.details?.code || error?.code || '');
+    if (['PROTOCOL_ACTION_CONFLICT', 'STALE_DECK', 'RECEIPT_UNAVAILABLE', 'CLIENT_UNAVAILABLE'].includes(code)) return true;
+    return /连接已中断|连接暂时中断|长时间未返回进度|状态与本地验收结果不一致|无法确认课件最终版本/.test(String(error?.message || ''));
+  },
+
+  async _appendUncertainOutcome(runId, error) {
+    const savedSteps = [];
+    if (runId && window.__TAURI__?.core?.invoke) {
+      try {
+        const journal = await this._rpc('task-journal-read', { runId });
+        const seenAction = new Set();
+        for (const receipt of Array.isArray(journal?.receipts) ? journal.receipts : []) {
+          if (receipt?.ok !== true) continue;
+          const actionId = String(receipt.actionId || '');
+          if (actionId) {
+            if (seenAction.has(actionId)) continue;
+            seenAction.add(actionId);
+          }
+          const label = String(receipt?.result?.label || '').trim();
+          if (label) savedSteps.push(label);
+        }
+      } catch (_) { /* journal is best-effort; the message must still render */ }
+    }
+    const savedList = savedSteps.length
+      ? savedSteps.slice(0, 10).map(label => `- ${label}`).join('\n')
+      : '- 本地没有已保存的修改记录，课件可能未被改动';
+    this._appendAssistantMarkdown([
+      '### 任务结果待确认',
+      '',
+      `${this._modelErrorMessage(error)}已完成的修改均受安全恢复点保护。`,
+      '',
+      '**已保存的修改**',
+      savedList,
+      '',
+      '**未确认的部分**',
+      '- 中断点之后的步骤是否还需执行，以及整套课件的最终检查结果',
+      '',
+      '**如何处理**',
+      '- 直接重新发送原指令即可继续，已保存的修改不会重复执行',
+      '- 如需恢复原状，点击任务卡片上的「撤销本次任务」',
+    ].join('\n'));
+  },
+
   _lecturePiConfig() {
     const selected = this.selectedConfig || this.aiConfig || {};
     if (selected.aiProvider !== 'lectureai') return null;
@@ -2575,6 +2643,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
 
       await this._refreshContext();
       if (terminal.type === 'task_ready') {
+        if (this._rulesEngineTask(taskSpec)) throw new Error('LectureAI 返回了当前任务类型不支持的执行方式，任务进度已保存，可直接重试。');
         const plan = terminal.plan || this.manifest?.deckPlan?.plan || recoveredPlan;
         if (!plan || !Array.isArray(plan.slides)) throw new Error('LectureAI 已完成规划，但本地课件蓝图未能载入。');
         this._activeTask.planSaved = true;
@@ -2618,12 +2687,18 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       this._renderTaskCard({ runId: taskSpec.runId, status: 'completed', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
       this._appendAssistantMarkdown(`### 任务已完成\n\n${summary}`);
     } catch (error) {
-      if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status: this._stopRequested ? 'paused' : 'failed', error: this._modelErrorMessage(error), taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan, progressSummary: this._taskProgressSummary } }).catch(() => {});
-      const outcomeStatus = error?.harnessStatus || (this._stopRequested ? 'paused' : 'failed');
+      // An uncertain outcome leaves saved edits behind, so it behaves like a
+      // pause (continue + revert available) rather than a plain failure.
+      const uncertain = !this._stopRequested && this._isUncertainOutcomeError(error);
+      if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status: this._stopRequested || uncertain ? 'paused' : 'failed', error: this._modelErrorMessage(error), taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan, progressSummary: this._taskProgressSummary } }).catch(() => {});
+      const outcomeStatus = error?.harnessStatus || (this._stopRequested || uncertain ? 'paused' : 'failed');
       this._recordTaskOutcome(outcomeStatus, this._modelErrorMessage(error));
       if (this._stopRequested) {
         this._renderTaskCard({ runId: taskSpec.runId, status: 'paused', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
         this._appendAssistantMarkdown('### 任务已停止\n\n进度已经保存，下次可继续当前任务。');
+      } else if (uncertain) {
+        this._renderTaskCard({ runId: taskSpec.runId, status: 'paused', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
+        await this._appendUncertainOutcome(taskSpec.runId, error);
       } else {
         this._renderTaskCard({ runId: taskSpec.runId, status: 'failed', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
         this._appendAssistantMarkdown(`### 任务未完成\n\n${this._modelErrorMessage(error)}`);
@@ -2965,7 +3040,6 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         plan: plan || null,
         summaries,
         stageReviews,
-        finalSummary: `LectureAI 已处理 ${completedPages?.length || 0} 页并完成整套课件检查。`,
         validation,
       },
     });
@@ -2977,7 +3051,9 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       throw new Error(friendly?.userMessage || 'LectureAI 无法确认任务完成状态。');
     }
     if (!['completed', 'needs_repair'].includes(response?.data?.status)) {
-      throw new Error('LectureAI 返回的任务状态与本地验收结果不一致，任务进度已保存。');
+      const mismatch = new Error('LectureAI 返回的任务状态与本地验收结果不一致，任务进度已保存。');
+      mismatch.uncertain = true;
+      throw mismatch;
     }
     return response.data;
   },
@@ -3015,7 +3091,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   },
 
   async _validateAndRepairHarness(plan, state, counters) {
-    const cleanupOnly = this._activeTask?.taskSpec?.intent === 'deck_cleanup';
+    const cleanupOnly = this._activeTask?.taskSpec?.intent === 'deck_cleanup' || this._rulesEngineTask(this._activeTask?.taskSpec);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const validationAction = { tool: 'validate_deck' };
       counters.tools += 1;
@@ -3105,7 +3181,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     const piDeckId = this._piDeckId(plan);
     plan.execution = { ...previous, schemaVersion: 1, piSessionId, piDeckId };
     const counters = { rounds: 0, tools: 0 };
-    const cleanupOnly = this._activeTask?.taskSpec?.intent === 'deck_cleanup';
+    const cleanupOnly = this._activeTask?.taskSpec?.intent === 'deck_cleanup' || this._rulesEngineTask(this._activeTask?.taskSpec);
     const executionSlides = cleanupOnly ? [] : (plan.slides || []);
     this._activeTask.userInstruction = userInstruction;
     this._activeTask.piSessionId = piSessionId;

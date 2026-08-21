@@ -54,6 +54,7 @@ window.PpteWorkbenchAgent = {
       else if (type === 'task-journal-revert') result = await this._taskJournalRevert(req.payload);
       else if (type === 'pick-ppte') result = await this._pickPpte(req.payload);
       else if (type === 'recent-ppte') result = this._recentPpte();
+      else if (type === 'deck-digests') result = await this._deckDigests();
       else result = { error: '未知请求类型 ' + type };
     } catch (e) {
       result = { error: String(e) };
@@ -262,6 +263,65 @@ window.PpteWorkbenchAgent = {
         title: slide.title || '',
         slideType: slide.slide_type || 'content',
         stylesheets: this._stylesheetRefs(slide.html),
+      })),
+    };
+  },
+
+  // Raw per-file content digests for the connected deck, slides and template
+  // starters alike. Plain facts only: every judgement built on these hashes
+  // (e.g. detecting untouched starter placeholders) happens server-side, so
+  // routing rules can be tuned without a desktop release.
+  async _deckDigests() {
+    const pb = this._editor()._pptBuilder;
+    if (!pb?.folderPath || !window.__TAURI__?.core?.invoke) throw new Error('课件窗口暂时不可用');
+
+    const slideFiles = (pb.slides || []).map(slide => String(slide?.file || '')).filter(Boolean);
+    const meta = pb.manifest?.agentTemplate;
+    const starters = [];
+    if (meta?.schemaVersion === 2 && meta.roles && !Array.isArray(meta.roles)) {
+      const append = (role, item, variantId = null) => {
+        if (!item || typeof item !== 'object') return;
+        starters.push({
+          role,
+          variantId,
+          starterFile: String(item.starterFile || ''),
+          blueprintFile: String(item.blueprintFile || ''),
+        });
+      };
+      for (const role of ['cover', 'catalog', 'chapter']) append(role, meta.roles[role]);
+      const contents = Array.isArray(meta.roles.content) ? meta.roles.content : [meta.roles.content];
+      for (const item of contents) append('content', item, item?.id || 'default');
+      append('finish', meta.roles.finish);
+    }
+
+    const files = [...new Set([
+      ...slideFiles,
+      ...starters.flatMap(starter => [starter.starterFile, starter.blueprintFile]),
+    ].filter(Boolean))];
+    if (!files.length) return { slides: [], starters: [] };
+
+    const entries = await window.__TAURI__.core.invoke('ppte_deck_file_hashes', {
+      folderPath: pb.folderPath,
+      files,
+    });
+    const shaByFile = new Map();
+    for (const entry of entries || []) {
+      if (entry?.sha256) shaByFile.set(String(entry.file), entry.sha256);
+    }
+
+    return {
+      slides: (pb.slides || []).map((slide, index) => ({
+        page: index + 1,
+        file: String(slide?.file || ''),
+        sha256: shaByFile.get(String(slide?.file || '')) || null,
+      })),
+      starters: starters.map(starter => ({
+        role: starter.role,
+        variantId: starter.variantId,
+        starterFile: starter.starterFile,
+        starterSha256: starter.starterFile ? (shaByFile.get(starter.starterFile) || null) : null,
+        blueprintFile: starter.blueprintFile || null,
+        blueprintSha256: starter.blueprintFile ? (shaByFile.get(starter.blueprintFile) || null) : null,
       })),
     };
   },

@@ -1998,6 +1998,559 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
   }
 }
 
+async function testResolverDeckDigestsFollowFeatureFlag() {
+  const previousTauri = context.window.__TAURI__;
+  const previousManifest = wb.manifest;
+  const previousConfig = wb.selectedConfig;
+  const previousRpc = wb._rpc;
+  const previousFlagsLoaded = wb._featureFlagsLoaded;
+  const previousFlags = wb._featureFlags;
+  const previousLog = wb._log;
+  let request = null;
+  let digestRpcCalls = 0;
+  const taskSpec = {
+    schemaVersion: 1,
+    runId: 'run_12345678-1234-1234-1234-123456789abc',
+    intent: 'deck_cleanup',
+    scope: 'deck',
+    targets: { pages: [], outline: false, allowInsert: false, allowDelete: true, allowReorder: false },
+    executionStrategy: 'rules_engine',
+    requiresDeckPlan: false,
+    userFacingGoal: '清理模板占位页',
+    assumptions: [],
+    acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页检查通过' }],
+    requiredCapabilities: ['slide.read'],
+    confidence: 0.99,
+    requiresClarification: false,
+    mutations: [{ op: 'delete_slide', page: 12 }],
+  };
+  context.window.__TAURI__ = { core: { invoke: async (command, args) => {
+    request = { command, args };
+    return { ok: true, status: 200, data: { taskSpec, status: 'resolved', missingCapabilities: [] } };
+  } } };
+  wb._log = () => {};
+  wb._recentTurns = [];
+  wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
+  wb.manifest = {
+    folderPath: '/private/local/deck',
+    deckRevision: { deckHash: `sha256:${'a'.repeat(64)}` },
+    slides: [{ id: 's1', title: '封面', slideType: 'cover' }, { id: 's2', title: '内容', slideType: 'content' }],
+    templateBlueprint: { isStarter: false, roles: [] },
+    deckPlan: { plan: null },
+  };
+  try {
+    // Flag off: no digests are collected and no extra RPC is issued.
+    wb._featureFlagsLoaded = true;
+    wb._featureFlags = {};
+    wb._rpc = async () => { digestRpcCalls += 1; return { slides: [], starters: [] }; };
+    await wb._resolveLectureAiTask('清理模板占位页');
+    assert.equal('deckDigests' in request.args.payload, false, 'digests must not be sent while the feature flag is off');
+    assert.equal(digestRpcCalls, 0);
+
+    // Flag on: raw digests ride the existing resolve request.
+    wb._featureFlags = { lectureai_deck_digests_v1: true };
+    const digests = {
+      slides: [
+        { page: 1, file: 'slide01.html', sha256: `sha256:${'c'.repeat(64)}` },
+        { page: 2, file: 'slide02.html', sha256: null },
+      ],
+      starters: [{ role: 'cover', variantId: null, starterFile: 'slide01.html', starterSha256: `sha256:${'c'.repeat(64)}`, blueprintFile: '.ppte-template/roles/cover.html', blueprintSha256: `sha256:${'d'.repeat(64)}` }],
+    };
+    wb._rpc = async type => {
+      assert.equal(type, 'deck-digests');
+      digestRpcCalls += 1;
+      return digests;
+    };
+    await wb._resolveLectureAiTask('清理模板占位页');
+    assert.equal(digestRpcCalls, 1);
+    assert.deepEqual(request.args.payload.deckDigests, digests, 'digests are forwarded verbatim as raw facts');
+    assert.equal(request.command, 'auth_api_request');
+
+    // Digest collection is best-effort: a failed RPC degrades to no digests.
+    wb._rpc = async () => { digestRpcCalls += 1; throw new Error('课件窗口暂时不可用'); };
+    await wb._resolveLectureAiTask('清理模板占位页');
+    assert.equal('deckDigests' in request.args.payload, false, 'digest collection failure must not block task resolution');
+  } finally {
+    context.window.__TAURI__ = previousTauri;
+    wb.manifest = previousManifest;
+    wb.selectedConfig = previousConfig;
+    wb._rpc = previousRpc;
+    wb._featureFlagsLoaded = previousFlagsLoaded;
+    wb._featureFlags = previousFlags;
+    wb._log = previousLog;
+  }
+}
+
+async function testRulesEngineTaskRunsMutationsWithoutPlannedHarness() {
+  const OriginalWebSocket = context.WebSocket;
+  const originals = {
+    config: wb._lecturePiConfig,
+    rpc: wb._rpc,
+    refresh: wb._refreshContext,
+    append: wb._appendAssistantMarkdown,
+    log: wb._log,
+    logAction: wb._logAction,
+    finishAction: wb._finishAction,
+    logResult: wb._logResult,
+    setBusy: wb._setBusy,
+    complete: wb._completeLectureAiTaskRun,
+    harness: wb._runPlannedHarness,
+    renderCard: wb._renderTaskCard,
+    recordOutcome: wb._recordTaskOutcome,
+    tauri: context.window.__TAURI__,
+  };
+  const sent = [];
+  const journalCalls = [];
+  const cardStatuses = [];
+  const revision = `sha256:${'a'.repeat(64)}`;
+  const hash = `sha256:${'b'.repeat(64)}`;
+  let harnessRuns = 0;
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    constructor() {
+      this.readyState = FakeWebSocket.CONNECTING;
+      setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen(); }, 0);
+    }
+    send(raw) {
+      const message = JSON.parse(raw);
+      sent.push(message);
+      if (message.type === 'start_task') {
+        setTimeout(() => {
+          this.onmessage({ data: JSON.stringify({
+            type: 'tool_call', ['request' + '_id']: 'rules-request-1',
+            actionId: 'run_rules_task_12345678:action:1', argsHash: hash,
+            expectedDeckRevision: revision, tool: 'delete_slide', args: { page: 3 },
+          }) });
+        }, 0);
+      } else if (message.type === 'tool_result') {
+        setTimeout(() => this.onmessage({ data: JSON.stringify({
+          type: 'task_complete', runId: 'run_rules_task_12345678', summary: '已删除 1 个模板占位页',
+        }) }), 0);
+      }
+    }
+    close() { this.readyState = 3; }
+  }
+  context.WebSocket = FakeWebSocket;
+  context.window.__TAURI__ = { core: { invoke: async () => ({ ok: true }) } };
+  wb._lecturePiConfig = () => ({ url: 'wss://example.test/task', token: 'task-token' });
+  wb._rpc = async (type, payload) => {
+    if (type === 'task-journal-start' || type === 'task-journal-update') {
+      journalCalls.push({ type, payload });
+      return { ok: true };
+    }
+    assert.equal(type, 'execute-task-action');
+    return {
+      ok: true,
+      actionId: payload.envelope.actionId,
+      argsHash: payload.envelope.argsHash,
+      newDeckRevision: `sha256:${'c'.repeat(64)}`,
+      result: { page: 3, deleted: true, label: '已删除第 3 页' },
+    };
+  };
+  wb._refreshContext = async () => {};
+  wb._appendAssistantMarkdown = () => {};
+  wb._log = () => {};
+  wb._logAction = () => null;
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  wb._setBusy = () => {};
+  wb._runPlannedHarness = async () => { harnessRuns += 1; };
+  wb._renderTaskCard = run => cardStatuses.push(String(run.status));
+  wb._recordTaskOutcome = () => {};
+  wb._completeLectureAiTaskRun = async () => ({ status: 'completed' });
+  wb._taskChecklist = null;
+  wb.manifest = {
+    deckId: 'deck-rules-test',
+    deckRevision: { deckHash: revision },
+    slides: [{ id: 's1', title: '封面', slideType: 'cover' }, { id: 's2', title: '内容', slideType: 'content' }, { id: 's3', title: '要点正文', slideType: 'content' }],
+  };
+  const taskSpec = {
+    schemaVersion: 1,
+    runId: 'run_rules_task_12345678',
+    intent: 'deck_cleanup', scope: 'deck',
+    targets: { pages: [], outline: false, allowInsert: false, allowDelete: true, allowReorder: false },
+    executionStrategy: 'rules_engine', requiresDeckPlan: false,
+    userFacingGoal: '清理模板占位页', acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页检查通过' }],
+    requiredCapabilities: ['slide.read'], confidence: 1, requiresClarification: false,
+    mutations: [{ op: 'delete_slide', page: 3 }],
+  };
+  try {
+    await wb._runLectureAiNativeTask(taskSpec, '清理模板占位页');
+    assert.equal(harnessRuns, 0, 'rules_engine tasks must never enter the per-page planned harness');
+    assert.equal(wb._taskChecklist, null, 'rules_engine tasks must not build a per-page checklist');
+    assert.equal(sent[1].type, 'tool_result');
+    assert.equal(sent[1].request_id, 'rules-request-1');
+    assert.equal(sent[1].ok, true);
+    assert.equal(cardStatuses.at(-1), 'completed');
+    const startCall = journalCalls.find(call => call.type === 'task-journal-start');
+    assert.ok(startCall, 'the run must open a task journal before any mutation');
+    assert.deepEqual(startCall.payload.taskSpec.mutations, [{ op: 'delete_slide', page: 3 }], 'the declared mutation list persists into the journal for resume and revert');
+    const finalUpdate = journalCalls.filter(call => call.type === 'task-journal-update').at(-1);
+    assert.equal(finalUpdate.payload.patch.status, 'completed');
+  } finally {
+    context.WebSocket = OriginalWebSocket;
+    context.window.__TAURI__ = originals.tauri;
+    wb._lecturePiConfig = originals.config;
+    wb._rpc = originals.rpc;
+    wb._refreshContext = originals.refresh;
+    wb._appendAssistantMarkdown = originals.append;
+    wb._log = originals.log;
+    wb._logAction = originals.logAction;
+    wb._finishAction = originals.finishAction;
+    wb._logResult = originals.logResult;
+    wb._setBusy = originals.setBusy;
+    wb._completeLectureAiTaskRun = originals.complete;
+    wb._runPlannedHarness = originals.harness;
+    wb._renderTaskCard = originals.renderCard;
+    wb._recordTaskOutcome = originals.recordOutcome;
+    wb.busy = false;
+  }
+}
+
+async function testRulesEngineTaskReadyIsRefused() {
+  const OriginalWebSocket = context.WebSocket;
+  const originals = {
+    config: wb._lecturePiConfig,
+    rpc: wb._rpc,
+    refresh: wb._refreshContext,
+    append: wb._appendAssistantMarkdown,
+    log: wb._log,
+    logAction: wb._logAction,
+    finishAction: wb._finishAction,
+    logResult: wb._logResult,
+    setBusy: wb._setBusy,
+    complete: wb._completeLectureAiTaskRun,
+    harness: wb._runPlannedHarness,
+    renderCard: wb._renderTaskCard,
+    recordOutcome: wb._recordTaskOutcome,
+    tauri: context.window.__TAURI__,
+  };
+  const answers = [];
+  const cardStatuses = [];
+  let harnessRuns = 0;
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    constructor() {
+      this.readyState = FakeWebSocket.CONNECTING;
+      setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen(); }, 0);
+    }
+    send(raw) {
+      const message = JSON.parse(raw);
+      if (message.type === 'start_task') {
+        setTimeout(() => this.onmessage({ data: JSON.stringify({
+          type: 'task_ready', runId: 'run_rules_ready_12345678', plan: { slides: [{ page: 1 }] },
+        }) }), 0);
+      }
+    }
+    close() { this.readyState = 3; }
+  }
+  context.WebSocket = FakeWebSocket;
+  context.window.__TAURI__ = { core: { invoke: async () => ({ ok: true }) } };
+  wb._lecturePiConfig = () => ({ url: 'wss://example.test/task', token: 'task-token' });
+  wb._rpc = async () => ({ ok: true });
+  wb._refreshContext = async () => {};
+  wb._appendAssistantMarkdown = text => answers.push(text);
+  wb._log = () => {};
+  wb._logAction = () => null;
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  wb._setBusy = () => {};
+  wb._runPlannedHarness = async () => { harnessRuns += 1; };
+  wb._renderTaskCard = run => cardStatuses.push(String(run.status));
+  wb._recordTaskOutcome = () => {};
+  wb._completeLectureAiTaskRun = async () => ({ status: 'completed' });
+  wb.manifest = {
+    deckId: 'deck-rules-ready-test',
+    deckRevision: { deckHash: `sha256:${'a'.repeat(64)}` },
+    slides: [{ id: 's1', title: '封面', slideType: 'cover' }],
+  };
+  const taskSpec = {
+    schemaVersion: 1,
+    runId: 'run_rules_ready_12345678',
+    intent: 'deck_cleanup', scope: 'deck',
+    targets: { pages: [], outline: false, allowInsert: false, allowDelete: true, allowReorder: false },
+    executionStrategy: 'rules_engine', requiresDeckPlan: false,
+    userFacingGoal: '清理模板占位页', acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页检查通过' }],
+    requiredCapabilities: ['slide.read'], confidence: 1, requiresClarification: false,
+  };
+  try {
+    await wb._runLectureAiNativeTask(taskSpec, '清理模板占位页');
+    assert.equal(harnessRuns, 0, 'a rules_engine task must not fall into the planned harness');
+    assert.match(answers.at(-1), /不支持的执行方式/);
+    assert.match(answers.at(-1), /可直接重试/);
+    assert.equal(cardStatuses.at(-1), 'failed');
+  } finally {
+    context.WebSocket = OriginalWebSocket;
+    context.window.__TAURI__ = originals.tauri;
+    wb._lecturePiConfig = originals.config;
+    wb._rpc = originals.rpc;
+    wb._refreshContext = originals.refresh;
+    wb._appendAssistantMarkdown = originals.append;
+    wb._log = originals.log;
+    wb._logAction = originals.logAction;
+    wb._finishAction = originals.finishAction;
+    wb._logResult = originals.logResult;
+    wb._setBusy = originals.setBusy;
+    wb._completeLectureAiTaskRun = originals.complete;
+    wb._runPlannedHarness = originals.harness;
+    wb._renderTaskCard = originals.renderCard;
+    wb._recordTaskOutcome = originals.recordOutcome;
+    wb.busy = false;
+  }
+}
+
+async function testUncertainOutcomeRendersThreePartGuidance() {
+  const OriginalWebSocket = context.WebSocket;
+  const originals = {
+    config: wb._lecturePiConfig,
+    rpc: wb._rpc,
+    refresh: wb._refreshContext,
+    append: wb._appendAssistantMarkdown,
+    log: wb._log,
+    logAction: wb._logAction,
+    finishAction: wb._finishAction,
+    logResult: wb._logResult,
+    setBusy: wb._setBusy,
+    complete: wb._completeLectureAiTaskRun,
+    renderCard: wb._renderTaskCard,
+    recordOutcome: wb._recordTaskOutcome,
+    tauri: context.window.__TAURI__,
+  };
+  const answers = [];
+  const cardStatuses = [];
+  const journalUpdates = [];
+  const revision = `sha256:${'a'.repeat(64)}`;
+  const hash = `sha256:${'b'.repeat(64)}`;
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    constructor() {
+      this.readyState = FakeWebSocket.CONNECTING;
+      setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen(); }, 0);
+    }
+    send(raw) {
+      const message = JSON.parse(raw);
+      if (message.type === 'start_task') {
+        setTimeout(() => {
+          this.onmessage({ data: JSON.stringify({
+            type: 'tool_call', ['request' + '_id']: 'drop-request-1',
+            actionId: 'run_uncertain_task_12345678:action:1', argsHash: hash,
+            expectedDeckRevision: revision, tool: 'delete_slide', args: { page: 3 },
+          }) });
+        }, 0);
+      } else if (message.type === 'tool_result') {
+        // The socket drops right after the local mutation was confirmed -
+        // the deck has saved edits but no server-side completion verdict.
+        setTimeout(() => this.onclose({ code: 1006 }), 0);
+      }
+    }
+    close() { this.readyState = 3; }
+  }
+  context.WebSocket = FakeWebSocket;
+  context.window.__TAURI__ = { core: { invoke: async () => ({ ok: true }) } };
+  wb._lecturePiConfig = () => ({ url: 'wss://example.test/task', token: 'task-token' });
+  wb._rpc = async (type, payload) => {
+    if (type === 'task-journal-start') return { ok: true };
+    if (type === 'task-journal-update') { journalUpdates.push(payload.patch.status); return { ok: true }; }
+    if (type === 'task-journal-read') {
+      return {
+        run: { runId: payload.runId },
+        receipts: [
+          { ok: true, actionId: 'run_uncertain_task_12345678:action:1', result: { label: '已删除第 3 页' } },
+          { ok: false, actionId: 'run_uncertain_task_12345678:action:2', result: { label: '不应显示的失败步骤' } },
+        ],
+      };
+    }
+    return {
+      ok: true,
+      actionId: payload.envelope.actionId,
+      argsHash: payload.envelope.argsHash,
+      newDeckRevision: `sha256:${'c'.repeat(64)}`,
+      result: { page: 3, deleted: true, label: '已删除第 3 页' },
+    };
+  };
+  wb._refreshContext = async () => {};
+  wb._appendAssistantMarkdown = text => answers.push(text);
+  wb._log = () => {};
+  wb._logAction = () => null;
+  wb._finishAction = () => {};
+  wb._logResult = () => {};
+  wb._setBusy = () => {};
+  wb._renderTaskCard = run => cardStatuses.push(String(run.status));
+  wb._recordTaskOutcome = () => {};
+  wb._completeLectureAiTaskRun = async () => ({ status: 'completed' });
+  wb.manifest = {
+    deckId: 'deck-uncertain-test',
+    deckRevision: { deckHash: revision },
+    slides: [{ id: 's1', title: '封面', slideType: 'cover' }, { id: 's2', title: '内容', slideType: 'content' }, { id: 's3', title: '要点正文', slideType: 'content' }],
+  };
+  const taskSpec = {
+    schemaVersion: 1,
+    runId: 'run_uncertain_task_12345678',
+    intent: 'deck_cleanup', scope: 'deck',
+    targets: { pages: [], outline: false, allowInsert: false, allowDelete: true, allowReorder: false },
+    executionStrategy: 'bounded_tool_loop', requiresDeckPlan: false,
+    userFacingGoal: '清理模板占位页', acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页检查通过' }],
+    requiredCapabilities: ['slide.read'], confidence: 1, requiresClarification: false,
+  };
+  try {
+    await wb._runLectureAiNativeTask(taskSpec, '清理模板占位页');
+    const message = answers.at(-1);
+    assert.match(message, /任务结果待确认/, 'a dropped connection must surface the three-part guidance, not a bare failure');
+    assert.match(message, /已保存的修改/);
+    assert.match(message, /未确认的部分/);
+    assert.match(message, /如何处理/);
+    assert.match(message, /已删除第 3 页/, 'saved mutations are listed from the journal receipts');
+    assert.doesNotMatch(message, /不应显示的失败步骤/, 'only successful receipts are listed as saved changes');
+    assert.match(message, /撤销本次任务/, 'the guidance must point at the revert action on the task card');
+    assert.equal(cardStatuses.at(-1), 'paused', 'uncertain outcomes render as paused so continue and revert stay available');
+    assert.equal(journalUpdates.at(-1), 'paused', 'the journal mirrors the paused/uncertain state');
+  } finally {
+    context.WebSocket = OriginalWebSocket;
+    context.window.__TAURI__ = originals.tauri;
+    wb._lecturePiConfig = originals.config;
+    wb._rpc = originals.rpc;
+    wb._refreshContext = originals.refresh;
+    wb._appendAssistantMarkdown = originals.append;
+    wb._log = originals.log;
+    wb._logAction = originals.logAction;
+    wb._finishAction = originals.finishAction;
+    wb._logResult = originals.logResult;
+    wb._setBusy = originals.setBusy;
+    wb._completeLectureAiTaskRun = originals.complete;
+    wb._renderTaskCard = originals.renderCard;
+    wb._recordTaskOutcome = originals.recordOutcome;
+    wb.busy = false;
+  }
+}
+
+async function testTaskCompletePayloadLeavesSummaryToServer() {
+  const previousTauri = context.window.__TAURI__;
+  const previousManifest = wb.manifest;
+  const previousConfig = wb.selectedConfig;
+  const previousRefresh = wb._refreshContext;
+  const previousTask = wb._activeTask;
+  let request = null;
+  const revision = `sha256:${'a'.repeat(64)}`;
+  context.window.__TAURI__ = { core: { invoke: async (command, args) => {
+    request = { command, args };
+    return { ok: true, status: 200, data: { status: 'completed', summary: '服务器推导的完成摘要' } };
+  } } };
+  wb._refreshContext = async () => {};
+  wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
+  wb.manifest = { deckRevision: { deckHash: revision } };
+  wb._activeTask = { taskSpec: { runId: 'run_summary_check_12345678', intent: 'deck_cleanup' } };
+  try {
+    const accepted = await wb._completeLectureAiTaskRun(null, [3], { passed: true, errors: [] }, {}, []);
+    assert.equal(accepted.status, 'completed');
+    assert.equal(request.args.action, 'task_complete');
+    assert.equal('finalSummary' in request.args.payload, false, 'the client must not fabricate a completion summary - the server derives it');
+    assert.deepEqual(request.args.payload.completedPages, [3]);
+
+    // A server status that disagrees with local receipts is an uncertain
+    // outcome, not a plain failure.
+    context.window.__TAURI__.core.invoke = async (command, args) => {
+      request = { command, args };
+      return { ok: true, status: 200, data: { status: 'mismatched' } };
+    };
+    await assert.rejects(
+      wb._completeLectureAiTaskRun(null, [3], { passed: true, errors: [] }, {}, []),
+      /任务状态与本地验收结果不一致/,
+    );
+    assert.ok(wb._isUncertainOutcomeError(new Error('LectureAI 返回的任务状态与本地验收结果不一致，任务进度已保存。')));
+    assert.equal(wb._isUncertainOutcomeError(new Error('模型额度不足')), false);
+    const dropped = new Error('LectureAI 连接已中断（1006）');
+    assert.equal(wb._isUncertainOutcomeError(dropped), true);
+    const stale = new Error('课件已发生变化');
+    stale.details = { code: 'STALE_DECK' };
+    assert.equal(wb._isUncertainOutcomeError(stale), true);
+  } finally {
+    context.window.__TAURI__ = previousTauri;
+    wb.manifest = previousManifest;
+    wb.selectedConfig = previousConfig;
+    wb._refreshContext = previousRefresh;
+    wb._activeTask = previousTask;
+  }
+}
+
+async function testAgentDeckDigestsEnumerateSlidesAndStarters() {
+  const previousInvoke = agentContext.window.__TAURI__.core.invoke;
+  const previousPb = agentContext.window.Settings._pptBuilder;
+  const calls = [];
+  const digestPb = {
+    folderPath: '/tmp/digest-deck',
+    manifest: {
+      deckId: 'deck-digest',
+      agentTemplate: {
+        schemaVersion: 2,
+        template: { id: 'tpl-1', name: '示例模板' },
+        roles: {
+          cover: { starterFile: 'slide01.html', blueprintFile: '.ppte-template/roles/cover.html' },
+          catalog: { starterFile: 'slide02.html', blueprintFile: '.ppte-template/roles/catalog.html' },
+          content: [{ id: 'text', starterFile: 'slide03.html', blueprintFile: '.ppte-template/roles/content-text.html' }],
+          finish: { starterFile: 'slide04.html', blueprintFile: '.ppte-template/roles/finish.html' },
+        },
+      },
+    },
+    slides: [
+      { id: 's1', file: 'slide01.html', title: '封面' },
+      { id: 's2', file: 'slide02.html', title: '目录' },
+      { id: 's3', file: 'slide03.html', title: '要点正文' },
+      { id: 's4', file: 'slide04.html', title: '总结' },
+    ],
+  };
+  agentContext.window.Settings._pptBuilder = digestPb;
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    calls.push({ command, payload });
+    assert.equal(command, 'ppte_deck_file_hashes');
+    const digests = {
+      'slide01.html': `sha256:${'a'.repeat(64)}`,
+      'slide02.html': `sha256:${'b'.repeat(64)}`,
+      'slide03.html': `sha256:${'c'.repeat(64)}`,
+      'slide04.html': `sha256:${'e'.repeat(64)}`,
+      '.ppte-template/roles/cover.html': `sha256:${'d'.repeat(64)}`,
+    };
+    return payload.files.map(file => digests[file]
+      ? { file, sha256: digests[file] }
+      : { file, error: '无法读取文件' });
+  };
+  try {
+    const result = await agent._deckDigests();
+    assert.deepEqual(calls[0].payload, {
+      folderPath: '/tmp/digest-deck',
+      files: [
+        'slide01.html', 'slide02.html', 'slide03.html', 'slide04.html',
+        '.ppte-template/roles/cover.html', '.ppte-template/roles/catalog.html',
+        '.ppte-template/roles/content-text.html', '.ppte-template/roles/finish.html',
+      ],
+    }, 'starter files are shared with slides, blueprint files are appended once');
+    assert.equal(result.slides.length, 4);
+    assert.deepEqual(result.slides[0], { page: 1, file: 'slide01.html', sha256: `sha256:${'a'.repeat(64)}` });
+    assert.equal(result.slides[3].sha256, `sha256:${'e'.repeat(64)}`);
+    const cover = result.starters.find(item => item.role === 'cover');
+    assert.equal(cover.starterSha256, `sha256:${'a'.repeat(64)}`);
+    assert.equal(cover.blueprintSha256, `sha256:${'d'.repeat(64)}`);
+    const catalog = result.starters.find(item => item.role === 'catalog');
+    assert.equal(catalog.blueprintSha256, null, 'unreadable files degrade to null digests, never throw');
+    const content = result.starters.find(item => item.role === 'content');
+    assert.equal(content.variantId, 'text');
+
+    // Decks created before agentTemplate metadata existed contribute slide
+    // digests only - starter comparison is a server-side concern anyway.
+    calls.length = 0;
+    agentContext.window.Settings._pptBuilder = previousPb;
+    const legacy = await agent._deckDigests();
+    assert.deepEqual(legacy.starters, []);
+    assert.equal(legacy.slides.length, previousPb.slides.length);
+    assert.ok(calls[0].payload.files.every(file => !file.includes('.ppte-template')));
+  } finally {
+    agentContext.window.__TAURI__.core.invoke = previousInvoke;
+    agentContext.window.Settings._pptBuilder = previousPb;
+  }
+}
+
 async function testAgentTaskActionIsIdempotentAndRevisionSafe() {
   const originalExecute = agent._executeAction;
   const originalRevision = agent._taskDeckRevision;
@@ -3031,6 +3584,12 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
   await testPiPageInactivityCannotLockWorkbenchForever();
   await testPiWebSocketReturnsMatchingToolResult();
   await testNativeTaskWebSocketUsesStructuredReceipts();
+  await testResolverDeckDigestsFollowFeatureFlag();
+  await testRulesEngineTaskRunsMutationsWithoutPlannedHarness();
+  await testRulesEngineTaskReadyIsRefused();
+  await testUncertainOutcomeRendersThreePartGuidance();
+  await testTaskCompletePayloadLeavesSummaryToServer();
+  await testAgentDeckDigestsEnumerateSlidesAndStarters();
   await testAgentTaskActionIsIdempotentAndRevisionSafe();
   await testAgentTaskActionPersistsBeforeWritingAndReplaysAfterRestart();
   await testAgentTaskActionStopsBeforeWriteWhenPendingReceiptCannotPersist();

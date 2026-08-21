@@ -10,14 +10,14 @@
     eventSchemaVersion: 1,
     errorSchemaVersion: 1,
     capabilitySchemaVersion: 1,
-    intents: Object.freeze(['answer', 'outline_write', 'slide_edit', 'slide_insert', 'deck_cleanup', 'deck_rewrite', 'deck_validate', 'resume_run']),
-    executionStrategies: Object.freeze(['direct_reply', 'bounded_tool_loop', 'planned_harness']),
+    intents: Object.freeze(['answer', 'outline_write', 'slide_edit', 'slide_insert', 'deck_cleanup', 'deck_rewrite', 'deck_validate', 'deck_lint', 'resume_run']),
+    executionStrategies: Object.freeze(['direct_reply', 'bounded_tool_loop', 'planned_harness', 'rules_engine']),
     scopes: Object.freeze(['none', 'outline', 'page', 'deck']),
     states: Object.freeze(['created', 'awaiting_user', 'resolving', 'resolved', 'planning', 'ready', 'running', 'paused', 'repairing', 'validating', 'needs_repair', 'completed', 'failed', 'cancelled', 'reverted']),
     terminalStates: Object.freeze(['completed', 'cancelled', 'failed', 'reverted']),
     eventTypes: Object.freeze(['task_resolved', 'task_status', 'progress', 'tool_call', 'tool_result', 'validation', 'task_completed', 'task_paused', 'task_failed', 'task_reverted']),
     errorCategories: Object.freeze(['model_correctable', 'stale_state', 'permission', 'quota', 'transient', 'client_unavailable', 'validation_failed', 'protocol']),
-    capabilities: Object.freeze(['deck.plan.v3', 'slide.read', 'slide.write.transactional', 'slide.insert', 'slide.delete', 'slide.reorder', 'outline.write', 'deck.validate', 'render.diagnostics.v1', 'task.receipts.v1', 'task.revert.v1']),
+    capabilities: Object.freeze(['deck.plan.v3', 'slide.read', 'slide.write.transactional', 'slide.insert', 'slide.delete', 'slide.reorder', 'outline.write', 'deck.validate', 'render.diagnostics.v1', 'task.receipts.v1', 'task.revert.v1', 'deck.digests.v1']),
     transitions: Object.freeze({
       created: ['awaiting_user', 'resolving', 'cancelled'],
       awaiting_user: ['resolving', 'cancelled'],
@@ -115,7 +115,37 @@
     if (missingCapabilities.length) errors.push(`当前客户端缺少能力：${missingCapabilities.join('、')}`);
     if (WRITE_INTENTS.has(spec.intent) && !Array.isArray(spec.acceptanceCriteria)) errors.push('可写任务必须声明验收条件');
     if (!spec.targets || typeof spec.targets !== 'object' || !Array.isArray(spec.targets.pages)) errors.push('TaskSpec targets 无效');
+    const mutationError = validateMutations(spec.mutations);
+    if (mutationError) errors.push(mutationError);
     return { valid: errors.length === 0, errors, missingCapabilities };
+  }
+
+  // Optional minimal mutation list (structure tasks): which pages to delete and
+  // how to reorder them, instead of a full deck plan. Keeps fast structural
+  // fixes from having to declare per-page motion/layout fields they never use.
+  const MUTATION_OPS = Object.freeze(['delete_slide', 'reorder_slides']);
+  const MUTATION_LIMIT = 200;
+
+  function validateMutations(mutations) {
+    if (mutations == null) return '';
+    if (!Array.isArray(mutations) || !mutations.length || mutations.length > MUTATION_LIMIT) return 'TaskSpec mutations 无效';
+    for (const mutation of mutations) {
+      if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) return 'TaskSpec mutations 含无效项';
+      if (!MUTATION_OPS.includes(mutation.op)) return 'TaskSpec mutations 含无效操作';
+      if (mutation.op === 'delete_slide') {
+        if (!Number.isInteger(mutation.page) || mutation.page < 1 || mutation.page > 1000) return 'TaskSpec mutations 含无效页码';
+      }
+      if (mutation.op === 'reorder_slides') {
+        const order = mutation.order;
+        // The local executor applies a complete 1-based permutation, so the
+        // contract only accepts full page sequences without gaps or repeats.
+        if (!Array.isArray(order) || !order.length || order.length > 1000
+          || order.some(page => !Number.isInteger(page) || page < 1 || page > 1000)) return 'TaskSpec mutations 含无效页序';
+        const sorted = [...order].sort((a, b) => a - b);
+        if (sorted.some((page, index) => page !== index + 1)) return 'TaskSpec mutations 含无效页序';
+      }
+    }
+    return '';
   }
 
   function canTransition(from, to) {

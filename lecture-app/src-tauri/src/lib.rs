@@ -1225,6 +1225,56 @@ fn ppte_agent_revision_get(folder_path: String) -> Result<serde_json::Value, Str
     ppte_agent_revision(&folder_path)
 }
 
+fn hash_file_sha256(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut file = fs::File::open(path).map_err(|e| format!("无法读取文件 {}：{}", path.display(), e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let read = file.read(&mut buffer).map_err(|e| format!("无法读取文件 {}：{}", path.display(), e))?;
+        if read == 0 { break; }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Content digests for a caller-supplied list of deck files (slide pages and
+/// template role files). The caller enumerates file names; this only streams
+/// bytes of files that resolve inside the deck folder. Pure facts, no
+/// comparison logic - every judgement about these digests lives server-side.
+/// Per-file failures (missing, unsafe path) come back as entry-level errors so
+/// one bad manifest entry never blocks the whole batch.
+#[tauri::command]
+fn ppte_deck_file_hashes(folder_path: String, files: Vec<String>) -> Result<Vec<serde_json::Value>, String> {
+    let root = canonical_ppte_root(&folder_path)?;
+    if files.len() > 400 {
+        return Err("文件清单过长".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut output = Vec::new();
+    for name in files {
+        if !seen.insert(name.clone()) { continue; }
+        let entry = match ppte_safe_relative_path(&name) {
+            Ok(relative) => {
+                let candidate = root.join(&relative);
+                match candidate.canonicalize() {
+                    Ok(canonical) if canonical.starts_with(&root) && canonical.is_file() => {
+                        match hash_file_sha256(&canonical) {
+                            Ok(digest) => serde_json::json!({ "file": name, "sha256": format!("sha256:{}", digest) }),
+                            Err(error) => serde_json::json!({ "file": name, "error": error }),
+                        }
+                    }
+                    Ok(_) => serde_json::json!({ "file": name, "error": format!("路径不安全：{}", name) }),
+                    Err(error) => serde_json::json!({ "file": name, "error": format!("无法读取文件 {}：{}", name, error) }),
+                }
+            }
+            Err(_) => serde_json::json!({ "file": name, "error": format!("路径不安全：{}", name) }),
+        };
+        output.push(entry);
+    }
+    Ok(output)
+}
+
 fn ppte_agent_plan_path(folder_path: &str) -> Result<PathBuf, String> {
     let root = canonical_ppte_root(folder_path)?;
     if !root.join("manifest.json").is_file() {
@@ -5535,6 +5585,59 @@ mod ppte_outline_tests {
 
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn deck_file_hashes_are_deterministic_and_folder_scoped() {
+        let dir = unique_temp_dir("deck-hashes");
+        fs::create_dir_all(dir.join(".ppte-template/roles")).unwrap();
+        fs::write(dir.join("manifest.json"), r#"{"title":"t","slides":[]}"#).unwrap();
+        fs::write(dir.join("slide01.html"), "<html>hello</html>").unwrap();
+        fs::write(dir.join(".ppte-template/roles/cover.html"), "cover").unwrap();
+
+        // A file outside the deck folder: direct path escapes and a symlink
+        // pointing outside must both be rejected without reading any bytes.
+        let outside = dir.parent().unwrap().join("lecture-outside-secret.txt");
+        fs::write(&outside, "secret").unwrap();
+        let link = dir.join("link.html");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let folder = dir.to_string_lossy().to_string();
+        let mut requested = vec![
+            "slide01.html".to_string(),
+            "slide01.html".to_string(), // duplicates are collapsed
+            ".ppte-template/roles/cover.html".to_string(),
+            "missing.html".to_string(),
+            "../lecture-outside-secret.txt".to_string(),
+            "/etc/hosts".to_string(),
+        ];
+        #[cfg(unix)]
+        requested.push("link.html".to_string());
+
+        let result = ppte_deck_file_hashes(folder, requested).unwrap();
+        let by_file: std::collections::HashMap<String, serde_json::Value> = result
+            .into_iter()
+            .map(|value| (value["file"].as_str().unwrap().to_string(), value))
+            .collect();
+
+        assert_eq!(by_file.len(), if cfg!(unix) { 6 } else { 5 }, "duplicate requests must be collapsed");
+        let mut hasher = Sha256::new();
+        hasher.update(b"<html>hello</html>");
+        assert_eq!(
+            by_file["slide01.html"]["sha256"].as_str().unwrap(),
+            &format!("sha256:{:x}", hasher.finalize()),
+            "digest must match the file's raw bytes"
+        );
+        assert!(by_file[".ppte-template/roles/cover.html"]["sha256"].as_str().unwrap().starts_with("sha256:"));
+        assert!(by_file["missing.html"]["error"].is_string(), "a missing file is an entry-level error, not a batch failure");
+        assert!(by_file["../lecture-outside-secret.txt"]["error"].is_string(), "path escapes must be rejected");
+        assert!(by_file["/etc/hosts"]["error"].is_string(), "absolute paths must be rejected");
+        #[cfg(unix)]
+        assert!(by_file["link.html"]["error"].is_string(), "symlinks resolving outside the deck must be rejected");
+
+        fs::remove_dir_all(&dir).unwrap();
+        let _ = fs::remove_file(&outside);
+    }
 }
 
 #[cfg(test)]
@@ -8600,6 +8703,7 @@ pub fn run() {
             ppte_agent_plan_read,
             ppte_agent_plan_write,
             ppte_agent_revision_get,
+            ppte_deck_file_hashes,
             ppte_agent_plan_refresh,
             ppte_task_journal_start,
             ppte_task_journal_before_write,

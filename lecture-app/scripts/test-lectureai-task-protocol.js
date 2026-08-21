@@ -40,6 +40,21 @@ assert.equal(protocol.validateTaskSpec(validSpec).valid, true);
 const unsupported = protocol.validateTaskSpec(validSpec, ['slide.read']);
 assert.equal(unsupported.valid, false);
 assert.deepEqual(unsupported.missingCapabilities, ['slide.write.transactional', 'deck.validate']);
+const rulesSpec = {
+  ...validSpec,
+  intent: 'deck_cleanup',
+  scope: 'deck',
+  targets: { pages: [], outline: false, allowInsert: false, allowDelete: true, allowReorder: true },
+  executionStrategy: 'rules_engine',
+  mutations: [{ op: 'delete_slide', page: 12 }, { op: 'delete_slide', page: 13 }],
+};
+assert.equal(protocol.validateTaskSpec(rulesSpec).valid, true, 'rules_engine specs with a fixed mutation list are valid');
+assert.equal(protocol.validateTaskSpec({ ...rulesSpec, mutations: [] }).valid, false, 'mutations must be a non-empty array');
+assert.equal(protocol.validateTaskSpec({ ...rulesSpec, mutations: [{ op: 'render_template', page: 3 }] }).valid, false, 'unknown mutation ops are rejected');
+assert.equal(protocol.validateTaskSpec({ ...rulesSpec, mutations: [{ op: 'delete_slide', page: 0 }] }).valid, false, 'mutation pages are 1-based');
+assert.equal(protocol.validateTaskSpec({ ...rulesSpec, mutations: [{ op: 'reorder_slides', order: [2, 1] }] }).valid, true);
+assert.equal(protocol.validateTaskSpec({ ...rulesSpec, mutations: [{ op: 'reorder_slides', order: [1, 1] }] }).valid, false, 'reorder orders must be valid page sequences');
+assert.equal(protocol.validateTaskSpec({ ...rulesSpec, mutations: 'delete_slide' }).valid, false, 'mutations must be an array');
 assert.equal(protocol.canTransition('running', 'validating'), true);
 assert.equal(protocol.canTransition('completed', 'running'), false);
 

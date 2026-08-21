@@ -12,9 +12,10 @@
     "deck_cleanup",
     "deck_rewrite",
     "deck_validate",
+    "deck_lint",
     "resume_run"
   ],
-  "executionStrategies": ["direct_reply", "bounded_tool_loop", "planned_harness"],
+  "executionStrategies": ["direct_reply", "bounded_tool_loop", "planned_harness", "rules_engine"],
   "scopes": ["none", "outline", "page", "deck"],
   "states": [
     "created",
@@ -67,7 +68,7 @@
     "deck.validate",
     "render.diagnostics.v1",
     "task.receipts.v1",
-    "task.revert.v1"
+    "task.revert.v1", "deck.digests.v1"
   ],
   "transitions": {
     "created": ["awaiting_user", "resolving", "cancelled"],
