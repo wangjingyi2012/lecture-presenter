@@ -37,11 +37,15 @@ vm.runInContext(`${source}\nglobalThis.WorkbenchWindow = window.WorkbenchWindow;
 
 const wb = context.WorkbenchWindow;
 const slash = context.PpteSlashCommands;
+// Many later tests stub wb._finishAction with a no-op and never restore it;
+// keep the real implementation so guard-label tests can exercise it directly.
+const realFinishAction = wb._finishAction;
 assert.ok(wb, 'WorkbenchWindow should be defined');
 assert.ok(slash, 'PpteSlashCommands should be defined');
 assert.equal('maxToolRounds' in wb, false, 'deck-level Agent must not have a fixed tool-round cap');
 assert.match(htmlSource, /id="wb-stop"/, 'workbench needs a user-visible stop control');
 assert.match(htmlSource, /\.wb-task-card-summary[^}]*white-space:\s*normal[^}]*-webkit-line-clamp:\s*3/s, 'task summaries must remain readable in the narrow workbench window');
+assert.match(htmlSource, /\.wb-task-checklist\b/, 'per-page checklist needs its own styles in the task card');
 assert.match(source, /recoveryRounds > 3/, 'protocol recovery must stop before an infinite paid loop');
 assert.match(source, /deckValidated = false/, 'deck mutations must invalidate earlier deck validation');
 assert.match(source, /get-command-context/, 'concept animation command must request prepared slide context');
@@ -96,7 +100,7 @@ async function testSessionPersistence() {
   const diskStore = {
     version: 1,
     sessions: [
-      { id: 'old1', startedAt: '2026-08-17T10:00:00Z', updatedAt: '2026-08-17T11:00:00Z', preview: '旧对话一', history: [{ role: 'user', content: 'u1' }], transcript: [{ t: 'user', text: '旧问题1' }, { t: 'ai', md: '旧回答1' }] },
+      { id: 'old1', startedAt: '2026-08-17T10:00:00Z', updatedAt: '2026-08-17T11:00:00Z', preview: '旧对话一', history: [{ role: 'user', content: 'u1' }], transcript: [{ t: 'user', text: '旧问题1' }, { t: 'ai', md: '旧回答1' }], recentTurns: [{ role: 'user', text: '第1页问题', pages: [1] }], lastTask: { runId: 'run_old_12345678', instruction: '修复第1页', pages: [1], intent: 'slide_edit', status: 'completed' } },
       { id: 'old2', startedAt: '2026-08-17T12:00:00Z', updatedAt: '2026-08-17T12:30:00Z', preview: '旧对话二', history: [], transcript: [{ t: 'user', text: '旧问题2' }] },
     ],
   };
@@ -137,6 +141,7 @@ async function testSessionPersistence() {
     assert.equal(wb._transcript.length, 3, 'skipRecord lines are not persisted');
     // save appends the current session alongside past ones
     wb.history = [{ role: 'user', content: '你好' }];
+    wb._recentTurns = [{ role: 'user', text: '你好', pages: [] }];
     await wb._saveSession();
     assert.equal(writes.length, 1, 'save must write once');
     assert.equal(writes[0].filePath, '/tmp/session-deck/.lectureai/workbench-sessions.json');
@@ -145,6 +150,7 @@ async function testSessionPersistence() {
     assert.equal(saved.sessions[0].id, wb._sessionId, 'most recently updated session comes first');
     assert.equal(saved.sessions[0].preview, '你好');
     assert.equal(saved.sessions[0].transcript.length, 3);
+    assert.equal(saved.sessions[0].recentTurns.length, 1, 'resolver memory persists with the session');
     // the store is capped at 10 sessions
     wb._sessions = Array.from({ length: 10 }, (_, i) => ({ id: `x${i}`, updatedAt: `2026-08-0${(i % 9) + 1}T00:00:00Z`, transcript: [{ t: 'user', text: `q${i}` }] }));
     await wb._saveSession();
@@ -162,12 +168,16 @@ async function testSessionPersistence() {
     assert.equal(wb._sessionId, 'old1', 'resumed session continues under its own id');
     assert.equal(wb.history.length, 1, 'history is restored for model continuation');
     assert.equal(wb._transcript.length, 2, 'transcript is restored');
+    assert.deepEqual(wb._recentTurns.map(t => t.text), ['第1页问题'], 'resolver memory is restored on /resume');
+    assert.equal(wb._lastTask?.runId, 'run_old_12345678', 'the retry anchor is restored on /resume');
     assert.equal(messages.children.length, 3, 'two replayed lines plus the resume notice');
     assert.equal(messages.children[0].textContent, '旧问题1');
     // /clear wipes both the model history and the persisted transcript
     wb._clear();
     assert.equal(wb.history.length, 0);
     assert.equal(wb._transcript.length, 1, 'only the clear notice remains');
+    assert.equal(wb._recentTurns.length, 0, '/clear also wipes the resolver memory');
+    assert.equal(wb._lastTask, null, '/clear drops the retry anchor');
   } finally {
     context.document.getElementById = prevGetEl;
     context.document.createElement = prevCreateEl;
@@ -577,6 +587,45 @@ const legacyBlueprint = agent._templateBlueprint(pb);
 assert.equal(legacyBlueprint.isStarter, true, 'legacy five-page decks should be recognized as starter templates');
 assert.deepEqual(Array.from(legacyBlueprint.roles, r => r.slideType), ['cover', 'catalog', 'chapter', 'content', 'finish']);
 
+async function testTaskContextFlushesPendingEditorChangesBeforeRevision() {
+  const originalSave = agentContext.window.Settings._savePptBuilderData;
+  const originalInvoke = agentContext.window.__TAURI__.core.invoke;
+  const originalConfig = agentContext.window.CourseLoader.appConfig;
+  const calls = [];
+  agentContext.window.CourseLoader.appConfig = {};
+  agentContext.window.Settings._savePptBuilderData = async (_deck, options) => {
+    calls.push({ type: 'save', options });
+    return { saved: ['manifest.json', 'slide01.html'], conflicts: [] };
+  };
+  agentContext.window.__TAURI__.core.invoke = async (command) => {
+    calls.push({ type: 'invoke', command });
+    if (command === 'ppte_agent_revision_get') return { deckHash: `sha256:${'a'.repeat(64)}` };
+    if (command === 'ppte_agent_plan_read') return { plan: null, status: 'missing' };
+    if (command === 'ppte_skill_list') return [];
+    if (command === 'read_text_file') throw new Error('missing outline');
+    return null;
+  };
+  try {
+    const contextResult = await agent._getContext({ prepareTask: true });
+    assert.equal(calls[0].type, 'save', 'pending visual/code edits must be saved before any revision read');
+    assert.equal(calls[0].options.interactiveConflicts, false, 'task preparation must never open an interactive conflict prompt');
+    const revisionIndex = calls.findIndex(item => item.command === 'ppte_agent_revision_get');
+    assert.ok(revisionIndex > 0, 'the task revision is read only after the editor save completes');
+    assert.equal(contextResult.deckRevision.deckHash, `sha256:${'a'.repeat(64)}`);
+
+    agentContext.window.Settings._savePptBuilderData = async () => ({ cancelled: true, conflicts: ['slide01.html'] });
+    await assert.rejects(
+      () => agent._getContext({ prepareTask: true }),
+      /尚未解决的保存冲突.*slide01\.html/,
+      'a conflicted editor state must stop task creation before the server binds a stale revision',
+    );
+  } finally {
+    agentContext.window.Settings._savePptBuilderData = originalSave;
+    agentContext.window.__TAURI__.core.invoke = originalInvoke;
+    agentContext.window.CourseLoader.appConfig = originalConfig;
+  }
+}
+
 const v2Deck = {
   manifest: {
     title: '多变体课件',
@@ -859,13 +908,16 @@ function testTaskProgressSummaryIsScopedAndFriendly() {
       status: 'running',
       progressSummary: '正在核对新任务页面',
     });
-    assert.match(card.innerHTML, /思考过程摘要/);
+    assert.match(card.innerHTML, /工作中：/);
     assert.match(card.innerHTML, /正在核对新任务页面/);
+    assert.match(card.innerHTML, /wb-task-card-summary is-live/, 'a running task must animate the 工作中 indicator');
+    assert.match(card.innerHTML, /wb-work-dots/, 'the live indicator markup must be present');
     assert.doesNotMatch(card.innerHTML, /旧任务摘要/, 'switching tasks must not reuse another run summary');
 
     wb._renderTaskCard({ runId: 'run_new_task_12345678', status: 'paused' });
     assert.equal(wb._taskCardRun.progressSummary, '正在核对新任务页面', 'same-run status renders must retain the live summary for resume');
     assert.match(card.innerHTML, /正在核对新任务页面/);
+    assert.doesNotMatch(card.innerHTML, /wb-task-card-summary is-live/, 'a paused task must not animate the 工作中 indicator');
 
     wb._updateTaskProgressSummary('Pi Runtime 正在调用 write_slide tool_result', 'run_old_task_12345678');
     assert.equal(wb._taskProgressSummary, '正在核对新任务页面', 'late events from another run must be ignored');
@@ -877,6 +929,45 @@ function testTaskProgressSummaryIsScopedAndFriendly() {
     wb._taskCardRun = previousRun;
     wb._taskProgressRunId = previousRunId;
     wb._taskProgressSummary = previousSummary;
+  }
+}
+
+function testTaskChecklistTracksPerPageStatus() {
+  const previousGetElementById = context.document.getElementById;
+  const previousChecklist = wb._taskChecklist;
+  const host = { hidden: true, innerHTML: '', querySelector() { return null; } };
+  const card = { querySelector: sel => sel === '[data-task-checklist]' ? host : null };
+  try {
+    context.document.getElementById = id => id === 'wb-task-card' ? card : null;
+    const plan = {
+      targetSlideCount: 3,
+      slides: [
+        { page: 1, title: '封面', role: 'cover' },
+        { page: 2, title: '核心概念', role: 'concept' },
+        { page: 3, title: '课堂总结', role: 'summary' },
+      ],
+    };
+    wb._buildTaskChecklist(plan, { completedPages: [1], activePage: 2 });
+    assert.equal(wb._taskChecklist.pages.length, 3);
+    assert.equal(wb._taskChecklist.pages[0].status, 'done', 'completed page is marked done');
+    assert.equal(wb._taskChecklist.pages[1].status, 'active', 'current page is marked active');
+    assert.equal(wb._taskChecklist.pages[2].status, 'pending', 'unstarted page stays pending');
+
+    wb._renderTaskChecklist();
+    assert.equal(host.hidden, false, 'checklist becomes visible once built');
+    assert.match(host.innerHTML, /生成清单 · 1\/3/, 'header shows completed vs total pages');
+    assert.match(host.innerHTML, /核心概念/, 'page titles render');
+    assert.match(host.innerHTML, /data-checklist-page="2"[\s\S]*is-active|is-active[\s\S]*data-checklist-page="2"/, 'active page row carries the active state');
+
+    wb._markChecklistPage(2, 'done');
+    assert.equal(wb._taskChecklist.pages[1].status, 'done', 'finishing a page flips it to done');
+    assert.match(host.innerHTML, /生成清单 · 2\/3/, 'header recount reflects the newly completed page');
+
+    wb._markChecklistPage(3, 'failed');
+    assert.match(host.innerHTML, /is-failed/, 'a failed page renders with the failed state');
+  } finally {
+    context.document.getElementById = previousGetElementById;
+    wb._taskChecklist = previousChecklist;
   }
 }
 
@@ -1273,19 +1364,19 @@ async function testPlannedPlaceholderRoleConversion() {
   };
 
   const catalogResult = await agent._toolWriteSlide(deck, {
-    tool: 'write_slide', page: 2, title: '正文 A', slide_type: 'content',
+    tool: 'write_slide', page: 2, title: '正文 A', slide_type: 'content', _userDirected: false,
     html: '<link rel="stylesheet" href="content.css"><main class="content-area"><h1>正文 A</h1></main>',
   });
   const chapterResult = await agent._toolWriteSlide(deck, {
-    tool: 'write_slide', page: 3, title: '正文 B', slide_type: 'content',
+    tool: 'write_slide', page: 3, title: '正文 B', slide_type: 'content', _userDirected: false,
     html: '<link rel="stylesheet" href="content.css"><main class="content-area"><h1>正文 B</h1></main>',
   });
   const coverResult = await agent._toolWriteSlide(deck, {
-    tool: 'write_slide', page: 1, title: '错误正文', slide_type: 'content',
+    tool: 'write_slide', page: 1, title: '错误正文', slide_type: 'content', _userDirected: false,
     html: '<link rel="stylesheet" href="content.css"><main class="content-area"><h1>错误正文</h1></main>',
   });
   const finishResult = await agent._toolWriteSlide(deck, {
-    tool: 'write_slide', page: 5, title: '错误正文', slide_type: 'content',
+    tool: 'write_slide', page: 5, title: '错误正文', slide_type: 'content', _userDirected: false,
     html: '<link rel="stylesheet" href="content.css"><main class="content-area"><h1>错误正文</h1></main>',
   });
 
@@ -1293,8 +1384,114 @@ async function testPlannedPlaceholderRoleConversion() {
   assert.match(chapterResult, /已保存/);
   assert.equal(deck.slides[1].slide_type, 'content');
   assert.equal(deck.slides[2].slide_type, 'content');
-  assert.match(coverResult, /失败/);
-  assert.match(finishResult, /失败/);
+  // Autonomous whole-deck fill keeps the strict master ceiling on untouched
+  // structure pages: writing wrong content into a cover/finish is a recoverable
+  //规范拦截, not a hard failure.
+  assert.match(coverResult, /规范拦截/);
+  assert.match(finishResult, /规范拦截/);
+  assert.ok(!/保存失败|已恢复执行前状态/.test(coverResult), '规范拦截 is not a terminal save failure');
+}
+
+// Issue #2: limits are the AI's baseline, not a cap on what the user can ask
+// for. A user-directed structure-page edit may restructure markup, add effects,
+// and add/remove elements (ceiling lifted); only the render-quality floor
+// (referencing a local stylesheet that does not exist) still blocks it.
+async function testUserDirectedStructureEditLiftsCeilingButKeepsFloor() {
+  const deck = {
+    folderPath: '/tmp/user-directed-cover',
+    manifest: { title: '用户改封面', slides: [] },
+    slides: starterSlides.map((slide, index) => ({ ...slide, id: `ud-${index + 1}`, dirty: false, created: false })),
+    currentSlideIndex: 0,
+    manifestDirty: false,
+    templateFilesDirty: false,
+    fileStats: {},
+  };
+  deck.manifest.slides = deck.slides;
+  agentContext.window.Settings._pptBuilder = deck;
+  agentContext.window.Settings._savePptBuilderData = successfulSave;
+  agent._activeDeckPlan = null;
+
+  const originalInvoke = agentContext.window.__TAURI__.core.invoke;
+  // The cover master links style.css; that file exists on disk, anything else
+  // (e.g. missing.css) throws, mirroring a real read_text_file ENOENT.
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    if (command === 'read_text_file') {
+      if (String(payload?.filePath || '').endsWith('style.css')) return 'body{}';
+      throw new Error('ENOENT');
+    }
+    return false;
+  };
+  try {
+    // Restructures the cover, adds a new <style> effect block and extra
+    // elements — all of which the autonomous ceiling would reject — but keeps a
+    // real stylesheet reference. User-directed, so it must save.
+    const rich = await agent._toolWriteSlide(deck, {
+      tool: 'write_slide', page: 1, title: '炫酷封面', slide_type: 'cover', _userDirected: true,
+      html: '<link rel="stylesheet" href="style.css"><style>.hero{animation:spin 2s linear infinite}</style><section class="hero"><h1>炫酷封面</h1><div class="fx"></div><p class="tagline">副标题</p></section>',
+    });
+    assert.match(rich, /已保存/, 'user-directed structure edits are allowed (floor, not ceiling)');
+    assert.ok(!/规范拦截/.test(rich), 'a self-contained rich rewrite is not policy-rejected');
+
+    // The floor still holds even when user-directed: a missing local stylesheet
+    // would drop all styling, so it is rejected in both modes.
+    const broken = await agent._toolWriteSlide(deck, {
+      tool: 'write_slide', page: 1, title: '坏封面', slide_type: 'cover', _userDirected: true,
+      html: '<link rel="stylesheet" href="missing.css"><section class="hero"><h1>坏封面</h1></section>',
+    });
+    assert.match(broken, /规范拦截/, 'referencing a missing local stylesheet is a policy rejection');
+    assert.match(broken, /missing\.css/, 'the rejection names the offending stylesheet');
+    assert.ok(!/保存失败|已恢复执行前状态/.test(broken), 'a floor rejection is recoverable, not a terminal failure');
+  } finally {
+    agentContext.window.__TAURI__.core.invoke = originalInvoke;
+  }
+}
+
+// Issue #1: a recoverable policy rejection (规范拦截) must read as a neutral hold,
+// never as a red 失败, and must not be classified as a terminal failure. Scope
+// detection decides which pages get the strict ceiling.
+function testSoftGuardRejectionRendersAsNeutralHold() {
+  const soft = 'write_slide(第1页「炫酷封面」) 规范拦截：页面引用的样式表 missing.css 在课件目录中不存在，会导致整页样式丢失。请修正后重试。';
+  const hard = 'write_slide 保存失败：磁盘错误。已恢复执行前状态，本轮必须停止。';
+  assert.ok(wb._isSoftGuardRejection(soft), '规范拦截 is a soft guard rejection');
+  assert.ok(!wb._isSoftGuardRejection(hard), 'a save failure is not a soft guard rejection');
+  assert.ok(!wb._isTerminalToolFailure(soft), '规范拦截 is not a terminal tool failure');
+  assert.ok(wb._isTerminalToolFailure(hard), 'a save failure is a terminal tool failure');
+
+  const makeEl = () => ({
+    dataset: { actionLabel: '写入页面内容' },
+    className: '',
+    textContent: '',
+    classList: {
+      _s: new Set(),
+      add(c) { this._s.add(c); },
+      remove(c) { this._s.delete(c); },
+      contains(c) { return this._s.has(c); },
+    },
+  });
+
+  const softEl = makeEl();
+  realFinishAction.call(wb, softEl, wb._now() - 5, soft);
+  assert.match(softEl.textContent, /规范拦截/, 'a soft guard action reads as 规范拦截');
+  assert.ok(!/失败/.test(softEl.textContent), 'a soft guard action is never labelled 失败');
+  assert.equal(softEl.className, 'ln ln-guard', 'a soft guard action uses the neutral guard style');
+
+  const hardEl = makeEl();
+  realFinishAction.call(wb, hardEl, wb._now() - 5, hard);
+  assert.match(hardEl.textContent, /失败/, 'a real failure still reads as 失败');
+  assert.equal(hardEl.className, 'ln ln-err', 'a real failure keeps the error style');
+
+  const previousTask = wb._activeTask;
+  try {
+    // Whole-deck autonomous generation keeps the strict master ceiling.
+    wb._activeTask = { taskSpec: { scope: 'deck' }, requiresPlan: true, commandPages: [] };
+    assert.equal(wb._isUserDirectedPage(1), false, 'whole-deck generation is not user-directed');
+    // An explicitly targeted page edit is user-directed (floor-only).
+    wb._activeTask = { taskSpec: { scope: 'page', targets: { pages: [3] } }, commandPages: [3] };
+    assert.equal(wb._isUserDirectedPage(3), true, 'an explicitly targeted page is user-directed');
+    assert.equal(wb._isUserDirectedPage(5), false, 'a page outside the scoped command is not user-directed');
+  } finally {
+    wb._activeTask = previousTask;
+  }
 }
 
 async function testPrivateTemplateRenderUsesServerHtmlAndSafeSave() {
@@ -1408,15 +1605,16 @@ async function testHarnessFinalizesBeforeDeckValidation() {
   const originalTaskActionRequest = wb._taskActionRequest;
   const originalSelectedConfig = wb.selectedConfig;
   const originalTaskCardRun = wb._taskCardRun;
+  const originalRunHarnessPage = wb._runHarnessPage;
   const calls = [];
   const plan = {
     targetSlideCount: 1,
     slides: [{ page: 1, role: 'cover', title: '封面' }],
     taskSpecRef: { runId: 'run_finalize_receipt_12345678', revision: 1 },
-    execution: { schemaVersion: 1, completedPages: [1], summaries: { 1: '完成' }, stageReviews: [] },
+    execution: { schemaVersion: 1, completedPages: [], summaries: {}, stageReviews: [] },
   };
   try {
-    wb._activeTask = { userInstruction: '测试收尾', runId: 'run_finalize_receipt_12345678' };
+    wb._activeTask = { userInstruction: '测试收尾', runId: 'run_finalize_receipt_12345678', taskSpec: { intent: 'deck_cleanup' } };
     wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
     wb._taskCardRun = { runId: 'run_finalize_receipt_12345678', status: 'running' };
     wb.manifest = { deckRevision: { deckHash: `sha256:${'a'.repeat(64)}` } };
@@ -1449,6 +1647,7 @@ async function testHarnessFinalizesBeforeDeckValidation() {
     wb._logAction = () => null;
     wb._finishAction = () => {};
     wb._logResult = () => {};
+    wb._runHarnessPage = async () => { calls.push('page-worker'); return '不应执行'; };
     await wb._runPlannedHarness(plan, '测试收尾');
     assert.deepEqual(calls, ['execute-task-action:finalize_deck', 'validate'], 'deterministic page cleanup must have its own receipt before whole-deck validation');
   } finally {
@@ -1464,6 +1663,42 @@ async function testHarnessFinalizesBeforeDeckValidation() {
     wb._taskActionRequest = originalTaskActionRequest;
     wb.selectedConfig = originalSelectedConfig;
     wb._taskCardRun = originalTaskCardRun;
+    wb._runHarnessPage = originalRunHarnessPage;
+  }
+}
+
+async function testPiPageInactivityCannotLockWorkbenchForever() {
+  const OriginalWebSocket = context.WebSocket;
+  const originalPrepare = wb._prepareHarnessTarget;
+  const originalTimeout = wb._piInactivityTimeoutMs;
+  const originalStartStatus = wb._startModelStatus;
+  const originalFinishStatus = wb._finishModelStatus;
+  class SilentWebSocket {
+    static OPEN = 1;
+    constructor() { this.readyState = SilentWebSocket.OPEN; }
+    send() {}
+    close() { this.readyState = 3; }
+  }
+  try {
+    context.WebSocket = SilentWebSocket;
+    wb._prepareHarnessTarget = async () => ({ mode: 'replace', after: null });
+    wb._piInactivityTimeoutMs = () => 5;
+    wb._startModelStatus = () => {};
+    wb._finishModelStatus = () => {};
+    wb._activeTask = { runId: 'run_idle_timeout_12345678', userInstruction: '测试空闲超时', piSessionId: 'session-idle' };
+    const plan = { targetSlideCount: 1, slides: [{ page: 1, role: 'content', title: '正文' }], execution: {} };
+    await assert.rejects(
+      wb._runPiHarnessPage(plan, plan.slides[0], {}, '', { rounds: 0, tools: 0 }, { url: 'wss://example.test', token: 'token' }),
+      /长时间没有返回进度/,
+      'a silent connection must settle so the outer finally can restore the input controls',
+    );
+    assert.equal(wb._piSocket, null, 'the timed-out socket must be released');
+  } finally {
+    context.WebSocket = OriginalWebSocket;
+    wb._prepareHarnessTarget = originalPrepare;
+    wb._piInactivityTimeoutMs = originalTimeout;
+    wb._startModelStatus = originalStartStatus;
+    wb._finishModelStatus = originalFinishStatus;
   }
 }
 
@@ -2154,6 +2389,7 @@ async function testLectureAiTaskResolverRequest() {
   const previousConfig = wb.selectedConfig;
   const previousWait = wb._wait;
   const previousLog = wb._log;
+  const previousTurns = wb._recentTurns;
   let request = null;
   let attempts = 0;
   const taskSpec = {
@@ -2181,6 +2417,10 @@ async function testLectureAiTaskResolverRequest() {
   } } };
   wb._wait = async () => {};
   wb._log = () => {};
+  wb._recentTurns = [
+    { role: 'user', text: '@2 优化这一页', pages: [2] },
+    { role: 'assistant', text: '优化第 2 页：任务已完成', pages: [2], intent: 'slide_edit' },
+  ];
   wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
   wb.currentPage = 2;
   wb.manifest = {
@@ -2201,14 +2441,87 @@ async function testLectureAiTaskResolverRequest() {
     assert.equal(request.args.payload.requestRunId, 'run_request_12345678');
     assert.equal(request.args.payload.deckRevision, `sha256:${'a'.repeat(64)}`);
     assert.deepEqual(request.args.payload.mentions.pages, [2]);
+    assert.equal(request.args.payload.recentTurns.length, 2, 'the resolver payload must carry recent conversation turns');
+    assert.equal(request.args.payload.recentTurns[1].role, 'assistant');
+    assert.deepEqual(request.args.payload.recentTurns[1].pages, [2], 'assistant turns keep their touched pages');
+    assert.equal(request.args.payload.recentTurns[1].intent, 'slide_edit');
     assert.equal(JSON.stringify(request.args.payload).includes('/private/local/deck'), false, 'resolver payload must not contain local paths');
     assert.ok(request.args.payload.capabilities.includes('task.receipts.v1'));
+    // A replayed instruction without its own page mention inherits the last task pages
+    await wb._resolveLectureAiTask('重试。', null, 'run_request_12345678', [2]);
+    assert.deepEqual(request.args.payload.mentions.pages, [2], 'replayed instructions inherit the last task pages as mentions');
   } finally {
     context.window.__TAURI__ = previousTauri;
     wb.manifest = previousManifest;
     wb.selectedConfig = previousConfig;
     wb._wait = previousWait;
     wb._log = previousLog;
+    wb._recentTurns = previousTurns;
+  }
+}
+
+async function testResolverConversationMemory() {
+  const previousTurns = wb._recentTurns;
+  const previousLastTask = wb._lastTask;
+  const previousActiveTask = wb._activeTask;
+  const previousManifest = wb.manifest;
+  const previousTaskCardRun = wb._taskCardRun;
+  const previousScheduleSave = wb._scheduleSessionSave;
+  wb._scheduleSessionSave = () => {};
+  try {
+    wb._recentTurns = [];
+    wb._lastTask = null;
+    wb._activeTask = {
+      runId: 'run_memory_12345678',
+      userInstruction: '@1 恢复样式并添加讲师',
+      taskSpec: {
+        runId: 'run_memory_12345678',
+        intent: 'slide_edit',
+        userFacingGoal: '恢复第 1 页样式并添加讲师',
+        targets: { pages: [1] },
+      },
+    };
+    // Recording a task outcome updates both the rolling turns and the retry anchor
+    wb._recordTaskOutcome('completed', '任务已完成');
+    assert.equal(wb._recentTurns.length, 1);
+    assert.equal(wb._recentTurns[0].role, 'assistant');
+    assert.deepEqual(wb._recentTurns[0].pages, [1]);
+    assert.match(wb._recentTurns[0].text, /恢复第 1 页样式并添加讲师：任务已完成/);
+    assert.equal(wb._lastTask.instruction, '@1 恢复样式并添加讲师');
+    assert.deepEqual(wb._lastTask.pages, [1]);
+    assert.equal(wb._lastTask.status, 'completed');
+    // A bare retry with no resumable run replays the previous instruction
+    const target = wb._retryTaskTarget('重试。', false);
+    assert.ok(target, 'a bare retry maps to the last task');
+    assert.equal(target.instruction, '@1 恢复样式并添加讲师');
+    assert.deepEqual(target.pages, [1]);
+    // Explicit resume paths and concrete instructions are never substituted
+    assert.equal(wb._retryTaskTarget('重试。', true), null, 'a resumable server run owns retry semantics');
+    assert.equal(wb._retryTaskTarget('继续修改第3页', false), null, 'a concrete follow-up must not be substituted');
+    assert.equal(wb._retryTaskTarget('优化一下标题', false), null);
+    wb.manifest = { deckPlan: { plan: null } };
+    wb._taskCardRun = { runId: 'run_done_12345678', status: 'completed' };
+    assert.equal(wb._resumableTaskRunId('重试。'), '', 'a completed card must not hijack a later retry');
+    wb._taskCardRun = { runId: 'run_failed_12345678', status: 'failed' };
+    assert.equal(wb._resumableTaskRunId('重试。'), 'run_failed_12345678', 'only a genuinely resumable run owns retry semantics');
+    // Without memory there is nothing to replay
+    wb._lastTask = null;
+    assert.equal(wb._retryTaskTarget('重试。', false), null);
+    // /compact trims the rolling memory even when the legacy history is short
+    wb._lastTask = { runId: 'r', instruction: 'x', pages: [], intent: null, status: 'completed' };
+    wb._recentTurns = [1, 2, 3, 4, 5, 6].map(i => ({ role: i % 2 ? 'user' : 'assistant', text: `t${i}`, pages: [] }));
+    const previousLogForCompact = wb._log;
+    wb._log = () => {};
+    wb._compact();
+    wb._log = previousLogForCompact;
+    assert.equal(wb._recentTurns.length, 4, '/compact keeps only the last 4 resolver turns');
+  } finally {
+    wb._recentTurns = previousTurns;
+    wb._lastTask = previousLastTask;
+    wb._activeTask = previousActiveTask;
+    wb.manifest = previousManifest;
+    wb._taskCardRun = previousTaskCardRun;
+    wb._scheduleSessionSave = previousScheduleSave;
   }
 }
 
@@ -2230,6 +2543,7 @@ async function testRapidSubmitIsAcknowledgedAndDeduplicated() {
   const stop = { hidden: true };
   const userMessages = [];
   let refreshCalls = 0;
+  let refreshOptions = null;
   let turnCalls = 0;
   let releaseRefresh;
   const refreshGate = new Promise(resolve => { releaseRefresh = resolve; });
@@ -2237,7 +2551,11 @@ async function testRapidSubmitIsAcknowledgedAndDeduplicated() {
   wb.selectedConfig = { aiProvider: 'deepseek', aiApiKey: 'test-key' };
   wb.manifest = { slides: [{ id: 's1', title: '封面', slideType: 'cover' }] };
   wb.busy = false;
-  wb._refreshContext = async () => { refreshCalls += 1; await refreshGate; };
+  wb._refreshContext = async (options) => {
+    refreshCalls += 1;
+    refreshOptions = options;
+    await refreshGate;
+  };
   wb._ensureHistory = () => { wb.history = [{ role: 'system', content: '' }]; };
   wb._systemPrompt = () => 'system';
   wb._resolveAt = async value => ({ content: value, mentioned: [] });
@@ -2252,8 +2570,10 @@ async function testRapidSubmitIsAcknowledgedAndDeduplicated() {
     duplicate = wb._send();
     await Promise.resolve();
     assert.equal(refreshCalls, 1, 'a second click during async preflight must not start another submission');
+    assert.equal(refreshOptions?.prepareTask, true,
+      'task submission should flush pending editor changes before reading the deck revision');
     assert.equal(input.value, '', 'the accepted message should leave the input immediately');
-    assert.equal(input.disabled, true, 'the input should lock while the accepted message is being prepared');
+    assert.equal(input.disabled, false, 'the input stays editable so the user can draft the next instruction');
     assert.deepEqual(userMessages, ['@1 封面增加淡入动画'], 'the accepted message should appear exactly once without waiting for preflight');
     releaseRefresh();
     await Promise.all([first, duplicate]);
@@ -2363,6 +2683,183 @@ async function testTypedRetryResumesSavedTask() {
     wb._appendUser = previousAppendUser;
     wb._autoResizeInput = previousAutoResize;
     wb._hideSlashMenu = previousHideSlashMenu;
+  }
+}
+
+// After a task finishes, sending a fresh (non-resume) message in the same
+// conversation must refresh the task card to the NEW message immediately, and
+// clear it if the new instruction only yields a clarification — the card must
+// never keep showing the previous, completed task's goal.
+async function testNewMessageAfterCompletionRefreshesTaskCard() {
+  const previousGetElementById = context.document.getElementById;
+  const previousConfig = wb.selectedConfig;
+  const previousManifest = wb.manifest;
+  const previousBusy = wb.busy;
+  const previousRun = wb._taskCardRun;
+  const previousSpec = wb._taskCardSpec;
+  const previousActive = wb._activeTask;
+  const previousChecklist = wb._taskChecklist;
+  const previousRefresh = wb._refreshContext;
+  const previousLoadFeatures = wb._loadLectureAiFeatures;
+  const previousFeatureEnabled = wb._featureEnabled;
+  const previousResolveTask = wb._resolveLectureAiTask;
+  const previousRunNative = wb._runLectureAiNativeTask;
+  const previousRenderCard = wb._renderTaskCard;
+  const previousAppendUser = wb._appendUser;
+  const previousAppendMarkdown = wb._appendAssistantMarkdown;
+  const previousAutoResize = wb._autoResizeInput;
+  const previousHideSlashMenu = wb._hideSlashMenu;
+  const previousLastTask = wb._lastTask;
+  const previousPendingResolve = wb._pendingTaskResolve;
+  const previousRecentTurns = wb._recentTurns;
+  const previousScheduleSave = wb._scheduleSessionSave;
+
+  const completedGoal = '@1 样式没了，动画特效什么的也没了。另外要加个讲师：王景熠。';
+  const input = { value: '', disabled: false, style: {}, scrollHeight: 20 };
+  const send = { disabled: false };
+  const stop = { hidden: true };
+  context.document.getElementById = id => ({ 'wb-input': input, 'wb-send': send, 'wb-stop': stop }[id] || null);
+  wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
+  wb.manifest = { slides: [{ id: 's1', title: '封面', slideType: 'cover' }, { id: 's2', title: '目录' }], deckPlan: { plan: null } };
+  wb._refreshContext = async () => {};
+  wb._loadLectureAiFeatures = async () => ({ lectureai_task_spec_v2: true });
+  wb._featureEnabled = name => ['lectureai_task_spec_v2', 'lectureai_task_ui_v2', 'lectureai_native_tools_required', 'lectureai_action_receipts_v1'].includes(name);
+  wb._appendUser = () => {};
+  wb._appendAssistantMarkdown = () => {};
+  wb._autoResizeInput = () => {};
+  wb._hideSlashMenu = () => {};
+  wb._scheduleSessionSave = () => {};
+
+  const seedCompleted = () => {
+    // Simulate the aftermath of a finished task: the card and its satellite
+    // state still describe the previous instruction.
+    wb.busy = false;
+    wb._taskCardRun = { runId: 'run_completed_prev_12345678', status: 'completed', userFacingGoal: completedGoal };
+    wb._taskCardSpec = { runId: 'run_completed_prev_12345678', intent: 'slide_edit', userFacingGoal: completedGoal };
+    wb._activeTask = { runId: 'run_completed_prev_12345678', plan: { slides: [{ page: 1 }] } };
+    wb._taskChecklist = { runId: 'run_completed_prev_12345678', pages: [{ page: 1, title: '封面', status: 'done' }] };
+  };
+
+  const renders = [];
+  wb._renderTaskCard = (value, spec) => { renders.push({ value, spec }); wb._taskCardRun = value; };
+
+  try {
+    // Scenario 1: a fresh instruction that resolves to a real task.
+    seedCompleted();
+    input.value = '要和其他页面的风格相似。';
+    const nativeCalls = [];
+    wb._runLectureAiNativeTask = async (...args) => { nativeCalls.push(args); };
+    wb._resolveLectureAiTask = async value => {
+      // The provisional card must already reflect the NEW message before the
+      // server resolve returns.
+      const provisional = renders[renders.length - 1];
+      assert.ok(provisional && provisional.value, 'a provisional card must render before resolve completes');
+      assert.equal(provisional.value.userFacingGoal, '要和其他页面的风格相似。', 'the provisional card shows the new message, not the finished task');
+      assert.notEqual(provisional.value.runId, 'run_completed_prev_12345678', 'the provisional card must not inherit the finished run identity');
+      assert.equal(wb._activeTask, null, 'the finished task active-state must be dropped for a fresh instruction');
+      assert.equal(wb._taskChecklist, null, 'the finished task checklist must be dropped for a fresh instruction');
+      return {
+        schemaVersion: 1, runId: 'run_new_task_87654321', intent: 'slide_edit', scope: 'page',
+        targets: { pages: [1], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+        executionStrategy: 'bounded_tool_loop', requiresDeckPlan: false,
+        userFacingGoal: '要和其他页面的风格相似。', assumptions: [],
+        acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页面检查通过' }],
+        requiredCapabilities: ['slide.read', 'slide.write.transactional', 'deck.validate'],
+        confidence: 1, requiresClarification: false, taskSpecVersion: 'task-spec-v2', promptVersion: 'task-resolver-v2',
+      };
+    };
+    await wb._send();
+    assert.equal(nativeCalls.length, 1, 'a runnable fresh instruction dispatches a native task');
+    assert.equal(nativeCalls[0][0].runId, 'run_new_task_87654321', 'the native task uses the freshly resolved run');
+
+    // Scenario 2: a fresh, vague instruction that only yields a clarification.
+    seedCompleted();
+    renders.length = 0;
+    input.value = '整体风格';
+    wb._runLectureAiNativeTask = async () => { throw new Error('clarification must not start a task'); };
+    wb._resolveLectureAiTask = async () => ({
+      schemaVersion: 1, runId: 'run_clarify_11112222', intent: 'slide_edit', scope: 'page',
+      targets: { pages: [], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+      executionStrategy: 'bounded_tool_loop', requiresDeckPlan: false, userFacingGoal: '整体风格', assumptions: [],
+      acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页面检查通过' }],
+      requiredCapabilities: ['slide.read'], confidence: 0.3, requiresClarification: true,
+      clarificationQuestion: '请说明希望修改哪一页。', taskSpecVersion: 'task-spec-v2', promptVersion: 'task-resolver-v2',
+    });
+    await wb._send();
+    const lastRender = renders[renders.length - 1];
+    assert.equal(lastRender.value, null, 'a clarification-only instruction clears the task card instead of leaving the finished task visible');
+
+    // Scenario 3: a concrete follow-up fails after submission, then a bare
+    // retry must recover that exact instruction and request id. This is the
+    // production sequence: successful cover edit -> lecturer follow-up ->
+    // transport failure -> "重试".
+    seedCompleted();
+    wb._lastTask = {
+      runId: 'run_completed_prev_12345678', instruction: completedGoal,
+      pages: [1], intent: 'slide_edit', status: 'completed',
+    };
+    wb._pendingTaskResolve = null;
+    wb._recentTurns = [];
+    input.value = '加个讲师：王景熠';
+    let failedRequestRunId = '';
+    wb._resolveLectureAiTask = async (value, _slash, requestRunId) => {
+      assert.equal(value, '加个讲师：王景熠');
+      failedRequestRunId = requestRunId;
+      throw new Error('LectureAI 连接暂时中断，未能确认任务状态，请稍后重试。');
+    };
+    await wb._send();
+    assert.match(failedRequestRunId, /^run_/, 'the failed resolve keeps a stable request id');
+    assert.equal(wb._lastTask.instruction, '加个讲师：王景熠', 'the failed follow-up replaces the previous completed retry anchor');
+    assert.equal(wb._lastTask.runId, failedRequestRunId, 'the retry anchor keeps the possibly committed server request id');
+    assert.equal(wb._lastTask.status, 'resolve_failed');
+
+    input.value = '重试';
+    let replayedInput = '';
+    let replayedRunId = '';
+    const replayNativeCalls = [];
+    wb._resolveLectureAiTask = async (value, _slash, requestRunId, inheritedPages) => {
+      replayedInput = value;
+      replayedRunId = requestRunId;
+      assert.deepEqual(inheritedPages, [], 'page inference remains available to the server when the failed instruction had no explicit @ mention');
+      return {
+        schemaVersion: 1, runId: requestRunId, intent: 'slide_edit', scope: 'page',
+        targets: { pages: [1], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+        executionStrategy: 'bounded_tool_loop', requiresDeckPlan: false,
+        userFacingGoal: '加个讲师：王景熠', assumptions: [],
+        acceptanceCriteria: [{ type: 'target_pages_validated', label: '目标页面检查通过' }],
+        requiredCapabilities: ['slide.read', 'slide.write.transactional', 'deck.validate'],
+        confidence: 1, requiresClarification: false, taskSpecVersion: 'task-spec-v2', promptVersion: 'task-resolver-v2',
+      };
+    };
+    wb._runLectureAiNativeTask = async (...args) => { replayNativeCalls.push(args); };
+    await wb._send();
+    assert.equal(replayedInput, '加个讲师：王景熠', 'bare retry replays the failed instruction instead of sending the literal word');
+    assert.equal(replayedRunId, failedRequestRunId, 'bare retry reuses the same request id so a committed response can be recovered');
+    assert.equal(replayNativeCalls.length, 1);
+    assert.equal(replayNativeCalls[0][1], '加个讲师：王景熠', 'execution receives the recovered instruction');
+  } finally {
+    context.document.getElementById = previousGetElementById;
+    wb.selectedConfig = previousConfig;
+    wb.manifest = previousManifest;
+    wb.busy = previousBusy;
+    wb._taskCardRun = previousRun;
+    wb._taskCardSpec = previousSpec;
+    wb._activeTask = previousActive;
+    wb._taskChecklist = previousChecklist;
+    wb._refreshContext = previousRefresh;
+    wb._loadLectureAiFeatures = previousLoadFeatures;
+    wb._featureEnabled = previousFeatureEnabled;
+    wb._resolveLectureAiTask = previousResolveTask;
+    wb._runLectureAiNativeTask = previousRunNative;
+    wb._renderTaskCard = previousRenderCard;
+    wb._appendUser = previousAppendUser;
+    wb._appendAssistantMarkdown = previousAppendMarkdown;
+    wb._autoResizeInput = previousAutoResize;
+    wb._hideSlashMenu = previousHideSlashMenu;
+    wb._lastTask = previousLastTask;
+    wb._pendingTaskResolve = previousPendingResolve;
+    wb._recentTurns = previousRecentTurns;
+    wb._scheduleSessionSave = previousScheduleSave;
   }
 }
 
@@ -2494,12 +2991,15 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
 (async () => {
   await testRapidSubmitIsAcknowledgedAndDeduplicated();
   await testTypedRetryResumesSavedTask();
+  await testNewMessageAfterCompletionRefreshesTaskCard();
   await testLectureAiTaskResolverRequest();
+  await testResolverConversationMemory();
   await testLectureAiWebSocketUrlComesFromAuthenticatedFeatures();
   await testTaskJournalRecoveryCleanupAndRevertCompensation();
   await testLectureAiRetriesOneTransientUpstreamFailure();
   await testInputUiBindsWithoutTauriEvents();
   await testExternalSkillImportRefreshesCatalog();
+  await testTaskContextFlushesPendingEditorChangesBeforeRevision();
   agentContext.window.Settings._pptBuilder = pb;
   await testConceptAnimationContextIncludesCurrentNeighborsAndStylesheet();
   await testTemplateAwareInsertKeepsFinishLast();
@@ -2508,6 +3008,7 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
   await testNativeDeleteSlideIsManifestOnlyAndPlanBound();
   testStructuredTaskReceiptDetails();
   testTaskProgressSummaryIsScopedAndFriendly();
+  testTaskChecklistTracksPerPageStatus();
   await testTaskProgressSaveStaysWithOriginalDeck();
   await testValidationDiagnosticsRemainSuccessfulToolReceipts();
   await testCancelledSaveRollsBackAgentMutation();
@@ -2520,11 +3021,14 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
   await testSlashCommandKeepsPageScope();
   await testOptionalPlanToolsUseSeparateTauriStorage();
   await testPlannedPlaceholderRoleConversion();
+  await testUserDirectedStructureEditLiftsCeilingButKeepsFloor();
+  testSoftGuardRejectionRendersAsNeutralHold();
   await testPrivateTemplateRenderUsesServerHtmlAndSafeSave();
   await testPageHarnessResetsMessagesBetweenSlides();
   await testHarnessFinalizesBeforeDeckValidation();
   await testHarnessCompletionWaitsForServerAuthority();
   await testHarnessValidationFailureBecomesRepairable();
+  await testPiPageInactivityCannotLockWorkbenchForever();
   await testPiWebSocketReturnsMatchingToolResult();
   await testNativeTaskWebSocketUsesStructuredReceipts();
   await testAgentTaskActionIsIdempotentAndRevisionSafe();

@@ -242,6 +242,24 @@ html, body {
   background: var(--bg-hover);
 }
 
+/* AI assistant entry points (homepage + editor). Restrained, on-brand look
+   that matches the neighboring tool buttons: neutral surface + border, with
+   the icon as the only blue accent. No gradient, shimmer, or glow. */
+.ai-entry-cta {
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.ai-entry-cta svg {
+  color: var(--accent);
+  stroke: var(--accent);
+  flex: 0 0 auto;
+}
+.ai-entry-cta:hover {
+  border-color: var(--accent);
+}
+
 .ppte-workbench {
   width: min(1100px, calc(100% - 64px));
   margin: 0 auto;

@@ -46,6 +46,8 @@ window.WorkbenchWindow = {
   _taskProgressRunId: '',
   _taskProgressSaveTimers: new Map(),
   _pendingTaskResolve: null,
+  _recentTurns: [],      // compact rolling turns sent to the server resolver (max 8)
+  _lastTask: null,       // {runId, instruction, pages, intent, status} so a bare retry/continue can re-run it
   _taskSyncTimers: new Map(),
   _taskJournalLoadSeq: 0,
   _featureFlags: Object.create(null),
@@ -243,6 +245,8 @@ window.WorkbenchWindow = {
         this._deckPath = deckPath;
         this.history = [];
         this._transcript = [];
+        this._recentTurns = [];
+        this._lastTask = null;
         this._beginSession();
       } else if (document.getElementById('wb-pick-ppte')) {
         // was showing the pick-course guide, now connected -> reset to empty
@@ -272,10 +276,7 @@ window.WorkbenchWindow = {
   },
 
   _taskProgressText(value) {
-    return this._friendlyLabel(String(value || ''))
-      .replace(/[\r\n\t]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
+    return this._statusText(value)
       .slice(0, 220);
   },
 
@@ -322,7 +323,8 @@ window.WorkbenchWindow = {
       <div class="wb-task-card-head"><span class="wb-task-card-title">LectureAI 任务</span><span class="wb-task-card-status">${this._escape(this._taskStatusLabel(status))}</span></div>
       <div class="wb-task-card-goal" title="${this._escape(this._taskCardGoal(run, spec))}">${this._escape(this._taskCardGoal(run, spec))}</div>
       <div class="wb-task-card-meta">${completed || total ? `已完成 ${completed}/${total || '?'} 页` : '进度已保存'}${run.errorCode ? ' · 有待处理项' : ''}${syncPending ? ' · 正在同步恢复状态' : ''}</div>
-      <div class="wb-task-card-meta wb-task-card-summary" data-task-progress-summary-row${progressSummary ? '' : ' hidden'} title="${this._escape(progressSummary)}"><strong>思考过程摘要：</strong><span data-task-progress-summary-text>${this._escape(progressSummary)}</span></div>
+      <div class="wb-task-card-meta wb-task-card-summary${this._taskStatusIsLive(status) ? ' is-live' : ''}" data-task-progress-summary-row${progressSummary ? '' : ' hidden'} title="${this._escape(progressSummary)}"><span class="wb-work-dots" aria-hidden="true"><i></i><i></i><i></i></span><strong>工作中：</strong><span data-task-progress-summary-text>${this._escape(progressSummary)}</span></div>
+      <div class="wb-task-checklist" data-task-checklist hidden></div>
       <div class="wb-task-card-actions">
         ${canContinue ? '<button type="button" data-task-action="continue">继续</button>' : ''}
         ${canRetry ? '<button type="button" data-task-action="retry">仅重试失败页</button>' : ''}
@@ -333,6 +335,81 @@ window.WorkbenchWindow = {
     card.querySelectorAll('[data-task-action]').forEach(button => {
       button.onclick = () => this._handleTaskCardAction(button.dataset.taskAction);
     });
+    // Rebuild the per-page checklist from authoritative plan state when the card
+    // is (re)rendered for a different run — e.g. reopening the workbench or
+    // resuming a paused task. Live execution updates it incrementally instead.
+    if ((!this._taskChecklist || this._taskChecklist.runId !== runId) && Array.isArray(this._activeTask?.plan?.slides) && this._activeTask.plan.slides.length) {
+      const exec = this._activeTask.plan.execution || {};
+      const completedFromState = Array.isArray(exec.completedPages) && exec.completedPages.length
+        ? exec.completedPages
+        : (completed ? Array.from({ length: completed }, (_, i) => i + 1) : []);
+      this._buildTaskChecklist(this._activeTask.plan, { completedPages: completedFromState, failedPages: run.failedPages || [] });
+    }
+    this._renderTaskChecklist();
+  },
+
+  _checklistPageLabel(slide) {
+    const raw = slide?.title || slide?.role || slide?.contentKind || '';
+    const text = String(raw).trim();
+    return text || `第 ${Number(slide?.page) || '?'} 页`;
+  },
+
+  _checklistGlyph(status) {
+    if (status === 'done') return '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>';
+    if (status === 'failed') return '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+    return '';
+  },
+
+  _buildTaskChecklist(plan, { completedPages = [], activePage = null, failedPages = [] } = {}) {
+    const slides = Array.isArray(plan?.slides) ? plan.slides : [];
+    if (!slides.length) { this._taskChecklist = null; return; }
+    const done = new Set((completedPages || []).map(Number));
+    const failed = new Set((failedPages || []).map(Number));
+    const active = activePage == null ? null : Number(activePage);
+    const runId = String(plan?.taskSpecRef?.runId || this._activeTask?.runId || this._taskCardRun?.runId || '');
+    this._taskChecklist = {
+      runId,
+      pages: slides.map(slide => {
+        const page = Number(slide.page);
+        let status = 'pending';
+        if (done.has(page)) status = 'done';
+        else if (failed.has(page)) status = 'failed';
+        else if (active !== null && page === active) status = 'active';
+        return { page, title: this._checklistPageLabel(slide), status };
+      }),
+    };
+  },
+
+  _markChecklistPage(page, status) {
+    const list = this._taskChecklist;
+    if (!list) return;
+    const item = list.pages.find(entry => entry.page === Number(page));
+    if (!item || item.status === status) return;
+    item.status = status;
+    this._renderTaskChecklist();
+  },
+
+  _renderTaskChecklist() {
+    const card = document.getElementById?.('wb-task-card');
+    const host = card?.querySelector?.('[data-task-checklist]');
+    if (!host) return;
+    const list = this._taskChecklist;
+    if (!list || !list.pages.length) { host.hidden = true; host.innerHTML = ''; return; }
+    host.hidden = false;
+    const doneCount = list.pages.filter(entry => entry.status === 'done').length;
+    host.innerHTML = `
+      <div class="wb-checklist-head">生成清单 · ${doneCount}/${list.pages.length}</div>
+      <ol class="wb-checklist">
+        ${list.pages.map(entry => `<li class="wb-checklist-item is-${entry.status}" data-checklist-page="${entry.page}"><span class="wb-checklist-mark" aria-hidden="true">${this._checklistGlyph(entry.status)}</span><span class="wb-checklist-page">P${entry.page}</span><span class="wb-checklist-title" title="${this._escape(entry.title)}">${this._escape(entry.title)}</span></li>`).join('')}
+      </ol>`;
+    const active = host.querySelector?.('.wb-checklist-item.is-active');
+    if (active?.scrollIntoView) { try { active.scrollIntoView({ block: 'nearest' }); } catch (_) { /* non-DOM env */ } }
+  },
+
+  _taskStatusIsLive(status) {
+    // "Live" = the task is actively working, so the motion indicator should run.
+    // Terminal/paused states are static.
+    return !['completed', 'failed', 'cancelled', 'paused', 'needs_repair'].includes(String(status || 'running'));
   },
 
   _updateTaskProgressSummary(value, runId = '') {
@@ -349,10 +426,13 @@ window.WorkbenchWindow = {
     const text = card?.querySelector?.('[data-task-progress-summary-text]');
     if (row) row.hidden = false;
     if (row) row.title = summary;
+    // A fresh summary means the task is actively working — keep the live
+    // indicator animating even between full card re-renders.
+    if (row && row.classList) row.classList.toggle('is-live', this._taskStatusIsLive(this._taskCardRun?.status));
     if (text) text.textContent = summary;
     if (this._modelStatusEl) {
-      this._modelStatusEl.dataset.summary = `思考过程摘要 · ${summary}`;
-      this._modelStatusEl.textContent = `第 ${this._activeRound || 1} 轮 · 思考过程摘要 · ${summary}`;
+      this._modelStatusEl.dataset.summary = `工作中 · ${summary}`;
+      this._modelStatusEl.textContent = String(summary || '');
     }
     this._queueTaskProgressSave(targetRunId, summary);
   },
@@ -553,6 +633,11 @@ window.WorkbenchWindow = {
         };
       }
       const ok = local?.ok === true;
+      if (!ok && local?.policyRejection) {
+        // Recoverable规范拦截: no mutation happened and the model will resend
+        // corrected content. Surface it without recording a server-side failure.
+        return { ok: false, policyRejection: true, actionId, argsHash, error: local.error, result: {} };
+      }
       const result = ok && local?.result && typeof local.result === 'object' ? local.result : {};
       const newDeckRevision = ok ? (local?.newDeckRevision || result.newDeckRevision || null) : null;
       const errorCode = ok ? null : String(local?.error?.code || 'CLIENT_TOOL_FAILED');
@@ -741,6 +826,8 @@ window.WorkbenchWindow = {
     const token = ++this._restoreToken;
     this._sessionId = `s${Date.now().toString(36)}`;
     this._sessionStartedAt = new Date().toISOString();
+    this._recentTurns = [];
+    this._lastTask = null;
     const past = await this._readSessionStore();
     if (token !== this._restoreToken) return; // deck switched while reading
     this._sessions = past;
@@ -772,6 +859,8 @@ window.WorkbenchWindow = {
       preview,
       history: this.history,
       transcript: this._transcript,
+      recentTurns: this._recentTurns || [],
+      lastTask: this._lastTask || null,
     };
     const others = (this._sessions || []).filter(s => s.id !== entry.id);
     this._sessions = [entry, ...others]
@@ -831,8 +920,11 @@ window.WorkbenchWindow = {
     this._sessionStartedAt = session.startedAt || null;
     this.history = Array.isArray(session.history) ? session.history : [];
     this._transcript = Array.isArray(session.transcript) ? session.transcript : [];
+    this._recentTurns = Array.isArray(session.recentTurns) ? session.recentTurns.slice(-8) : [];
+    this._lastTask = session.lastTask && typeof session.lastTask === 'object' ? session.lastTask : null;
     const m = document.getElementById('wb-messages');
     if (m) m.innerHTML = '';
+    this._liveThinkEl = null;
     for (const item of this._transcript) {
       if (item?.t === 'ai' && item.md) this._appendAssistantMarkdown(item.md, { skipRecord: true });
       else if (item?.text) this._log(item.t, item.text, { skipRecord: true });
@@ -895,9 +987,10 @@ window.WorkbenchWindow = {
 
   // Re-fetch course context from the main window (a PPTE may have been opened
   // after this window loaded). Preserves the user's model selection if still available.
-  async _refreshContext() {
-    const ctx = await this._rpc('get-context');
+  async _refreshContext(options = {}) {
+    const ctx = await this._rpc('get-context', options);
     if (!ctx) return;
+    if (ctx.error) throw new Error(String(ctx.error).replace(/^Error:\s*/, ''));
     const prevSel = document.getElementById('wb-model')?.value;
     this._onContext(ctx);
     const sel = document.getElementById('wb-model');
@@ -919,6 +1012,8 @@ window.WorkbenchWindow = {
   _clear() {
     this.history = [];
     this._transcript = [];
+    this._recentTurns = [];
+    this._lastTask = null;
     this._renderEmpty();
     this._saveSession();
     this._log('sys', '上下文已清理 · 课件连接和页面状态保留');
@@ -926,10 +1021,14 @@ window.WorkbenchWindow = {
 
   _compact() {
     this._ensureHistory();
+    // Resolver memory compresses harder: keep only the last exchange plus the
+    // last task anchor so follow-ups stay grounded without replaying stale turns.
+    this._recentTurns = (this._recentTurns || []).slice(-4);
     const system = this.history[0];
     const previous = this.history.slice(1);
     if (previous.length <= 2) {
       this._log('sys', '上下文无需压缩 · 当前对话已经很短');
+      this._scheduleSessionSave();
       return;
     }
     const recent = previous.slice(-6);
@@ -944,6 +1043,7 @@ window.WorkbenchWindow = {
 
   _renderEmpty() {
     const m = document.getElementById('wb-messages');
+    this._liveThinkEl = null;
     if (m) m.innerHTML = `<div class="wb-empty">课件助教对话窗口。<br>输入 / 选择内置命令，@ 定位页面，<br>$ 启用已导入的技能。<br>改完自动保存并在主窗口预览。</div>`;
   },
 
@@ -1243,6 +1343,86 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     };
   },
 
+  // ---- conversation memory for the server task resolver ----
+  // The native V2 path does not replay this.history; without this rolling
+  // memory, follow-ups like "整体风格" or a bare "重试" reach the resolver
+  // with no anchor to the page they refer to.
+  _recordTurn(turn) {
+    const entry = {
+      role: turn.role === 'assistant' ? 'assistant' : 'user',
+      text: String(turn.text || '').slice(0, 300),
+      pages: (Array.isArray(turn.pages) ? turn.pages : [])
+        .filter(page => Number.isInteger(page) && page >= 1 && page <= 60)
+        .slice(0, 8),
+      intent: turn.intent ? String(turn.intent).slice(0, 40) : null,
+      at: new Date().toISOString(),
+    };
+    this._recentTurns = [...(this._recentTurns || []), entry].slice(-8);
+    this._scheduleSessionSave();
+  },
+
+  _recordTaskOutcome(status, text) {
+    const task = this._activeTask;
+    const spec = task?.taskSpec;
+    if (!spec) return;
+    const pages = (Array.isArray(spec.targets?.pages) ? spec.targets.pages : []).filter(Number.isInteger);
+    const instruction = String(task.userInstruction || spec.userFacingGoal || '');
+    this._lastTask = {
+      runId: String(task.runId || spec.runId || ''),
+      instruction,
+      pages: [...pages],
+      intent: spec.intent,
+      status,
+    };
+    this._recordTurn({
+      role: 'assistant',
+      text: [spec.userFacingGoal || instruction, text].filter(Boolean).join('：'),
+      pages,
+      intent: spec.intent,
+    });
+  },
+
+  _rememberTaskAnchor({ runId = '', instruction = '', pages = [], intent = null, status = 'resolving' } = {}) {
+    const normalizedInstruction = String(instruction || '').trim();
+    if (!normalizedInstruction) return null;
+    this._lastTask = {
+      runId: String(runId || ''),
+      instruction: normalizedInstruction,
+      pages: (Array.isArray(pages) ? pages : [])
+        .filter(page => Number.isInteger(page) && page >= 1 && page <= 60)
+        .slice(0, 8),
+      intent: intent ? String(intent).slice(0, 40) : null,
+      status: String(status || 'resolving'),
+    };
+    this._scheduleSessionSave();
+    return this._lastTask;
+  },
+
+  // Resume only a run whose persisted state is actually resumable. A completed
+  // task card can remain visible after success; its run id must never turn a
+  // later bare "重试" into a context-free new task.
+  _resumableTaskRunId(input) {
+    if (!this._isHarnessResumeRequest(input)) return '';
+    const resumable = new Set(['ready', 'running', 'paused', 'failed', 'repairing', 'needs_repair', 'needs-repair']);
+    const plan = this.manifest?.deckPlan?.plan;
+    const planStatus = String(plan?.execution?.status || '');
+    const planRunId = String(plan?.taskSpecRef?.runId || plan?.execution?.runId || '').trim();
+    if (planRunId && resumable.has(planStatus)) return planRunId;
+    const cardStatus = String(this._taskCardRun?.status || '');
+    const cardRunId = String(this._taskCardRun?.runId || '').trim();
+    return cardRunId && resumable.has(cardStatus) ? cardRunId : '';
+  },
+
+  // A bare retry/continue with no resumable server run replays the last
+  // task's instruction instead of sending the literal word to the resolver.
+  _retryTaskTarget(input, existingV2Run) {
+    if (existingV2Run) return null;
+    if (!this._isHarnessResumeRequest(input)) return null;
+    const last = this._lastTask;
+    if (!last || !String(last.instruction || '').trim()) return null;
+    return last;
+  },
+
   _taskSpecContext(spec) {
     if (!spec) return '';
     return `[LectureAI 任务合同]\n${JSON.stringify({
@@ -1257,7 +1437,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     })}\n任务类型、范围和验收条件由服务端确定；只能在 targets 允许的范围内行动。`;
   },
 
-  async _resolveLectureAiTask(input, slash = null, requestRunId = null) {
+  async _resolveLectureAiTask(input, slash = null, requestRunId = null, extraPages = null) {
     const protocol = window.LectureAiTaskProtocol;
     if (!protocol) throw new Error('当前客户端缺少 LectureAI 任务协议，请升级后重试。');
     const selected = this.selectedConfig || this.aiConfig || {};
@@ -1269,11 +1449,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     // progress requests address the same server-side task scope.
     const derivedDeckId = /^sha256:[a-fA-F0-9]{32,64}$/.test(revision) ? `deck-${revision.slice(7, 47)}` : null;
     const resumePlan = this.manifest?.deckPlan?.plan;
-    const resumable = ['running', 'paused', 'failed', 'repairing', 'needs-repair'].includes(resumePlan?.execution?.status)
-      || ['ready', 'running', 'paused', 'failed', 'repairing', 'needs_repair'].includes(String(this._taskCardRun?.status || ''));
-    const resumeRunId = this._isHarnessResumeRequest(input) && resumable
-      ? String(resumePlan?.taskSpecRef?.runId || resumePlan?.execution?.runId || this._taskCardRun?.runId || '').trim() || protocol.newRunId()
-      : null;
+    const resumeRunId = this._resumableTaskRunId(input) || null;
     const payload = {
       instruction: input,
       clientKind: 'desktop',
@@ -1288,7 +1464,18 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         role: String(slide.slideType || slide.slide_type || 'content').slice(0, 30),
       })),
       currentPage: this.currentPage,
-      mentions: this._taskMentions(input),
+      mentions: (() => {
+        const mention = this._taskMentions(input);
+        const inherited = (Array.isArray(extraPages) ? extraPages : []).filter(Number.isInteger);
+        if (inherited.length) mention.pages = [...new Set([...mention.pages, ...inherited])].slice(0, 60);
+        return mention;
+      })(),
+      recentTurns: (this._recentTurns || []).slice(-8).map(turn => ({
+        role: turn.role,
+        text: String(turn.text || '').slice(0, 300),
+        pages: (Array.isArray(turn.pages) ? turn.pages : []).slice(0, 8),
+        intent: turn.intent || null,
+      })),
       slashCommand: slash?.command?.name || null,
       hasOutline: !!String(this.manifest?.outline || '').trim(),
       isStarter: this.manifest?.templateBlueprint?.isStarter === true,
@@ -1430,7 +1617,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     this._hideSlashMenu();
     try {
     // refresh context (a PPTE may have been opened in the main window after this window loaded)
-    await this._refreshContext();
+    await this._refreshContext({ prepareTask: true });
     if (!this.manifest?.slides?.length) {
       alert('未连接课件。请在主窗口打开一个 PPTE 课件进编辑器，再发送指令。');
       return;
@@ -1438,34 +1625,90 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     let taskSpec = null;
     if (cfg.aiProvider === 'lectureai') {
       await this._loadLectureAiFeatures();
-      const resumePlan = this.manifest?.deckPlan?.plan;
-      const resumeRequested = this._isHarnessResumeRequest(input);
-      const existingV2Run = Boolean(resumeRequested && (
-        resumePlan?.taskSpecRef?.runId
-        || resumePlan?.execution?.runId
-        || this._taskCardRun?.runId
-      ));
+      const existingV2Run = Boolean(this._resumableTaskRunId(input));
       if (this._featureEnabled('lectureai_task_spec_v2') || existingV2Run) {
+      let retryTarget = null;
+      let resolveInput = input;
+      let requestRunId = null;
       try {
+        // A bare retry with no genuinely resumable run replays the exact last
+        // task. If resolution previously failed after the server committed, the
+        // same request id is reused so the original contract can be recovered.
+        retryTarget = this._retryTaskTarget(input, existingV2Run);
+        resolveInput = retryTarget ? retryTarget.instruction : input;
         const resolveKey = [
           this._deckPath || this.manifest?.deckId || this.manifest?.deckRevision?.deckHash || '',
-          input,
+          resolveInput,
         ].join('\n');
         const pending = this._pendingTaskResolve;
-        const requestRunId = existingV2Run
+        const recoverableResolveRunId = ['resolving', 'resolve_failed', 'resolved'].includes(String(retryTarget?.status || ''))
+          ? String(retryTarget.runId || '').trim()
+          : '';
+        requestRunId = existingV2Run
           ? null
-          : pending?.key === resolveKey
+          : recoverableResolveRunId
+            || (pending?.key === resolveKey
             ? pending.runId
-            : window.LectureAiTaskProtocol?.newRunId?.();
+            : window.LectureAiTaskProtocol?.newRunId?.());
         if (requestRunId) this._pendingTaskResolve = { key: resolveKey, runId: requestRunId };
-        taskSpec = await this._resolveLectureAiTask(input, slash, requestRunId);
+        if (!existingV2Run) {
+          // A fresh instruction starts a NEW task. Drop the finished task's
+          // lingering state and show a provisional card for THIS message right
+          // away, so the card never keeps displaying the previous task's goal
+          // while the server resolves (or if resolution ends in clarification).
+          this._activeTask = null;
+          this._taskChecklist = null;
+          this._taskCardSpec = null;
+          this._taskCardRun = null;
+          this._taskProgressRunId = '';
+          this._taskProgressSummary = '';
+          const anchorPages = retryTarget?.pages || this._taskMentions(resolveInput).pages;
+          this._rememberTaskAnchor({
+            runId: requestRunId || '',
+            instruction: resolveInput,
+            pages: anchorPages,
+            intent: retryTarget?.intent || null,
+            status: 'resolving',
+          });
+          // The resolver may commit successfully even when its HTTP response is
+          // lost. Persist the request id before networking so a window restart
+          // can still recover that exact server task.
+          await this._saveSession();
+          this._renderTaskCard({ runId: requestRunId || '', status: 'running', userFacingGoal: resolveInput, totalPages: this.manifest?.slides?.length || 0 }, null);
+        }
+        taskSpec = await this._resolveLectureAiTask(resolveInput, slash, requestRunId, retryTarget?.pages || null);
         this._pendingTaskResolve = null;
+        this._rememberTaskAnchor({
+          runId: taskSpec.runId,
+          instruction: resolveInput,
+          pages: Array.isArray(taskSpec.targets?.pages) ? taskSpec.targets.pages : (retryTarget?.pages || []),
+          intent: taskSpec.intent,
+          status: taskSpec.requiresClarification ? 'awaiting_user' : 'resolved',
+        });
+        this._recordTurn({ role: 'user', text: input, pages: retryTarget ? retryTarget.pages : this._taskMentions(input).pages });
       } catch (error) {
-        this._appendAssistantMarkdown(`### 无法开始任务\n\n${this._modelErrorMessage(error)}`);
+        if (!existingV2Run) this._renderTaskCard(null);
+        const failureText = this._modelErrorMessage(error);
+        this._recordTurn({ role: 'user', text: input, pages: this._taskMentions(input).pages });
+        this._recordTurn({ role: 'assistant', text: `任务未能开始：${failureText}`, pages: [], intent: null });
+        if (!existingV2Run) {
+          this._rememberTaskAnchor({
+            runId: requestRunId || retryTarget?.runId || '',
+            instruction: resolveInput || input,
+            pages: retryTarget?.pages || this._taskMentions(resolveInput || input).pages,
+            intent: retryTarget?.intent || null,
+            status: 'resolve_failed',
+          });
+          await this._saveSession();
+        }
+        this._appendAssistantMarkdown(`### 无法开始任务\n\n${failureText}`);
         return;
       }
       if (taskSpec.requiresClarification) {
-        this._appendAssistantMarkdown(taskSpec.clarificationQuestion || '请再说明希望 LectureAI 修改哪些页面，以及最终需要保留什么内容。');
+        if (!existingV2Run) this._renderTaskCard(null);
+        const question = taskSpec.clarificationQuestion || '请再说明希望 LectureAI 修改哪些页面，以及最终需要保留什么内容。';
+        this._recordTurn({ role: 'assistant', text: question, pages: [], intent: null });
+        this._appendAssistantMarkdown(question);
         return;
       }
         if (existingV2Run || this._nativeTaskRolloutEnabled()) {
@@ -1564,7 +1807,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       runId: taskSpec?.runId || null,
     };
     this._stopRequested = false;
-    if (enabledSkills.length) this._log('sys', `本轮启用技能 · ${enabledSkills.join('、')}`);
+    if (enabledSkills.length) this._log('sys', `已启用技能 · ${enabledSkills.join('、')}`);
     const additions = [this._taskSpecContext(taskSpec), skillContext, commandContext, taskInitialization, deckLevel ? this._outlinePromptBlock() : '', slash?.instruction || ''].filter(Boolean).join('\n\n');
     this.history.push({ role: 'user', content: additions ? `${content}\n\n${additions}` : content });
 
@@ -1591,7 +1834,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       while (true) {
         if (this._stopRequested) {
           this._appendAssistantMarkdown('### 任务已停止\n\n已停止后续模型请求，已成功保存的页面保留。');
-          this._log('sys', `任务停止 · 用户取消 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
+          this._log('sys', `任务已停止 · ${toolCalls} 次操作 · ${this._duration(turnStartedAt)}`);
           break;
         }
         rounds += 1;
@@ -1679,7 +1922,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
           } else {
             this._appendAssistantMarkdown(this._stripActions(text));
           }
-          this._log('sys', `任务结束 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
+          this._log('sys', `任务完成 · ${toolCalls} 次操作 · ${this._duration(turnStartedAt)}`);
           break;
         }
         this._removeStreamBubble();
@@ -1783,11 +2026,9 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
           const actionStartedAt = this._now();
           const actionEl = this._logAction(a, toolCalls);
           // inline diff for slide rewrites (current vs new html)
-          if (a.tool === 'write_slide' && a.page != null) {
-            try {
-              const before = await this._rpc('get-slide', { page: a.page });
-              if (before) this._appendDiff(before, a.html || '');
-            } catch (e) { /* skip diff if fetch fails */ }
+          await this._logSlideDiff(a);
+          if (['write_slide', 'insert_slide', 'render_template'].includes(a.tool)) {
+            a._userDirected = this._isUserDirectedPage(Number(a.page ?? (Number(a.after) + 1)) || 0);
           }
           const result = await this._rpc('execute-action', { action: a });
           this._finishAction(actionEl, actionStartedAt, result);
@@ -1837,7 +2078,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
         this.history.push({ role: 'user', content: resultMsg });
         if (terminalToolFailure) {
           this._appendAssistantMarkdown(`### 任务已停止\n\n${terminalToolFailure}\n\n未确认写入磁盘的修改不会继续累积。请处理文件冲突或重新打开课件后再试。`);
-          this._log('sys', `任务停止 · 磁盘保存未成功 · ${rounds} 轮模型响应 · ${toolCalls} 次工具调用 · ${this._duration(turnStartedAt)}`);
+          this._log('sys', `任务已停止 · 磁盘保存未成功 · ${toolCalls} 次操作 · ${this._duration(turnStartedAt)}`);
           break;
         }
         if (this._activeTask?.harnessEnabled && this._activeTask.planSaved && this._activeTask.plan) {
@@ -2120,9 +2361,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
 
   async _executeNativeTaskTool(message, runId, counters) {
     const action = { ...(message.args || {}), tool: message.tool };
+    if (['write_slide', 'insert_slide', 'render_template'].includes(action.tool)) {
+      action._userDirected = this._isUserDirectedPage(Number(action.page ?? (Number(action.after) + 1)) || 0);
+    }
     counters.tools += 1;
     const startedAt = this._now();
     const actionEl = this._logAction(action, counters.tools);
+    await this._logSlideDiff(action);
     const receipt = await this._rpc('execute-task-action', {
       runId,
       action,
@@ -2136,6 +2381,9 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     const display = receipt?.ok === true ? receipt.result : receipt?.error?.userMessage || 'LectureAI 未能完成当前步骤';
     this._finishAction(actionEl, startedAt, display);
     this._logResult(display);
+    // A recoverable规范拦截 becomes a retryable tool result so LectureAI corrects
+    // and retries the page, rather than aborting it as a hard failure.
+    if (receipt?.policyRejection) throw this._policyRejectionError(receipt.error?.userMessage || display);
     if (receipt?.ok !== true) {
       const error = new Error(receipt?.error?.userMessage || 'LectureAI 未能完成当前步骤');
       error.details = receipt?.error || null;
@@ -2227,15 +2475,25 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         this._piReject = reject;
         let settled = false;
         let queue = Promise.resolve();
+        let inactivityTimer = null;
         const finish = (error, message) => {
           if (settled) return;
           settled = true;
+          if (inactivityTimer) clearTimeout(inactivityTimer);
           if (this._piSocket === socket) this._piSocket = null;
           if (this._piReject === reject) this._piReject = null;
           if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'task complete');
           if (error) reject(error); else resolve(message);
         };
+        const markActivity = () => {
+          if (inactivityTimer) clearTimeout(inactivityTimer);
+          inactivityTimer = setTimeout(
+            () => finish(new Error('LectureAI 长时间未返回进度，本次任务已结束，可直接重试。')),
+            this._piInactivityTimeoutMs(),
+          );
+        };
         socket.onopen = () => {
+          markActivity();
           socket.send(JSON.stringify({
             type: 'start_task',
             protocol_version: protocol.CONTRACT.protocolVersion,
@@ -2249,10 +2507,12 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
           }));
         };
         socket.onmessage = event => {
+          markActivity();
           queue = queue.then(async () => {
             const message = JSON.parse(String(event.data || '{}'));
             if (message.type === 'tool_call') {
               this._updateTaskProgressSummary(message.summary || this._nativeTaskStepSummary(message.tool, message.args), taskSpec.runId);
+              if (message.summary) this._logThink(message.summary);
               try {
                 const receipt = await this._executeNativeTaskTool(message, taskSpec.runId, counters);
                 if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
@@ -2278,9 +2538,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
               return;
             }
             if (message.type === 'progress' || message.type === 'session_started') {
-              if (message.summary) this._updateTaskProgressSummary(message.summary, taskSpec.runId);
-              const label = this._friendlyLabel(message.label || 'LectureAI 正在处理任务');
-              if (!message.summary || !/LectureAI 正在处理任务/.test(label)) this._log('sys', label);
+              if (message.summary) {
+                this._updateTaskProgressSummary(message.summary, taskSpec.runId);
+                this._logThink(message.summary);
+              } else {
+                const label = this._friendlyLabel(message.label || '');
+                if (label && !/LectureAI 正在处理任务/.test(label)) this._log('sys', label);
+              }
               return;
             }
             if (['task_ready', 'task_complete', 'paused'].includes(message.type)) {
@@ -2306,6 +2570,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         socket.onclose = event => {
           if (!settled) finish(new Error(this._stopRequested ? '用户取消了当前任务' : `LectureAI 连接已中断（${event.code}）`));
         };
+        markActivity();
       });
 
       await this._refreshContext();
@@ -2325,6 +2590,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       }
       if (terminal.type === 'paused') {
         if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status: 'paused', taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan, progressSummary: this._taskProgressSummary } }).catch(() => {});
+        this._recordTaskOutcome('paused', '任务已暂停，进度已保存，下次可继续');
         this._appendAssistantMarkdown('### 任务已暂停\n\n进度已经保存，下次可继续当前任务。');
         this._renderTaskCard({ runId: taskSpec.runId, status: 'paused', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
         return;
@@ -2340,6 +2606,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         const status = accepted?.status === 'needs_repair' ? 'needs_repair' : 'paused';
         if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status, taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan, failedPages: accepted?.failedPages || [], progressSummary: this._taskProgressSummary } }).catch(() => {});
         this._renderTaskCard({ runId: taskSpec.runId, status, userFacingGoal: taskSpec.userFacingGoal, failedPages: accepted?.failedPages || [] }, taskSpec);
+        this._recordTaskOutcome(status, status === 'needs_repair' ? '已定位到需要继续处理的页面' : '任务进度已保存，完成状态尚未确认');
         this._appendAssistantMarkdown(status === 'needs_repair'
           ? `### 需要继续修复\n\nLectureAI 已定位到需要处理的页面。`
           : '### 任务已暂停\n\n任务进度已保存，完成状态尚未得到确认。');
@@ -2347,10 +2614,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       }
       if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status: 'completed', taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan, progressSummary: this._taskProgressSummary } }).catch(() => {});
       const summary = this._friendlyLabel(terminal.summary || '任务已完成并通过检查。');
+      this._recordTaskOutcome('completed', summary);
       this._renderTaskCard({ runId: taskSpec.runId, status: 'completed', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
       this._appendAssistantMarkdown(`### 任务已完成\n\n${summary}`);
     } catch (error) {
       if (window.__TAURI__?.core?.invoke) await this._rpc('task-journal-update', { runId: taskSpec.runId, patch: { status: this._stopRequested ? 'paused' : 'failed', error: this._modelErrorMessage(error), taskSpec, userInstruction: instruction, plan: this._activeTask?.plan || recoveredPlan, progressSummary: this._taskProgressSummary } }).catch(() => {});
+      const outcomeStatus = error?.harnessStatus || (this._stopRequested ? 'paused' : 'failed');
+      this._recordTaskOutcome(outcomeStatus, this._modelErrorMessage(error));
       if (this._stopRequested) {
         this._renderTaskCard({ runId: taskSpec.runId, status: 'paused', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
         this._appendAssistantMarkdown('### 任务已停止\n\n进度已经保存，下次可继续当前任务。');
@@ -2366,11 +2636,15 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
 
   async _executePiTool(message, planSlide, directive, counters, plan = null) {
     const action = { ...(message.args || {}), tool: message.tool };
+    if (['write_slide', 'insert_slide', 'render_template'].includes(action.tool)) {
+      action._userDirected = this._isUserDirectedPage(Number(action.page ?? planSlide?.page ?? 0) || 0);
+    }
     const gateError = this._harnessAllowedAction(action, planSlide, directive, false);
     if (gateError) throw new Error(gateError);
     counters.tools += 1;
     const startedAt = this._now();
     const actionEl = this._logAction(action, counters.tools);
+    await this._logSlideDiff(action);
     const runId = String(plan?.taskSpecRef?.runId || this._activeTask?.runId || '').trim();
     const receipt = runId && message.actionId && message.argsHash
       ? await this._rpc('execute-task-action', {
@@ -2387,6 +2661,12 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     const result = receipt ? (receipt.ok ? receipt.result : receipt.error?.userMessage) : await this._rpc('execute-action', { action });
     this._finishAction(actionEl, startedAt, result);
     this._logResult(result);
+    // A recoverable规范拦截 (policy rejection) becomes a retryable tool result so
+    // LectureAI corrects and retries this page; it must never abort the page like
+    // a hard tool failure.
+    if ((receipt && receipt.policyRejection) || (!receipt && this._isSoftGuardRejection(result))) {
+      throw this._policyRejectionError((receipt && receipt.error?.userMessage) || this._resultDisplayText(result));
+    }
     if (receipt && receipt.ok !== true) {
       const error = new Error(receipt.error?.userMessage || 'LectureAI 未能完成当前步骤');
       error.details = receipt.error;
@@ -2409,25 +2689,34 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     this._startModelStatus(this._activeRound, 1);
     if (this._modelStatusEl) {
       this._modelStatusEl.dataset.summary = `LectureAI 正在设计第 ${page} 页`;
-      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · LectureAI 正在设计第 ${page} 页`;
+      this._modelStatusEl.textContent = `LectureAI 正在设计第 ${page} 页`;
     }
-    this._log('sys', `LectureAI 已连接 · 第 ${page} 页 · 正在准备生成`);
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(piConfig.url, ['lectureai.pi.v1', `lectureai.auth.${piConfig.token}`]);
       this._piSocket = socket;
       this._piReject = reject;
       let settled = false;
       let queue = Promise.resolve();
+      let inactivityTimer = null;
       const finish = (error, value) => {
         if (settled) return;
         settled = true;
+        if (inactivityTimer) clearTimeout(inactivityTimer);
         if (this._piSocket === socket) this._piSocket = null;
         if (this._piReject === reject) this._piReject = null;
         if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'page complete');
         this._finishModelStatus(error ? 'LectureAI 生成失败' : `第 ${page} 页完成`);
         if (error) reject(error); else resolve(value);
       };
+      const markActivity = () => {
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(
+          () => finish(new Error(`第 ${page} 页长时间没有返回进度，本次任务已结束，可直接重试。`)),
+          this._piInactivityTimeoutMs(),
+        );
+      };
       socket.onopen = () => {
+        markActivity();
         socket.send(JSON.stringify({
           type: 'start_page', session_id: sessionId, deck_id: deckId,
           plan, page, directive: {
@@ -2443,12 +2732,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         }));
       };
       socket.onmessage = event => {
+        markActivity();
         queue = queue.then(async () => {
           const message = JSON.parse(String(event.data || '{}'));
           if (message.type === 'tool_call') {
             this._updateTaskProgressSummary(message.summary || this._nativeTaskStepSummary(message.tool, message.args), this._activeTask?.runId);
-            if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 正在${this._toolDisplayName(message.tool)} · ${this._duration(this._modelStartedAt)}`;
-            this._log('sys', `LectureAI · 第 ${page} 页 · ${this._toolDisplayName(message.tool)}`);
+            if (message.summary) this._logThink(message.summary);
+            if (this._modelStatusEl) this._modelStatusEl.textContent = `正在${this._toolDisplayName(message.tool)} · 第 ${page} 页 · ${this._duration(this._modelStartedAt)}`;
             try {
               const result = await this._executePiTool(message, planSlide, directive, counters, plan);
               if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
@@ -2473,9 +2763,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
             return;
           }
           if (message.type === 'progress' || message.type === 'session_started') {
-            if (message.summary) this._updateTaskProgressSummary(message.summary, this._activeTask?.runId);
-            const label = this._friendlyLabel(message.label) || `LectureAI 已开始生成 · 第 ${page} 页`;
-            if (!message.summary || !/LectureAI 正在处理任务/.test(label)) this._log('sys', label);
+            if (message.summary) {
+              this._updateTaskProgressSummary(message.summary, this._activeTask?.runId);
+              this._logThink(message.summary);
+            } else {
+              const label = this._friendlyLabel(message.label) || `LectureAI 已开始生成 · 第 ${page} 页`;
+              if (!/LectureAI 正在处理任务/.test(label)) this._log('sys', label);
+            }
             return;
           }
           if (message.type === 'page_complete') {
@@ -2495,7 +2789,12 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       socket.onclose = event => {
         if (!settled) finish(new Error(this._stopRequested ? '用户取消了当前任务' : `LectureAI 连接已中断（${event.code}）`));
       };
+      markActivity();
     });
+  },
+
+  _piInactivityTimeoutMs() {
+    return 180000;
   },
 
   async _runHarnessPage(plan, planSlide, summaries, stageGuidance, counters) {
@@ -2552,9 +2851,18 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       counters.tools += 1;
       const actionStartedAt = this._now();
       const actionEl = this._logAction(action, counters.tools);
+      if (['write_slide', 'insert_slide', 'render_template'].includes(action.tool)) {
+        action._userDirected = this._isUserDirectedPage(Number(planSlide.page));
+      }
       const result = await this._rpc('execute-action', { action });
       this._finishAction(actionEl, actionStartedAt, result);
       this._logResult(result);
+      if (this._isSoftGuardRejection(result)) {
+        // Recoverable规范拦截: hand the guidance back and let the model correct
+        // this page instead of aborting the whole page as a hard failure.
+        messages.push({ role: 'user', content: `[规范拦截] ${this._resultDisplayText(result)}\n请在第 ${page} 页修正后重试，不要跳过或直接总结。` });
+        continue;
+      }
       if (this._isTerminalToolFailure(result) || this._resultIsError(result)) throw new Error(this._resultDisplayText(result));
       if (['render_template', 'write_slide', 'insert_slide'].includes(action.tool)) {
         mutated = true;
@@ -2707,6 +3015,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   },
 
   async _validateAndRepairHarness(plan, state, counters) {
+    const cleanupOnly = this._activeTask?.taskSpec?.intent === 'deck_cleanup';
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const validationAction = { tool: 'validate_deck' };
       counters.tools += 1;
@@ -2739,7 +3048,10 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       let validation = null;
       try { validation = JSON.parse(validationResult); } catch (_) { /* handled below */ }
       if (validation?.passed) return validation;
-      if (attempt === 2) return validation || { passed: false, errors: [validationResult] };
+      // A directory cleanup is intentionally deterministic. Validation may
+      // report unrelated page-quality issues, but this task is never allowed
+      // to turn into autonomous page rewriting.
+      if (attempt === 2 || cleanupOnly) return validation || { passed: false, errors: [validationResult] };
       const repairPages = this._harnessRepairPages(plan, validation);
       if (!repairPages.length) return validation || { passed: false, errors: [validationResult] };
       const guidance = `整套校验返工：${(validation?.errors || [validationResult]).join('；')}`.slice(0, 800);
@@ -2748,6 +3060,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         const planSlide = (plan.slides || []).find(slide => Number(slide.page) === page);
         if (!planSlide) continue;
         state.summaries[page] = await this._runHarnessPage(plan, planSlide, state.summaries, guidance, counters);
+        this._logPageComplete(page, planSlide, state.summaries[page]);
       }
       await this._persistHarnessExecution(plan, {
         status: 'repairing', nextPage: null, completedPages: state.completedPages,
@@ -2792,27 +3105,37 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     const piDeckId = this._piDeckId(plan);
     plan.execution = { ...previous, schemaVersion: 1, piSessionId, piDeckId };
     const counters = { rounds: 0, tools: 0 };
+    const cleanupOnly = this._activeTask?.taskSpec?.intent === 'deck_cleanup';
+    const executionSlides = cleanupOnly ? [] : (plan.slides || []);
     this._activeTask.userInstruction = userInstruction;
     this._activeTask.piSessionId = piSessionId;
     this._activeTask.piDeckId = piDeckId;
     const stageInterval = Number(this._activeTask?.taskSpec?.executionPolicy?.stageReviewInterval || plan?.executionPolicy?.stageReviewInterval || 5);
-    this._log('sys', `LectureAI 已启动 · ${plan.targetSlideCount} 页 · 每页独立处理`);
+    if (executionSlides.length) this._buildTaskChecklist(plan, { completedPages });
+    else this._taskChecklist = null;
+    this._renderTaskChecklist();
+    this._log('sys', cleanupOnly
+      ? 'LectureAI 正在整理目录和模板占位页'
+      : `LectureAI 开始执行 · 共 ${plan.targetSlideCount} 页`);
     try {
-      for (const planSlide of plan.slides || []) {
+      for (const planSlide of executionSlides) {
         const page = Number(planSlide.page);
         if (completedPages.includes(page)) continue;
         if (this._stopRequested) throw new Error('用户取消了当前任务');
         const latestGuidance = stageReviews[stageReviews.length - 1]?.guidance || '';
-        this._log('sys', `页面任务 ${page}/${plan.targetSlideCount} · 仅加载前后两页规划`);
+        this._log('sys', `第 ${page} / ${plan.targetSlideCount} 页`);
+        this._markChecklistPage(page, 'active');
         summaries[page] = await this._runHarnessPage(plan, planSlide, summaries, latestGuidance, counters);
         completedPages.push(page);
+        this._markChecklistPage(page, 'done');
+        this._logPageComplete(page, planSlide, summaries[page]);
         await this._persistHarnessExecution(plan, {
           status: 'running', nextPage: page + 1, completedPages, summaries, stageReviews, userInstruction,
         });
         if (completedPages.length % stageInterval === 0 && page < Number(plan.targetSlideCount)) {
           const guidance = await this._runHarnessStageReview(plan, completedPages, summaries, stageReviews);
           stageReviews.push({ throughPage: page, guidance });
-          this._log('sys', `阶段审查 · 完成至第 ${page} 页 · ${guidance}`);
+          this._log('sys', `阶段审查 · 前 ${page} 页：${guidance}`);
           await this._persistHarnessExecution(plan, {
             status: 'running', nextPage: page + 1, completedPages, summaries, stageReviews, userInstruction,
           });
@@ -2898,18 +3221,29 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         status: 'completed', nextPage: null, completedPages, summaries, stageReviews,
         validation: { passed: true, metrics: validation.metrics || {} }, userInstruction,
       });
-      this._appendAssistantMarkdown(`### 课件生成完成\n\nLectureAI 已完成 ${completedPages.length} 页，并按阶段检查教学衔接；整套课件检查已通过。`);
-      this._log('sys', `LectureAI 任务完成 · ${counters.rounds} 轮响应 · ${counters.tools} 次操作 · ${this._duration(startedAt)}`);
+      const completionText = cleanupOnly
+        ? `目录整理完成，共保留 ${Number(plan.targetSlideCount || plan.slides?.length || 0)} 页`
+        : `已完成 ${completedPages.length} 页，整套课件检查通过`;
+      this._recordTaskOutcome('completed', completionText);
+      this._appendAssistantMarkdown(cleanupOnly
+        ? `### 目录整理完成\n\n已移除未使用的模板占位页，成品目录现在共 ${Number(plan.targetSlideCount || plan.slides?.length || 0)} 页。`
+        : `### 课件生成完成\n\nLectureAI 已完成 ${completedPages.length} 页，并按阶段检查教学衔接；整套课件检查已通过。`);
+      this._log('sys', `任务完成 · ${cleanupOnly ? '目录已整理' : `${completedPages.length} 页`} · ${counters.tools} 次操作 · ${this._duration(startedAt)}`);
     } catch (error) {
       const status = this._stopRequested ? 'paused' : (error?.harnessStatus || 'failed');
+      if (!this._stopRequested) {
+        const stalled = this._taskChecklist?.pages?.find(entry => entry.status === 'active');
+        if (stalled) this._markChecklistPage(stalled.page, 'failed');
+      }
       try {
         await this._persistHarnessExecution(plan, {
-          status, nextPage: (plan.slides || []).find(slide => !completedPages.includes(Number(slide.page)))?.page || null,
+          status, nextPage: executionSlides.find(slide => !completedPages.includes(Number(slide.page)))?.page || null,
           completedPages, summaries, stageReviews, error: this._modelErrorMessage(error), userInstruction,
         });
       } catch (_) { /* keep original failure */ }
       if (this._stopRequested) {
         const nextPage = (plan.slides || []).find(slide => !completedPages.includes(Number(slide.page)))?.page || null;
+        this._recordTaskOutcome('paused', `任务已停止，已保存 ${completedPages.length} 页执行进度`);
         this._appendAssistantMarkdown(`### 任务已停止\n\n已保存 ${completedPages.length} 页及执行进度${nextPage ? `，下次可从第 ${nextPage} 页继续` : ''}。`);
         return;
       }
@@ -3080,7 +3414,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     const summary = this._compactStatus(this._userFacingText(this._stripActions(this._streamFull)));
     if (summary && this._modelStatusEl) {
       this._modelStatusEl.dataset.summary = summary;
-      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · ${summary} · ${this._modelDuration()}`;
+      this._modelStatusEl.textContent = `${summary} · ${this._modelDuration()}`;
       this._scroll();
     }
   },
@@ -3171,12 +3505,45 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     return /(?:write_slide|insert_slide|delete_slide|apply_role_template|reorder_slides|finalize_deck|set_deck_plan) 保存失败|已恢复执行前状态|文件冲突/.test(text);
   },
 
+  // A规范拦截 (policy rejection) is a recoverable, floor/ceiling guard hit: nothing
+  // was written and the model should correct and retry. It must read as a
+  // held-back step, never a hard failure — that misled the user into thinking
+  // the protocol or config was broken.
+  _isSoftGuardRejection(result) {
+    return /规范拦截/.test(this._resultDisplayText(result, ''));
+  },
+
+  // Build a retryable policy-rejection error. Thrown from tool executors so the
+  // WebSocket caller reports it to LectureAI as `ok:false, retryable:true`,
+  // prompting a corrected retry of the same page instead of aborting it.
+  _policyRejectionError(userMessage) {
+    const message = String(userMessage || '本页未通过规范检查，请修正后重试。');
+    const error = new Error(message);
+    error.details = { code: 'POLICY_REJECTED', category: 'policy', retryable: true, userMessage: message };
+    return error;
+  },
+
+  // Whether the current task explicitly targets this page for a user-directed
+  // edit (floor-only guard) versus an unattended whole-deck fill of an untouched
+  // structure page (strict master preservation). Mirrors the agent-side rule.
+  _isUserDirectedPage(page) {
+    const task = this._activeTask;
+    const scoped = Array.isArray(task?.commandPages) ? task.commandPages.map(Number) : [];
+    if (scoped.length) return scoped.includes(Number(page));
+    const spec = task?.taskSpec;
+    const deckScope = spec ? spec.scope === 'deck' : !!task?.requiresPlan;
+    return !deckScope;
+  },
+
   // ---- terminal log ----
   _log(type, text, opts) {
     const m = document.getElementById('wb-messages');
     if (!m) return;
     const el = document.createElement('div');
     el.className = 'ln ln-' + type;
+    // Phase lines render settled by default; only the live model-status line
+    // (managed by _startModelStatus) keeps its shimmer animation.
+    if (type === 'phase') el.classList?.add?.('wb-phase-settled');
     const visibleText = type === 'user' ? String(text || '') : this._userFacingText(text);
     el.textContent = visibleText;
     m.appendChild(el);
@@ -3251,12 +3618,14 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     if (this._modelStatusEl) {
       this._modelStatusEl.remove();
       this._modelStatusEl.dataset.summary = '';
+      this._modelStatusEl.classList?.remove?.('wb-phase-settled');
       if (m) m.appendChild(this._modelStatusEl);
     } else {
-      this._modelStatusEl = this._log('phase', `第 ${round} 轮 · 正在提交模型请求 · 0ms`);
+      this._modelStatusEl = this._log('phase', `正在提交模型请求 · 0ms`);
+      this._modelStatusEl.classList?.remove?.('wb-phase-settled');
     }
     const attemptLabel = attempt > 1 ? `自动重试 ${attempt}/2 · ` : '';
-    if (this._modelStatusEl) this._modelStatusEl.textContent = `第 ${round} 轮 · ${attemptLabel}正在提交模型请求 · 0ms`;
+    if (this._modelStatusEl) this._modelStatusEl.textContent = `${attemptLabel}正在提交模型请求 · 0ms`;
     this._modelStatusTimer = setInterval(() => {
       if (this._modelStatusEl && !this._streamFull) {
         const elapsed = this._now() - this._modelStartedAt;
@@ -3269,27 +3638,28 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
               : elapsed < 15000
                 ? '模型正在准备下一步工具计划'
                 : '模型响应较慢，仍在等待首个响应';
-        this._modelStatusEl.textContent = `第 ${round} 轮 · ${attemptLabel}${phase} · ${this._modelDuration()}`;
+        this._modelStatusEl.textContent = `${attemptLabel}${phase} · ${this._modelDuration()}`;
       }
     }, 100);
   },
   _markModelRetry(nextAttempt) {
     this._stopModelStatusTimer();
     if (this._modelStatusEl) {
-      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 上游模型暂时不可用，1.2s 后自动重试 ${nextAttempt}/2`;
+      this._modelStatusEl.textContent = `上游模型暂时不可用，1.2s 后自动重试 ${nextAttempt}/2`;
     }
   },
   _markModelReceiving() {
     this._stopModelStatusTimer();
     if (this._modelStatusEl) {
-      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · 接收模型输出 · ${this._modelDuration()}`;
+      this._modelStatusEl.textContent = `接收模型输出 · ${this._modelDuration()}`;
     }
   },
   _finishModelStatus(label = '') {
     this._stopModelStatusTimer();
     if (this._modelStatusEl) {
       const summary = this._modelStatusEl.dataset.summary || label || '模型响应完成';
-      this._modelStatusEl.textContent = `第 ${this._activeRound} 轮 · ${summary} · ${this._modelDuration()}`;
+      this._modelStatusEl.textContent = `${summary} · ${this._modelDuration()}`;
+      this._modelStatusEl.classList?.add?.('wb-phase-settled');
     }
   },
   _stopModelStatusTimer() {
@@ -3344,6 +3714,24 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       .replace(/渲染私有模板/g, '渲染页面模板');
   },
 
+  // Flatten Markdown emphasis/heading/list markers out of a short status line.
+  // The live "thinking" line and the task-card summary are plain text, not
+  // rendered Markdown, so raw **, ##, > or - leak through as literal glyphs.
+  _statusText(value) {
+    return this._friendlyLabel(String(value || ''))
+      .replace(/(^|\n)\s{0,3}#{1,6}\s+/g, '$1')
+      .replace(/(^|\n)\s{0,3}>\s?/g, '$1')
+      .replace(/(^|\n)\s{0,3}[-*+]\s+/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/\*([^*\s][^*]*)\*/g, '$1')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/[*_`~]{1,}/g, ' ')
+      .replace(/[\r\n\t]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  },
+
   _resultDisplayText(result, fallback = 'LectureAI 已完成当前步骤') {
     if (result == null || result === '') return fallback;
     if (result instanceof Error) return this._friendlyLabel(result.message || fallback);
@@ -3377,28 +3765,94 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     if (a.tool === '_parse_error') {
       return this._log('err', `操作解析失败：${a.error || ''}`);
     }
-    const page = a.page != null ? ` 第${a.page}页` : '';
-    const after = a.after != null ? `（插在第${a.after}页后）` : '';
-    const reason = a.reason ? ` · ${a.reason}` : '';
-    const label = `操作 ${callNumber} · ${this._toolDisplayName(a.tool)}${page}${after}${reason}`;
+    const label = this._actionLabel(a);
     const el = this._log('act', `${label} · 执行中`);
-    if (el) el.dataset.actionLabel = label;
+    if (el) {
+      el.dataset.actionLabel = label;
+      el.classList?.add?.('wb-act-running');
+    }
     return el;
+  },
+
+  // Verb-led, page-scoped label for the tool chip; internal call numbering
+  // and the model's stated reason stay out of the UI.
+  _actionLabel(a) {
+    const name = this._toolDisplayName(a.tool);
+    if (a.page != null) return `${name} · 第 ${a.page} 页`;
+    if (a.after != null) return `${name} · 第 ${a.after} 页后`;
+    return name;
   },
 
   _finishAction(el, startedAt, result) {
     if (!el) return;
-    const failed = this._resultIsError(result);
-    el.textContent = `${el.dataset.actionLabel || '工具'} · ${failed ? '失败' : '完成'} · ${this._duration(startedAt)}`;
-    if (failed) el.className = 'ln ln-err';
+    const soft = this._isSoftGuardRejection(result);
+    const failed = !soft && this._resultIsError(result);
+    const state = soft ? '规范拦截' : failed ? '失败' : '完成';
+    el.textContent = `${el.dataset.actionLabel || '工具'} · ${state} · ${this._duration(startedAt)}`;
+    if (soft) {
+      el.className = 'ln ln-guard';
+    } else if (failed) {
+      el.className = 'ln ln-err';
+    } else {
+      el.classList?.remove?.('wb-act-running');
+      el.classList?.add?.('wb-act-done');
+    }
   },
 
   _logResult(result) {
-    const r = this._resultDisplayText(result, '(无结果)');
-    const firstLine = r.split('\n')[0] || r;
-    const isErr = this._resultIsError(result);
-    const summary = r.split('\n').slice(0, 3).join(' · ').slice(0, 200);
-    this._log(isErr ? 'err' : 'ok', summary);
+    const r = this._resultDisplayText(result, '');
+    const firstLine = String(r || '').split('\n')[0].trim();
+    // Skip lines that add nothing beyond the tool chip itself.
+    if (!firstLine || firstLine === '操作成功') return;
+    const soft = this._isSoftGuardRejection(result);
+    const isErr = !soft && this._resultIsError(result);
+    this._log(soft ? 'guard' : isErr ? 'err' : 'ok', firstLine.slice(0, 120));
+  },
+
+  // Streaming "thinking" line: progress summaries from the agent loop land
+  // in the conversation stream (transient, never persisted to the transcript).
+  _logThink(text) {
+    const clean = this._statusText(text).slice(0, 200);
+    if (!clean) return null;
+    const m = document.getElementById?.('wb-messages');
+    if (!m) return null;
+    // Claude-code-style rolling reasoning: a single "思考" line updates in
+    // place while the model reasons, so a long chain of thoughts stays at one
+    // line instead of piling up. As soon as any other line is appended (a tool
+    // result, a completed page), the current line settles as a trace and the
+    // next reasoning starts a fresh rolling line below it.
+    if (this._liveThinkEl && this._liveThinkEl.parentNode === m && m.lastElementChild === this._liveThinkEl) {
+      if (this._liveThinkEl.textContent !== clean) {
+        this._liveThinkEl.textContent = clean;
+        this._scroll();
+      }
+      return this._liveThinkEl;
+    }
+    const el = document.createElement('div');
+    el.className = 'ln ln-think';
+    el.textContent = clean;
+    m.appendChild(el);
+    this._liveThinkEl = el;
+    this._scroll();
+    return el;
+  },
+
+  // Per-page completion entry: page number + title + the narrative summary
+  // the page worker returned, so the user sees what actually changed.
+  _logPageComplete(page, planSlide, summary) {
+    const m = document.getElementById('wb-messages');
+    if (!m) return;
+    const el = document.createElement('div');
+    el.className = 'ln ln-page';
+    const title = String(planSlide?.title || '').trim();
+    const text = this._userFacingText(String(summary || '')).trim().slice(0, 300);
+    const parts = [`<span class="ln-page-num">第 ${Number(page) || '?'} 页</span>`];
+    if (title) parts.push(`<span class="ln-page-title">${this._escape(title)}</span>`);
+    if (text) parts.push(`<span class="ln-page-summary">${this._escape(text)}</span>`);
+    el.innerHTML = parts.join('');
+    m.appendChild(el);
+    this._scroll();
+    return el;
   },
 
   _resultIsError(value) {
@@ -3418,11 +3872,21 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     if (!diff.length) return;
     const el = document.createElement('div');
     el.className = 'diff';
-    const cap = diff.slice(0, 20);
+    const cap = diff.slice(0, 12);
     el.innerHTML = cap.map(d => `<div class="d-${d.t}">${this._escape(d.text)}</div>`).join('');
-    if (diff.length > 20) el.innerHTML += `<div class="d-more">… 还有 ${diff.length - 20} 行</div>`;
+    if (diff.length > 12) el.innerHTML += `<div class="d-more">… 还有 ${diff.length - 12} 行</div>`;
     m.appendChild(el);
     this._scroll();
+  },
+
+  // Inline before/after diff ahead of a slide rewrite, so content changes are
+  // visible in the stream. Best-effort: silently skipped when the read fails.
+  async _logSlideDiff(action) {
+    if (action?.tool !== 'write_slide' || action.page == null || !action.html) return;
+    try {
+      const before = await this._rpc('get-slide', { page: Number(action.page) });
+      if (before) this._appendDiff(before, action.html);
+    } catch (_) { /* diff is optional decoration */ }
   },
 
   // Simple LCS line diff -> [{t:'add'|'del', text}]
@@ -3451,7 +3915,9 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     const input = document.getElementById('wb-input');
     if (send) send.disabled = busy;
     if (stop) stop.hidden = !busy || !cancellable;
-    if (input) input.disabled = busy;
+    // Keep the editor usable while LectureAI works so users can draft their
+    // next instruction. Sending stays disabled until the active task settles.
+    if (input) input.disabled = false;
   },
 
   _scroll() {

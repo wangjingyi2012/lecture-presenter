@@ -38,7 +38,7 @@ window.PpteWorkbenchAgent = {
     const type = req?.type;
     let result;
     try {
-      if (type === 'get-context') result = await this._getContext();
+      if (type === 'get-context') result = await this._getContext(req.payload);
       else if (type === 'get-slide') result = this._getSlide(req.payload?.page);
       else if (type === 'get-outline') result = this._getOutline();
       else if (type === 'get-command-context') result = await this._getCommandContext(req.payload);
@@ -87,8 +87,24 @@ window.PpteWorkbenchAgent = {
     return window.Settings;
   },
 
-  async _getContext() {
+  async _prepareTaskContext(pb) {
+    if (!pb) return;
+    const editor = this._editor();
+    // A task revision must describe the editor state the user can currently
+    // see, including visual/code edits that have not been saved yet. Flush
+    // those edits through the editor's conflict-safe save path before the
+    // server binds the task to a deck revision.
+    const result = await editor._savePptBuilderData?.(pb, { interactiveConflicts: false });
+    const conflicts = Array.isArray(result?.conflicts) ? result.conflicts : [];
+    if (result?.cancelled || conflicts.length) {
+      const detail = conflicts.length ? `：${conflicts.join('、')}` : '';
+      throw new Error(`课件有尚未解决的保存冲突${detail}，LectureAI 未开始任务。`);
+    }
+  },
+
+  async _getContext(options = {}) {
     const pb = this._editor()._pptBuilder;
+    if (options?.prepareTask === true) await this._prepareTaskContext(pb);
     const appConfig = window.CourseLoader?.appConfig || {};
     const token = window.Auth?.getToken() || '';
     const settingsProvider = appConfig.aiProvider || '';
@@ -717,6 +733,18 @@ window.PpteWorkbenchAgent = {
     }
 
     const raw = await this._executeAction(taskAction);
+    if (this._isSoftGuardRejection(raw)) {
+      // A规范拦截 (policy rejection) is recoverable: nothing was written, and the
+      // model is expected to resend corrected content (a fresh argsHash). Surface
+      // it without journaling a terminal failure so the retry proceeds cleanly.
+      return {
+        ok: false,
+        actionId,
+        argsHash,
+        policyRejection: true,
+        error: { code: 'POLICY_REJECTED', category: 'policy', retryable: true, userMessage: String(raw).slice(0, 500) },
+      };
+    }
     if (this._taskResultIsError(raw)) {
       const failed = {
         ok: false,
@@ -916,6 +944,8 @@ window.PpteWorkbenchAgent = {
         slide_type: a.slide_type || 'content',
         note: a.note,
         _templateId: rendered.template_id,
+        _userDirected: a._userDirected,
+        _taskSpec: a._taskSpec,
       };
       const result = await this._toolWriteSlide(pb, delegated);
       a._taskReceiptDetails = {
@@ -934,6 +964,8 @@ window.PpteWorkbenchAgent = {
       note: a.note,
       target_page_id: a.target_page_id || null,
       _templateId: rendered.template_id,
+      _userDirected: a._userDirected,
+      _taskSpec: a._taskSpec,
     };
     const result = await this._toolInsertSlide(pb, delegated);
     a._taskReceiptDetails = {
@@ -1020,8 +1052,11 @@ window.PpteWorkbenchAgent = {
       a.html || '',
       this._roleStylesheets(pb, protectedRole),
       this._roleTemplateHtml(pb, protectedRole),
+      { userDirected: this._isUserDirectedWrite(a, page) },
     );
-    if (roleError) return `write_slide 失败：${roleError}`;
+    if (roleError) return `write_slide 规范拦截：${roleError}。请修正后重试。`;
+    const floorError = await this._renderQualityFloorError(pb, a.html || '');
+    if (floorError) return `write_slide 规范拦截：${floorError}。请修正后重试。`;
     const commit = await this._commitAgentMutation(pb, () => {
       this._markTemplateInitialized(pb);
       pb.slides[i].html = a.html || '';
@@ -1110,7 +1145,54 @@ window.PpteWorkbenchAgent = {
     return String(source?.html || '');
   },
 
-  _protectedRoleWriteError(role, html, expectedStylesheets = [], originalHtml = '') {
+  // Decide whether a write is a user-directed page edit (floor-only) or part of
+  // an unattended whole-deck generation of an untouched structure page
+  // (strict master preservation). Limits exist to hold the AI's baseline, not to
+  // cap what the user can ask for: when the user explicitly targets a page, the
+  // only guardrail is the render-quality floor (_renderQualityFloorError).
+  _isUserDirectedWrite(a, page) {
+    if (a && a._userDirected === true) return true;
+    if (a && a._userDirected === false) return false;
+    const spec = a && a._taskSpec;
+    if (spec) {
+      const targets = Array.isArray(spec.targets?.pages) ? spec.targets.pages.map(Number) : [];
+      if (targets.length) return targets.includes(Number(page));
+      return spec.scope !== 'deck';
+    }
+    // Ad-hoc conversational tool calls carry no scope: treat as user-directed.
+    return true;
+  },
+
+  _isSoftGuardRejection(text) {
+    return /规范拦截/.test(String(text || ''));
+  },
+
+  // Render-quality floor (both modes): a page must not reference a LOCAL relative
+  // stylesheet that does not exist in the deck folder — that is the concrete
+  // failure mode behind "样式全丢了" (the original cover linked a missing
+  // content.css). CDN/absolute/data: refs and inline <style> are the AI's call.
+  async _renderQualityFloorError(pb, html) {
+    if (!pb?.folderPath || !window.__TAURI__?.core?.invoke) return '';
+    const base = pb.folderPath.replace(/[\\/]+$/, '');
+    for (const reference of this._stylesheetRefs(html)) {
+      if (!reference) continue;
+      if (/^(?:[a-z]+:|\/\/|\/|#|data:)/i.test(reference) || reference.includes('..')) continue;
+      const normalized = reference.split(/[?#]/)[0].replace(/^\.\//, '');
+      if (!normalized) continue;
+      try {
+        await window.__TAURI__.core.invoke('read_text_file', { filePath: `${base}/${normalized}` });
+      } catch (_) {
+        return `页面引用的样式表 ${normalized} 在课件目录中不存在，会导致整页样式丢失。请改用课件已有的样式表，或把样式直接写进页面内的 <style> 块`;
+      }
+    }
+    return '';
+  },
+
+  _protectedRoleWriteError(role, html, expectedStylesheets = [], originalHtml = '', opts = {}) {
+    // User-directed edits lift the ceiling entirely; the render-quality floor is
+    // enforced separately so rich covers (effects, added/removed elements,
+    // self-contained styling) are allowed as long as they still render.
+    if (opts.userDirected === true) return '';
     const source = String(html || '');
     if (['cover', 'catalog', 'chapter', 'finish'].includes(role)) {
       for (const stylesheet of expectedStylesheets) {
@@ -1201,8 +1283,11 @@ window.PpteWorkbenchAgent = {
       newSlide.html,
       this._roleStylesheets(pb, slideType, templateVariant),
       this._roleTemplateHtml(pb, slideType, templateVariant),
+      { userDirected: this._isUserDirectedWrite(a, idx + 1) },
     );
-    if (roleError) return `insert_slide 失败：${roleError}`;
+    if (roleError) return `insert_slide 规范拦截：${roleError}。请修正后重试。`;
+    const floorError = await this._renderQualityFloorError(pb, newSlide.html);
+    if (floorError) return `insert_slide 规范拦截：${floorError}。请修正后重试。`;
     const commit = await this._commitAgentMutation(pb, () => {
       this._markTemplateInitialized(pb);
       pb.slides.splice(idx, 0, newSlide);
@@ -1802,10 +1887,23 @@ window.PpteWorkbenchAgent = {
     }
     const expectedTemplate = this._expectedTemplateForPage(pb, page);
     const diagnostics = await this._renderDiagnosticsForSlide(pb, slide || { html }, page, expectedTemplate);
+    // Render diagnostics is a best-effort quality check that runs slide scripts
+    // in a sandboxed iframe. When it cannot run in this environment (CSP-blocked
+    // inline runner, timeout, missing module) it returns available:false. That
+    // is NOT a page failure — treating it as one makes every edit loop forever
+    // (write -> "validation failed" -> rewrite -> ...). Downgrade its issues to
+    // advisory warnings so the page passes on a clean static lint; keep them as
+    // hard errors only when diagnostics actually ran.
+    const diagnosticsUnavailable = diagnostics.available === false;
     for (const item of diagnostics.issues || []) {
-      issues.push({ ...item, page, pageId: slide?.id || null });
+      const severity = diagnosticsUnavailable ? 'warning' : item.severity;
+      issues.push({ ...item, severity, page, pageId: slide?.id || null });
     }
     const errors = issues.filter(item => item.severity === 'error').map(item => item.message);
+    const warnings = [
+      ...staticWarnings.map(issue => String(issue?.message || issue?.rule || '页面规范建议')),
+      ...issues.filter(item => item.severity !== 'error').map(item => String(item.message || item.code || '提示')),
+    ].slice(0, 30);
     const result = {
       schemaVersion: 1,
       label,
@@ -1813,7 +1911,7 @@ window.PpteWorkbenchAgent = {
       pageId: slide?.id || null,
       passed: errors.length === 0,
       errors,
-      warnings: staticWarnings.map(issue => String(issue?.message || issue?.rule || '页面规范建议')).slice(0, 30),
+      warnings,
       issues,
       diagnostics,
       failedPages: errors.length && page ? [page] : [],
@@ -1933,19 +2031,27 @@ window.PpteWorkbenchAgent = {
       const expectedTemplate = String(planned?.templateId || planned?.template_id || '');
       const diagnostics = await this._renderDiagnosticsForSlide(pb, slide, page, expectedTemplate);
       renderSlides.push(diagnostics);
+      // See _toolValidateSlide: unavailable render diagnostics must not fail the
+      // deck. Downgrade to advisory warnings when the check could not run.
+      const diagnosticsUnavailable = diagnostics.available === false;
       for (const diagnostic of diagnostics.issues || []) {
         slideIssues.push(addIssue(diagnostic.code, diagnostic.message, {
           page,
           pageId: slide.id,
+          severity: diagnosticsUnavailable || diagnostic.severity === 'warning' ? 'warning' : 'error',
           details: diagnostic.resources || diagnostic.selectors || [],
         }));
       }
+      const slideErrors = slideIssues.filter(item => item.severity === 'error');
       slideResults.push({
         page,
         pageId: slide.id || null,
-        passed: slideIssues.length === 0,
-        errors: slideIssues.map(item => item.message),
-        warnings: soft.map(item => String(item?.message || item?.rule || '页面规范建议')).slice(0, 30),
+        passed: slideErrors.length === 0,
+        errors: slideErrors.map(item => item.message),
+        warnings: [
+          ...soft.map(item => String(item?.message || item?.rule || '页面规范建议')),
+          ...slideIssues.filter(item => item.severity !== 'error').map(item => String(item.message || item.code || '提示')),
+        ].slice(0, 30),
         issues: slideIssues,
         diagnostics,
       });
