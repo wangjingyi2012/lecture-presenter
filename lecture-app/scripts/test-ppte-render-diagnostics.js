@@ -33,6 +33,7 @@ const context = {
         set(value) {
           this._srcdoc = value;
           const nonce = value.match(/"nonce":"([^"]+)"/)?.[1];
+          const withShot = value.includes('htmlToImage');
           setTimeout(() => {
             const event = {
               source: frame.contentWindow,
@@ -46,6 +47,33 @@ const context = {
                   load: { ok: true, durationMs: 12 },
                   canvas: { width: 1920, height: 1080, scrollWidth: 2100, scrollHeight: 1080 },
                   overflow: { horizontalCount: 1, verticalCount: 0, selectors: ['main.deck'] },
+                  measure: {
+                    overflowBoxes: [
+                      { selector: 'main.deck', direction: 'vertical', box: { x: -30, y: 12, w: 1980.4, h: 1200.9 } },
+                      { selector: 'table.data', direction: 'bogus-direction', box: { x: 0, y: 0, w: 10, h: 10 } },
+                      { selector: 'p.long', direction: 'horizontal', box: { x: NaN, y: 0, w: 10, h: 10 } },
+                      'not-an-object',
+                    ],
+                    wraps: [
+                      { selector: 'h1.title', lines: 2, lastLineWidthRatio: 0.18 },
+                      { selector: 'p.body', lines: 1, lastLineWidthRatio: 0.9 },
+                      { selector: 'p.gone', lines: 9999, lastLineWidthRatio: 2 },
+                      { selector: 'p.wide', lines: 3, lastLineWidthRatio: 1.4 },
+                      null,
+                    ],
+                    textBoxes: [
+                      { selector: 'h1.title', box: { x: 100.4, y: 40.6, w: 500.2, h: 80.9 }, fontPx: 64 },
+                      { selector: 'p.body', box: { x: 0, y: 0, w: 0, h: 10 } },
+                      { selector: 'p.off-canvas', box: { x: -50, y: 0, w: 100, h: 10 } },
+                      { selector: 'p.fonty', box: { x: 10, y: 10, w: 100, h: 20 }, fontPx: 9999 },
+                      { selector: '', box: { x: 10, y: 10, w: 100, h: 20 } },
+                      'not-an-object',
+                    ],
+                    textBoxesTruncated: true,
+                  },
+                  screenshot: withShot
+                    ? { available: true, dataUri: 'data:image/jpeg;base64,QUJD' }
+                    : { available: true, dataUri: 'data:image/png;base64,AAAA forged' },
                   font: { minBodyPx: 12, violationCount: 1 },
                   resources: { failedCount: 1, items: ['/Users/private/course/missing.png'] },
                   scripts: { errorCount: 1, messages: ['secret at /Users/private/course/slide.html'] },
@@ -98,11 +126,48 @@ vm.runInContext(`${source}\nglobalThis.PpteRenderDiagnostics = window.PpteRender
   assert.equal(result.passed, false);
   assert.deepEqual(Array.from(result.resources.items), ['course/missing.png']);
   assert.equal(result.scripts.errorCount, 1);
+  assert.equal(result.measure.schemaVersion, 1);
+  // Only the well-formed box survives; the forged direction/NaN box and the
+  // non-object entry are dropped, and coordinates are rounded to integers.
+  assert.deepEqual(result.measure.overflowBoxes, [
+    { selector: 'main.deck', direction: 'vertical', box: { x: -30, y: 12, w: 1980, h: 1201 } },
+  ]);
+  // Wrap facts keep only multi-line entries with a clamped 0-1 ratio.
+  assert.deepEqual(result.measure.wraps, [
+    { selector: 'h1.title', lines: 2, lastLineWidthRatio: 0.18 },
+    { selector: 'p.wide', lines: 3, lastLineWidthRatio: 1 },
+  ]);
+  // In-canvas text element boxes: only well-formed entries survive, with
+  // integer canvas-space coordinates; zero-size boxes, forged selectors, and
+  // out-of-range font sizes are dropped. The truncation flag passes through.
+  assert.deepEqual(result.measure.textBoxes, [
+    { selector: 'h1.title', box: { x: 100, y: 41, w: 500, h: 81 }, fontPx: 64 },
+    { selector: 'p.off-canvas', box: { x: -50, y: 0, w: 100, h: 10 } },
+    { selector: 'p.fonty', box: { x: 10, y: 10, w: 100, h: 20 } },
+  ]);
+  assert.equal(result.measure.textBoxesTruncated, true);
+  // A forged non-jpeg screenshot is dropped, and without the measure request
+  // flag the screenshot field is absent entirely.
+  assert.equal(result.screenshot, undefined);
   const serialized = JSON.stringify(result);
   assert.ok(!serialized.includes('/Users/private'));
   assert.ok(!serialized.includes('<html>'));
   assert.ok(!serialized.includes('secret'));
   assert.ok(!serialized.includes('messages'));
+  assert.ok(!serialized.includes('data:image'));
+
+  const measured = await diagnostics.diagnose({
+    html: '<!doctype html><html><body></body></html>',
+    baseHref: 'slide://localhost/Users/private/course/',
+    page: 1,
+    timeoutMs: 1000,
+    includeScreenshot: true,
+    screenshotScript: 'globalThis.htmlToImage={toJpeg:async()=>("data:image/jpeg;base64,QUJD")};',
+  });
+  assert.match(lastFrame._srcdoc, /htmlToImage/);
+  assert.equal(measured.screenshot.available, true);
+  assert.equal(measured.screenshot.dataUri, 'data:image/jpeg;base64,QUJD');
+  assert.ok(!JSON.stringify(measured).includes('/Users/private'));
   console.log('PPTE render diagnostics tests passed');
 })().catch(error => {
   console.error(error);

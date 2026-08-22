@@ -287,6 +287,15 @@ const fixedDirective = { mode: 'replace', page: 3, after: null };
 assert.equal(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 3, template_id: 'template-3' }, harnessPlan.slides[2], fixedDirective, false), '');
 assert.match(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 4, template_id: 'template-3' }, harnessPlan.slides[2], fixedDirective, false), /第 3 页/);
 assert.match(wb._harnessAllowedAction({ tool: 'render_template', mode: 'replace', page: 3, template_id: 'template-4' }, harnessPlan.slides[2], fixedDirective, false), /规划模板 template-3/);
+// measure_render is read-only and page-scoped: allowed for the current page
+// (single page or pages array), rejected for other pages; apply_patch stays
+// out of the page worker (repairs go through write_slide).
+assert.equal(wb._harnessAllowedAction({ tool: 'measure_render', page: 3 }, harnessPlan.slides[2], fixedDirective, false), '');
+assert.equal(wb._harnessAllowedAction({ tool: 'measure_render', pages: [3] }, harnessPlan.slides[2], fixedDirective, false), '');
+assert.match(wb._harnessAllowedAction({ tool: 'measure_render', page: 2 }, harnessPlan.slides[2], fixedDirective, false), /只允许测量第 3 页/);
+assert.match(wb._harnessAllowedAction({ tool: 'measure_render', pages: [2, 3] }, harnessPlan.slides[2], fixedDirective, false), /只允许测量第 3 页/);
+assert.match(wb._harnessAllowedAction({ tool: 'measure_render', pages: [] }, harnessPlan.slides[2], fixedDirective, false), /只允许测量第 3 页/);
+assert.match(wb._harnessAllowedAction({ tool: 'apply_patch', page: 3 }, harnessPlan.slides[2], fixedDirective, false), /分页 Worker 不允许调用 apply_patch/);
 assert.match(wb._systemPrompt(), /角色母版起始课件/);
 assert.match(wb._systemPrompt(), /template_role/);
 assert.match(wb._systemPrompt(), /template_variant/);

@@ -273,6 +273,46 @@ window.PpteWorkbenchAgent = {
   // starters alike. Plain facts only: every judgement built on these hashes
   // (e.g. detecting untouched starter placeholders) happens server-side, so
   // routing rules can be tuned without a desktop release.
+  // SVG elements never consume structure-summary budget: an inline icon
+  // sprite (svg,path,path,... per the all-SVG-icon house style) would eat all
+  // 12 entries before any HTML element is seen.
+  _isSvgStructureElement(element) {
+    const ns = String(element?.namespaceURI || '');
+    if (ns.includes('svg')) return true;
+    const tag = String(element?.tagName || '');
+    // The HTML parser keeps SVG tagNames lowercase while HTML tagNames come
+    // out uppercase, so an exact lowercase match against the SVG tag set is a
+    // safe fallback for stub DOMs without namespace info.
+    const svgTags = new Set(['svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse',
+      'g', 'defs', 'use', 'text', 'tspan', 'clippath', 'lineargradient', 'radialgradient', 'stop',
+      'filter', 'fegaussianblur', 'femerge', 'femergenode', 'mask', 'symbol', 'image', 'marker', 'pattern']);
+    return tag !== '' && tag === tag.toLowerCase() && svgTags.has(tag);
+  },
+
+  // Mechanical per-page structure digest: the first N tag+class features of
+  // the slide body, bounded to 300 chars. Pure extraction with zero judgement
+  // — the cloud style_tweak classifier uses it to raise selector hit rates.
+  _slideStructureSummary(html, maxEntries = 12, maxLength = 300) {
+    const source = String(html || '');
+    if (!source.trim()) return null;
+    let doc = null;
+    try { doc = this._newPatchDomParser().parseFromString(source, 'text/html'); } catch (_) { return null; }
+    const parts = [];
+    for (const element of (doc.body && doc.body.querySelectorAll('*')) || []) {
+      if (parts.length >= maxEntries) break;
+      if (this._isSvgStructureElement(element)) continue;
+      const tag = element.tagName ? element.tagName.toLowerCase() : '';
+      if (!tag || /^(script|style|link|meta|br)$/.test(tag)) continue;
+      const classes = typeof element.className === 'string' && element.className
+        ? element.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(name => `.${name}`).join('')
+        : '';
+      parts.push(`${tag}${classes}`.slice(0, 60));
+    }
+    if (!parts.length) return null;
+    const summary = parts.join(',');
+    return summary.length > maxLength ? `${summary.slice(0, maxLength - 1)}…` : summary;
+  },
+
   async _deckDigests() {
     const pb = this._editor()._pptBuilder;
     if (!pb?.folderPath || !window.__TAURI__?.core?.invoke) throw new Error('课件窗口暂时不可用');
@@ -312,11 +352,17 @@ window.PpteWorkbenchAgent = {
     }
 
     return {
-      slides: (pb.slides || []).map((slide, index) => ({
-        page: index + 1,
-        file: String(slide?.file || ''),
-        sha256: shaByFile.get(String(slide?.file || '')) || null,
-      })),
+      slides: (pb.slides || []).map((slide, index) => {
+        // Optional mechanical structure summary for cloud-side selector
+        // targeting; absent when the slide has no parseable markup.
+        const structure = this._slideStructureSummary(slide?.html);
+        return {
+          page: index + 1,
+          file: String(slide?.file || ''),
+          sha256: shaByFile.get(String(slide?.file || '')) || null,
+          ...(structure ? { structure } : {}),
+        };
+      }),
       starters: starters.map(starter => ({
         role: starter.role,
         variantId: starter.variantId,
@@ -356,6 +402,34 @@ window.PpteWorkbenchAgent = {
     return { granted: granted === true };
   },
 
+  // The consent modal lives in the main window's DOM, but the trigger usually
+  // comes from the workbench window where the user is looking. Surface it in
+  // both places: focus + title-flash the main window, and drop a notice line
+  // into the workbench chat so the user knows what is being waited on.
+  _surfaceConsentToUser() {
+    try {
+      window.__TAURI__.event.emit('wb-notice', { kind: 'consent', message: '主窗口需要确认授权后才能继续，请查看主窗口的授权弹窗' });
+    } catch (_) { /* notice is best-effort */ }
+    try {
+      const main = window.__TAURI__.window?.WebviewWindow?.getByLabel?.('main');
+      main?.setFocus?.()?.catch?.(() => { /* focus is best-effort */ });
+    } catch (_) { /* focus is best-effort */ }
+    if (this._consentTitleFlashTimer) return;
+    const originalTitle = document.title;
+    let flipped = false;
+    let flashes = 0;
+    this._consentTitleFlashTimer = setInterval(() => {
+      flashes += 1;
+      flipped = !flipped;
+      document.title = flipped ? '【等待授权】Lecture Presenter' : originalTitle;
+      if (flashes >= 10) {
+        clearInterval(this._consentTitleFlashTimer);
+        this._consentTitleFlashTimer = null;
+        document.title = originalTitle;
+      }
+    }, 700);
+  },
+
   _showSnapshotConsentModal() {
     const modal = document.getElementById('snapshot-consent-modal');
     if (!modal) return Promise.resolve(false);
@@ -363,6 +437,11 @@ window.PpteWorkbenchAgent = {
       this._snapshotConsentWired = true;
       const settle = (granted) => {
         modal.classList.add('hidden');
+        if (this._consentTitleFlashTimer) {
+          clearInterval(this._consentTitleFlashTimer);
+          this._consentTitleFlashTimer = null;
+          document.title = document.title.replace(/^【等待授权】/, '');
+        }
         const resolve = this._snapshotConsentResolve;
         this._snapshotConsentResolve = null;
         if (resolve) resolve(granted);
@@ -376,6 +455,7 @@ window.PpteWorkbenchAgent = {
       if (this._snapshotConsentResolve) this._snapshotConsentResolve(false);
       this._snapshotConsentResolve = resolve;
       modal.classList.remove('hidden');
+      this._surfaceConsentToUser();
     });
   },
 
@@ -636,6 +716,19 @@ window.PpteWorkbenchAgent = {
     }
     if (action.tool === 'validate_slide') {
       details.passed = details.passed === true || /合规：未发现|校验通过|"passed"\s*:\s*true/.test(text);
+    }
+    if (action.tool === 'measure_render' && Array.isArray(details.pages)) {
+      // Page render images ride along to the server in the WS tool result
+      // only; they are stripped here so receipts and the local journal never
+      // contain them.
+      const shots = {};
+      for (const page of details.pages) {
+        if (page && typeof page === 'object' && page.screenshot?.available && typeof page.screenshot.dataUri === 'string') {
+          shots[String(page.page)] = page.screenshot.dataUri;
+        }
+        delete page.screenshot;
+      }
+      if (Object.keys(shots).length) action._taskMeasureShots = shots;
     }
     details.label = details.label || text.split('\n')[0].slice(0, 160) || 'LectureAI 已完成当前步骤';
     return details;
@@ -920,9 +1013,11 @@ window.PpteWorkbenchAgent = {
       // The local mutation is already complete. Keep the successful receipt
       // in the process cache so reconnects cannot execute the mutation twice;
       // the caller can send it to the server for reconciliation.
-      return { ...receipt, receiptPending: true };
+      return { ...receipt, receiptPending: true, ...(taskAction._taskMeasureShots ? { renderScreenshots: taskAction._taskMeasureShots } : {}) };
     }
-    return receipt;
+    // Optional page render images travel on the RPC return value only; they
+    // were stripped from the receipt result above and never reach the journal.
+    return taskAction._taskMeasureShots ? { ...receipt, renderScreenshots: taskAction._taskMeasureShots } : receipt;
   },
 
   async _executeAction(a) {
@@ -951,6 +1046,7 @@ window.PpteWorkbenchAgent = {
         case 'inspect_slides': return await this._toolInspectSlides(pb, a);
         case 'validate_slide': return await this._toolValidateSlide(pb, a);
         case 'validate_deck': return await this._toolValidateDeck(pb);
+        case 'measure_render': return await this._toolMeasureRender(pb, a);
         case '_parse_error': return `action 解析失败：${a.error}\n原始内容：${(a.raw || '').slice(0, 200)}`;
         default: return `[未知工具] ${a.tool}`;
       }
@@ -2289,6 +2385,36 @@ window.PpteWorkbenchAgent = {
     return issues.map(({ _key, ...issue }) => issue);
   },
 
+  // Compact per-page summary of render diagnostics embedded in validate_slide
+  // / validate_deck results. The full measurement facts (overflow boxes, wrap
+  // details, in-canvas text boxes; up to ~100 selectors per page) only travel
+  // on the measure_render channel — embedding them in whole-deck validation
+  // would balloon the tool_result to hundreds of KB on large decks.
+  _diagnosticsSummary(diagnostics) {
+    if (!diagnostics || typeof diagnostics !== 'object') return null;
+    const issues = Array.isArray(diagnostics.issues) ? diagnostics.issues : [];
+    const measure = diagnostics.measure || {};
+    const sampleSelectors = [
+      ...(Array.isArray(measure.overflowBoxes) ? measure.overflowBoxes : []),
+      ...(Array.isArray(measure.textBoxes) ? measure.textBoxes : []),
+    ].map(item => String(item?.selector || '')).filter(Boolean).slice(0, 5);
+    return {
+      page: Number.isInteger(diagnostics.page) ? diagnostics.page : null,
+      pageId: diagnostics.pageId || null,
+      available: diagnostics.available !== false,
+      passed: diagnostics.passed === true,
+      issueCount: issues.length,
+      errorCount: issues.filter(item => String(item?.severity || '').toLowerCase() === 'error').length,
+      measure: {
+        overflowCount: Array.isArray(measure.overflowBoxes) ? measure.overflowBoxes.length : 0,
+        wrapCount: Array.isArray(measure.wraps) ? measure.wraps.length : 0,
+        textBoxCount: Array.isArray(measure.textBoxes) ? measure.textBoxes.length : 0,
+        ...(measure.textBoxesTruncated === true ? { textBoxesTruncated: true } : {}),
+      },
+      ...(sampleSelectors.length ? { sampleSelectors } : {}),
+    };
+  },
+
   async _toolValidateSlide(pb, a) {
     let html, label, slide = null, page = null;
     if (a.page != null) {
@@ -2351,7 +2477,7 @@ window.PpteWorkbenchAgent = {
       errors,
       warnings,
       issues,
-      diagnostics,
+      diagnostics: this._diagnosticsSummary(diagnostics),
       failedPages: errors.length && page ? [page] : [],
       failedPageIds: errors.length && slide?.id ? [slide.id] : [],
     };
@@ -2362,7 +2488,7 @@ window.PpteWorkbenchAgent = {
       errors: result.errors,
       warnings: result.warnings,
       issues,
-      diagnostics,
+      diagnostics: this._diagnosticsSummary(diagnostics),
     }];
     return JSON.stringify(result, null, 2);
   },
@@ -2384,7 +2510,7 @@ window.PpteWorkbenchAgent = {
     return `${customHost ? 'http://slide.localhost/' : 'slide://localhost/'}${encoded}`;
   },
 
-  async _renderDiagnosticsForSlide(pb, slide, page, expectedTemplate = '') {
+  async _renderDiagnosticsForSlide(pb, slide, page, expectedTemplate = '', measureOptions = null) {
     if (!window.PpteRenderDiagnostics?.diagnose) {
       return {
         schemaVersion: 1,
@@ -2402,6 +2528,8 @@ window.PpteWorkbenchAgent = {
         page,
         pageId: slide?.id || null,
         expectedTemplate,
+        includeScreenshot: measureOptions?.includeScreenshot === true,
+        screenshotScript: measureOptions?.screenshotScript || null,
       });
     } catch (_) {
       return {
@@ -2413,6 +2541,47 @@ window.PpteWorkbenchAgent = {
         issues: [{ code: 'RENDER_DIAGNOSTICS_UNAVAILABLE', severity: 'error', message: '页面渲染诊断暂不可用' }],
       };
     }
+  },
+
+  // Read-only render measurement for cloud-driven repair loops. Raw facts
+  // only (bounding boxes, wrap counts, optional screenshot); the screenshot is
+  // gated behind the same cloud-analysis consent as deck snapshots and never
+  // enters receipts or the journal.
+  async _measureScreenshotScript() {
+    if (this._measureScreenshotScriptCache !== undefined) return this._measureScreenshotScriptCache;
+    this._measureScreenshotScriptCache = null;
+    try {
+      const response = await fetch(new URL('vendor/html-to-image.js', window.location.href).href);
+      if (response.ok) {
+        const text = await response.text();
+        if (text && text.length < 300000 && !/<\/script/i.test(text)) this._measureScreenshotScriptCache = text;
+      }
+    } catch (_) { /* screenshot stays unavailable, the measurement still runs */ }
+    return this._measureScreenshotScriptCache;
+  },
+
+  async _toolMeasureRender(pb, a) {
+    const requested = (Array.isArray(a.pages) && a.pages.length ? a.pages : [a.page]);
+    const pages = [...new Set(requested.map(page => Number(page) | 0)
+      .filter(page => Number.isInteger(page) && page >= 1 && page <= pb.slides.length))].slice(0, 12);
+    if (!pages.length) return 'measure_render 失败：需指定有效页码';
+    let includeScreenshot = a.includeScreenshot === true;
+    if (includeScreenshot) {
+      // Same one-time consent as the deck snapshot upload: without it the page
+      // render image is never produced, let alone uploaded.
+      const consent = await this._snapshotConsent();
+      includeScreenshot = consent.granted === true;
+    }
+    const screenshotScript = includeScreenshot ? await this._measureScreenshotScript() : null;
+    const results = [];
+    for (const page of pages) {
+      const slide = pb.slides[page - 1];
+      results.push(await this._renderDiagnosticsForSlide(pb, slide, page, this._expectedTemplateForPage(pb, page), {
+        includeScreenshot: includeScreenshot && !!screenshotScript,
+        screenshotScript,
+      }));
+    }
+    return JSON.stringify({ schemaVersion: 1, measured: true, pages: results }, null, 2);
   },
 
   async _toolValidateDeck(pb) {
@@ -2468,7 +2637,7 @@ window.PpteWorkbenchAgent = {
       const planned = plannedSlides.find(item => Number(item?.page) === page) || plannedSlides[index] || {};
       const expectedTemplate = String(planned?.templateId || planned?.template_id || '');
       const diagnostics = await this._renderDiagnosticsForSlide(pb, slide, page, expectedTemplate);
-      renderSlides.push(diagnostics);
+      renderSlides.push(this._diagnosticsSummary(diagnostics));
       // See _toolValidateSlide: unavailable render diagnostics must not fail the
       // deck. Downgrade to advisory warnings when the check could not run.
       const diagnosticsUnavailable = diagnostics.available === false;
@@ -2491,7 +2660,7 @@ window.PpteWorkbenchAgent = {
           ...slideIssues.filter(item => item.severity !== 'error').map(item => String(item.message || item.code || '提示')),
         ].slice(0, 30),
         issues: slideIssues,
-        diagnostics,
+        diagnostics: this._diagnosticsSummary(diagnostics),
       });
     }
     if (finishPages.length > 1) addIssue('DECK_MULTIPLE_FINISH_PAGES', '课件包含多个结束页', { pages: finishPages });

@@ -67,6 +67,13 @@ window.WorkbenchWindow = {
       // slow subscription cannot delay the rest of the workbench startup.
       await Promise.all([
         listen('wb-response', (e) => this._onResponse(e.payload)),
+        // Human-attention notices from the main window (e.g. a consent modal
+        // that is only visible there) surfaced here so the user never waits
+        // in silence while staring at this window.
+        listen('wb-notice', (e) => {
+          const message = String(e.payload?.message || '');
+          if (message) this._log('sys', message);
+        }),
         listen('wb-prefill', (e) => this._onPrefill(e.payload)),
         listen('wb-refresh', () => this._refreshContext()),
         listen('ai-stream-chunk', (e) => {
@@ -183,10 +190,27 @@ window.WorkbenchWindow = {
   // ---- RPC over events (single in-flight request; busy guard ensures serial) ----
   _pendingResolve: null,
   _pendingType: null,
+  _pendingTimer: null,
+  // Default RPC deadline. Action RPCs may legitimately wait minutes on a
+  // user-facing consent dialog, so they get a much longer budget.
+  _rpcTimeoutMs(type) {
+    if (type === 'execute-action' || type === 'execute-task-action') return 300000;
+    return 60000;
+  },
   _rpc(type, payload) {
     return new Promise((resolve) => {
       this._pendingResolve = resolve;
       this._pendingType = type;
+      // A stuck main window (crash, hidden modal, dead editor) must never
+      // dead-lock the serial busy chain: resolve with a retryable friendly
+      // error and clear the pending slot so the next RPC starts normally.
+      clearTimeout(this._pendingTimer);
+      this._pendingTimer = setTimeout(() => {
+        if (this._pendingResolve !== resolve || this._pendingType !== type) return;
+        this._pendingResolve = null;
+        this._pendingType = null;
+        resolve({ ok: false, error: '主窗口响应超时，请稍后重试', retryable: true });
+      }, this._rpcTimeoutMs(type));
       window.__TAURI__.event.emit('wb-request', { type, payload });
     });
   },
@@ -198,6 +222,7 @@ window.WorkbenchWindow = {
     const r = this._pendingResolve;
     this._pendingResolve = null;
     this._pendingType = null;
+    clearTimeout(this._pendingTimer);
     if (r) r(resp.result);
   },
 
@@ -501,6 +526,7 @@ window.WorkbenchWindow = {
       apply_patch: `正在应用云端优化建议${args?.label ? `：${String(args.label).slice(0, 60)}` : ''}`,
       validate_slide: `正在检查${pageText}的内容、版式和动效`,
       validate_deck: '正在检查整套课件',
+      measure_render: `正在测量${pageText}的实际渲染效果`,
     }[String(tool || '')] || '正在处理当前任务步骤';
   },
 
@@ -2426,11 +2452,18 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   _harnessAllowedAction(action, planSlide, directive, mutated) {
     const page = Number(planSlide.page);
     const tool = String(action?.tool || '');
-    if (!['read_slide', 'search_design_examples', 'render_template', 'write_slide', 'insert_slide', 'validate_slide'].includes(tool)) {
+    if (!['read_slide', 'search_design_examples', 'render_template', 'write_slide', 'insert_slide', 'validate_slide', 'measure_render'].includes(tool)) {
       return `分页 Worker 不允许调用 ${tool || '空工具'}`;
     }
     if (['read_slide', 'write_slide', 'validate_slide'].includes(tool) && Number(action.page) !== page) {
       return `分页 Worker 只允许操作第 ${page} 页`;
+    }
+    // Read-only render measurement is allowed inside the page loop so the
+    // server can verify facts and self-correct before validating the page;
+    // apply_patch stays out (in-page repair always goes through write_slide).
+    if (tool === 'measure_render') {
+      const requested = [...(Array.isArray(action.pages) && action.pages.length ? action.pages : [action.page])].map(Number);
+      if (!requested.length || requested.some(item => item !== page)) return `分页 Worker 只允许测量第 ${page} 页`;
     }
     if (tool === 'render_template') {
       const expectedTemplate = String(planSlide.templateId || planSlide.template_id || '');
@@ -2791,7 +2824,13 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
                   argsHash: receipt.argsHash,
                   newDeckRevision: receipt.newDeckRevision,
                   ok: true,
-                  result: { ...receipt.result, newDeckRevision: receipt.newDeckRevision },
+                  result: {
+                    ...receipt.result,
+                    newDeckRevision: receipt.newDeckRevision,
+                    // Page render images are consent-gated and ride along
+                    // here only (never in receipts or the local journal).
+                    ...(receipt.renderScreenshots ? { renderScreenshots: receipt.renderScreenshots } : {}),
+                  },
                 }));
               } catch (error) {
                 const detail = error?.details || { code: 'CLIENT_TOOL_FAILED', category: 'client_unavailable', retryable: false, userMessage: this._modelErrorMessage(error) };
@@ -3076,6 +3115,14 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
   },
 
   _piInactivityTimeoutMs() {
+    // Top of the timeout budget chain: this socket idle limit must exceed the
+    // worst-case per-page time with no socket traffic, which is dominated by
+    // local render diagnostics (each run bounded by PpteRenderDiagnostics
+    // DEFAULT_TIMEOUT_MS = 8.5s, and a page may run several: validate_slide,
+    // measure_render, plus screenshot time inside each frame). Current worst
+    // case is roughly 102s of diagnostics, leaving ~78s of headroom; raise
+    // this if per-page diagnostics budgets grow (see the chain comment at the
+    // DEFAULT_TIMEOUT_MS constant in ppte-render-diagnostics.js).
     return 180000;
   },
 
@@ -3973,6 +4020,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     apply_patch: '应用云端优化',
     validate_slide: '校验页面',
     validate_deck: '校验整套课件',
+    measure_render: '测量页面渲染',
     inspect_slides: '检查页面',
   },
 

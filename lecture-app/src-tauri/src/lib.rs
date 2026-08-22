@@ -1014,6 +1014,89 @@ fn inject_slide_bridge(file_path: &str, mut content: Vec<u8>) -> Vec<u8> {
     content
 }
 
+// Slide HTML is dynamic per save (and gets the bridge script appended), so it
+// must never be served from the webview cache — stale HTML is the classic
+// "edited but looks unchanged" bug. Static resources (css/js/images) only
+// need revalidation, so no-cache keeps them refresh-correct without forcing a
+// full re-download of large assets on every page flip.
+fn slide_cache_control(file_path: &str) -> &'static str {
+    if is_html_path(file_path) {
+        "no-store"
+    } else {
+        "no-cache"
+    }
+}
+
+// HTTP-date (IMF-fixdate) helpers for slide:// static resource revalidation.
+// Hand-rolled (no chrono dependency): civil-from-days per Hinnant's algorithm.
+fn http_date_from_unix_secs(secs: u64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let days = (secs / 86400) as i64;
+    let secs_of_day = secs % 86400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    // 1970-01-01 was a Thursday (index 4 with Sunday = 0).
+    let weekday = (days + 4).rem_euclid(7) as usize;
+    format!(
+        "{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
+        WEEKDAYS[weekday],
+        d,
+        MONTHS[(month - 1) as usize],
+        year,
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60
+    )
+}
+
+fn parse_http_date_to_unix_secs(value: &str) -> Option<u64> {
+    // "Tue, 15 Nov 1994 12:45:26 GMT" (only the format we emit ourselves).
+    let value = value.trim();
+    let rest = value.split_once(", ")? .1;
+    let mut parts = rest.split_whitespace();
+    let day: u64 = parts.next()?.parse().ok()?;
+    let month = match parts.next()? {
+        "Jan" => 1u64, "Feb" => 2, "Mar" => 3, "Apr" => 4, "May" => 5, "Jun" => 6,
+        "Jul" => 7, "Aug" => 8, "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts.next()?.parse().ok()?;
+    let time = parts.next()?;
+    let mut clock = time.split(':');
+    let hour: u64 = clock.next()?.parse().ok()?;
+    let minute: u64 = clock.next()?.parse().ok()?;
+    let second: u64 = clock.next()?.parse().ok()?;
+    let (day, month, hour, minute, second) = (day as i64, month as i64, hour as i64, minute as i64, second as i64);
+    // days_from_civil (Hinnant), the inverse of the formatter above.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some((days.max(0) as u64) * 86400 + (hour * 3600 + minute * 60 + second) as u64)
+}
+
+// Last-Modified for a slide:// resource, or None when the mtime is unreadable.
+fn slide_last_modified(file_path: &str) -> Option<String> {
+    let modified = fs::metadata(file_path).ok()?.modified().ok()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(http_date_from_unix_secs(secs))
+}
+
 fn extract_html_script_body(content: &[u8], requested_index: usize) -> Option<Vec<u8>> {
     let source = String::from_utf8_lossy(content);
     let lower = source.to_ascii_lowercase();
@@ -5665,6 +5748,47 @@ mod slide_bridge_tests {
     }
 
     #[test]
+    fn slide_cache_policy_splits_html_from_resources() {
+        // Slide HTML (and derived script exports) must never come from cache.
+        assert_eq!(slide_cache_control("/Users/demo/slide01.html"), "no-store");
+        assert_eq!(slide_cache_control("C:\\课件\\slide.HTM"), "no-store");
+        // Static resources only need revalidation.
+        assert_eq!(slide_cache_control("/Users/demo/style.css"), "no-cache");
+        assert_eq!(slide_cache_control("/Users/demo/图片.png"), "no-cache");
+        assert_eq!(slide_cache_control("/Users/demo/app.js"), "no-cache");
+    }
+
+    #[test]
+    fn http_date_formats_and_roundtrips() {
+        // Well-known instants (verified against RFC-implied values).
+        assert_eq!(http_date_from_unix_secs(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+        assert_eq!(http_date_from_unix_secs(1_234_567_890), "Fri, 13 Feb 2009 23:31:30 GMT");
+        // Leap-day coverage.
+        assert_eq!(http_date_from_unix_secs(951_782_400), "Tue, 29 Feb 2000 00:00:00 GMT");
+        for secs in [0u64, 1, 86_399, 951_782_400, 1_234_567_890, 4_102_444_800] {
+            assert_eq!(
+                parse_http_date_to_unix_secs(&http_date_from_unix_secs(secs)),
+                Some(secs),
+                "roundtrip failed for {secs}"
+            );
+        }
+        assert_eq!(parse_http_date_to_unix_secs("garbage"), None);
+        assert_eq!(parse_http_date_to_unix_secs("Fri, 13 Foo 2009 23:31:30 GMT"), None);
+    }
+
+    #[test]
+    fn slide_last_modified_emits_parsable_http_date() {
+        let dir = std::env::temp_dir().join("slide-lm-test");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("style.css");
+        fs::write(&path, b"body{}").unwrap();
+        let date = slide_last_modified(path.to_str().unwrap())
+            .expect("last-modified header for a fresh temp file");
+        assert!(parse_http_date_to_unix_secs(&date).is_some(), "emitted date must roundtrip: {date}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn extracts_inline_scripts_by_document_order() {
         let html = br#"<script>window.first = 1;</script>
             <script type="application/json">{"data":true}</script>
@@ -8855,6 +8979,7 @@ pub fn run() {
                                 .status(200)
                                 .header("Content-Type", "text/javascript; charset=utf-8")
                                 .header("Access-Control-Allow-Origin", "*")
+                                .header("Cache-Control", slide_cache_control(&file_path))
                                 .body(script)
                                 .unwrap(),
                             None => http::Response::builder()
@@ -8867,11 +8992,55 @@ pub fn run() {
                     let mime = mime_guess::from_path(&file_path)
                         .first_or_octet_stream()
                         .to_string();
+                    // Static resources get a Last-Modified validator so the
+                    // webview's no-cache revalidation can end in a cheap 304
+                    // instead of re-downloading and re-decoding every asset on
+                    // every page flip. Slide HTML keeps no-store with no
+                    // validator (the bridge script makes its bytes dynamic).
+                    if !is_html_path(&file_path) {
+                        let last_modified = slide_last_modified(&file_path);
+                        let mtime_secs = fs::metadata(&file_path)
+                            .ok()
+                            .and_then(|meta| meta.modified().ok())
+                            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|duration| duration.as_secs());
+                        let conditional = request
+                            .headers()
+                            .get("if-modified-since")
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(parse_http_date_to_unix_secs);
+                        // Standard If-Modified-Since semantics: HTTP dates
+                        // have second granularity, so mtime <= since counts
+                        // as unchanged -> empty 304.
+                        if let (Some(mtime), Some(since)) = (mtime_secs, conditional) {
+                            if mtime <= since {
+                                return http::Response::builder()
+                                    .status(304)
+                                    .header("Content-Type", &mime)
+                                    .header("Access-Control-Allow-Origin", "*")
+                                    .header("Cache-Control", slide_cache_control(&file_path))
+                                    .header("Last-Modified", http_date_from_unix_secs(mtime))
+                                    .body(Vec::new())
+                                    .unwrap();
+                            }
+                        }
+                        let mut builder = http::Response::builder()
+                            .status(200)
+                            .header("Content-Type", &mime)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("Cache-Control", slide_cache_control(&file_path));
+                        if let Some(modified) = last_modified {
+                            builder = builder.header("Last-Modified", modified);
+                        }
+                        let body = inject_slide_bridge(&file_path, content);
+                        return builder.body(body).unwrap();
+                    }
                     let body = inject_slide_bridge(&file_path, content);
                     http::Response::builder()
                         .status(200)
                         .header("Content-Type", &mime)
                         .header("Access-Control-Allow-Origin", "*")
+                        .header("Cache-Control", slide_cache_control(&file_path))
                         .body(body)
                         .unwrap()
                 }

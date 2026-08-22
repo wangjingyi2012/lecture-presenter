@@ -2,15 +2,50 @@
 //
 // Slide scripts run in an opaque sandbox and return a compact allowlisted result
 // through postMessage. The parent never combines allow-scripts with
-// allow-same-origin, and diagnostics never include HTML, screenshots, page text,
-// absolute paths, or script exception messages.
+// allow-same-origin, and diagnostics never include HTML, page text, absolute
+// paths, or script exception messages.
+//
+// Measurement facts (render.measure.v1): overflow element bounding boxes, text
+// line-wrap counts, and an opt-in full-page screenshot. Facts stay raw — no
+// local conclusions. The optional screenshot only renders when the caller (the
+// server-initiated measure task) explicitly requests it AND the user granted
+// the cloud-analysis consent, and it never enters receipts or the journal.
+//
+// Platform note (P4-D2): the diagnostic frame is always fed via srcdoc with an
+// injected <base>, the same strategy the Windows WebView2 path uses, so the
+// runner is platform-neutral by construction (no slide:// iframe is ever
+// loaded here). Still, both real-machine load paths need a manual smoke:
+//   macOS (slide:// + WebKit):  1) measure a deck page, 2) verify overflow
+//     boxes/wrap facts return with the sandbox attribute intact, 3) optional
+//     screenshot produces a jpeg data URI when consented.
+//   Windows (srcdoc + WebView2): same three steps via the http://slide.localhost
+//     base href; watch for base-href regressions in _renderDiagnosticBaseHref.
+// Neither smoke could be run in this development session; both remain TODO
+// before release.
 (function () {
   'use strict';
 
   const WIDTH = 1920;
   const HEIGHT = 1080;
+  // Timeout budget chain (all values must stay ordered largest->smallest):
+  //   Pi inactivity timeout (workbench-window.js, 180s)
+  //   > worst-case per-page sum of ALL diagnostics runs on that page
+  //     (current margin ~78s: a page may run validate_slide + measure_render,
+  //     each up to DEFAULT_TIMEOUT_MS)
+  //   > DEFAULT_TIMEOUT_MS (frame load + fonts + measurement)
+  //   > SCREENSHOT_TIMEOUT_MS (rasterization fits inside the frame's budget).
+  // Raising DEFAULT_TIMEOUT_MS or adding more per-page diagnostics runs
+  // shrinks the 180s margin; if the total per-page diagnostics time could
+  // approach 180s the Pi socket would drop mid-page, so re-tune together.
   const DEFAULT_TIMEOUT_MS = 8500;
   const MESSAGE_TYPE = 'lectureai-render-diagnostics';
+  const MAX_OVERFLOW_BOXES = 12;
+  const MAX_WRAP_FACTS = 30;
+  const MAX_TEXT_BOXES = 60;
+  // Must stay well below DEFAULT_TIMEOUT_MS: the screenshot runs inside the
+  // diagnostic frame, so a rasterization timeout here must fire first and
+  // leave the frame time to report its facts (see budget chain above).
+  const SCREENSHOT_TIMEOUT_MS = 5000;
 
   function diagnosticFrameRunner(config) {
     const resourceFailures = [];
@@ -95,16 +130,66 @@
         .filter(element => visible(element) && !/^(SCRIPT|STYLE|LINK|META|DEFS)$/.test(element.tagName));
       const horizontal = [];
       const vertical = [];
+      const overflowBoxes = [];
+      const seenBoxSelectors = new Set();
       for (const element of elements) {
         const rect = element.getBoundingClientRect();
-        if (rect.left < -2 || rect.right > config.width + 2) horizontal.push(selector(element));
-        if (rect.top < -2 || rect.bottom > config.height + 2) vertical.push(selector(element));
+        const beyondHorizontal = rect.left < -2 || rect.right > config.width + 2;
+        const beyondVertical = rect.top < -2 || rect.bottom > config.height + 2;
+        if (beyondHorizontal) horizontal.push(selector(element));
+        if (beyondVertical) vertical.push(selector(element));
+        if ((beyondHorizontal || beyondVertical) && overflowBoxes.length < MAX_OVERFLOW_BOXES) {
+          const name = selector(element);
+          // The raw canvas-space box (rounded to integer px). One entry per
+          // selector so a repeated class never floods the cap.
+          if (!seenBoxSelectors.has(name)) {
+            seenBoxSelectors.add(name);
+            const fontPx = Number.parseFloat(getComputedStyle(element).fontSize || '0');
+            overflowBoxes.push({
+              selector: name,
+              direction: beyondVertical && beyondHorizontal ? 'both' : (beyondVertical ? 'vertical' : 'horizontal'),
+              box: {
+                x: Math.round(rect.left),
+                y: Math.round(rect.top),
+                w: Math.round(rect.width),
+                h: Math.round(rect.height),
+              },
+              ...(Number.isFinite(fontPx) && fontPx > 0 ? { fontPx: Number(fontPx.toFixed(2)) } : {}),
+            });
+          }
+        }
       }
 
       const textElements = elements.filter(element => {
         if (/^(SVG|PATH|USE|IMG|VIDEO|CANVAS|BR|HR)$/.test(element.tagName)) return false;
         return [...element.childNodes].some(node => node.nodeType === Node.TEXT_NODE && safeText(node.textContent));
       });
+
+      // In-canvas text element boxes: the raw bbox (canvas-space integer px)
+      // plus fontPx of every visible text element fully inside the canvas, so
+      // the cloud side can detect in-canvas text overlap (R13). Capped at
+      // MAX_TEXT_BOXES with an explicit truncation flag. Still facts only —
+      // no text content ever leaves the frame.
+      const textBoxes = [];
+      let textBoxesTruncated = false;
+      for (const element of textElements) {
+        if (textBoxes.length >= MAX_TEXT_BOXES) { textBoxesTruncated = true; break; }
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        if (rect.left < -2 || rect.right > config.width + 2 || rect.top < -2 || rect.bottom > config.height + 2) continue;
+        const fontPx = Number.parseFloat(getComputedStyle(element).fontSize || '0');
+        textBoxes.push({
+          selector: selector(element),
+          box: {
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+          },
+          ...(Number.isFinite(fontPx) && fontPx > 0 ? { fontPx: Number(fontPx.toFixed(2)) } : {}),
+        });
+      }
+
       let minBodyFontPx = null;
       const fontViolations = [];
       for (const element of textElements) {
@@ -114,6 +199,46 @@
         if (size + 0.25 < 28.8) {
           fontViolations.push({ selector: selector(element), actualPx: Number(size.toFixed(2)), minimumPx: 28.8 });
         }
+      }
+
+      // Line-wrap facts: how many rendered lines each text element occupies and
+      // how full its last line is (0-1). Only multi-line elements are reported
+      // so the cloud side can spot widows and wrapped titles. No text content
+      // ever leaves the frame.
+      const wraps = [];
+      for (const element of textElements) {
+        if (wraps.length >= MAX_WRAP_FACTS) break;
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0) continue;
+        const range = document.createRange();
+        let lineTop = null;
+        let lines = 0;
+        let lastLineWidth = 0;
+        let hasText = false;
+        for (const node of element.childNodes) {
+          if (node.nodeType !== Node.TEXT_NODE || !safeText(node.textContent)) continue;
+          hasText = true;
+          range.selectNodeContents(node);
+          for (const clientRect of range.getClientRects()) {
+            if (clientRect.width <= 0 || clientRect.height <= 0) continue;
+            if (lineTop === null || Math.abs(clientRect.top - lineTop) > Math.max(2, clientRect.height * 0.5)) {
+              lineTop = clientRect.top;
+              lines += 1;
+              lastLineWidth = clientRect.width;
+            } else {
+              lastLineWidth = Math.max(lastLineWidth, clientRect.width);
+            }
+          }
+        }
+        range.detach?.();
+        if (!hasText || lines < 2) continue;
+        const fontPx = Number.parseFloat(getComputedStyle(element).fontSize || '0');
+        wraps.push({
+          selector: selector(element),
+          lines,
+          lastLineWidthRatio: Number(Math.max(0, Math.min(1, lastLineWidth / rect.width)).toFixed(2)),
+          ...(Number.isFinite(fontPx) && fontPx > 0 ? { fontPx: Number(fontPx.toFixed(2)) } : {}),
+        });
       }
 
       const missingResources = [...document.querySelectorAll('img,video,audio')]
@@ -158,6 +283,31 @@
       if (scriptErrorCount) issues.push(issue('RENDER_SCRIPT_ERROR', '页面脚本执行异常', { count: scriptErrorCount }));
       if (!steps.completed) issues.push(issue('RENDER_STEPS_INCOMPLETE', '分步页面无法进入最终状态'));
       if (!template.matched) issues.push(issue('RENDER_TEMPLATE_MISMATCH', '实际模板与课件蓝图不一致'));
+      let screenshot = { available: false };
+      if (config.screenshot === true) {
+        // The rasterizer (html-to-image) is inlined into this frame by the
+        // caller; the sandbox has no network/origin access to load it itself.
+        // Failure is a missing fact, never a page failure.
+        try {
+          const toJpeg = globalThis.htmlToImage?.toJpeg;
+          if (typeof toJpeg !== 'function') throw new Error('unavailable');
+          const dataUri = await Promise.race([
+            toJpeg(document.documentElement, {
+              width: 1280,
+              height: 720,
+              canvasWidth: 1280,
+              canvasHeight: 720,
+              quality: 0.7,
+              backgroundColor: '#ffffff',
+              pixelRatio: 1,
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), SCREENSHOT_TIMEOUT_MS)),
+          ]);
+          if (typeof dataUri === 'string' && dataUri.startsWith('data:image/jpeg;base64,')) {
+            screenshot = { available: true, dataUri: dataUri.slice(0, 4 * 1024 * 1024) };
+          }
+        } catch (_) { /* screenshot stays unavailable */ }
+      }
       post({
         schemaVersion: 1,
         available: true,
@@ -165,6 +315,8 @@
         load: { ok: true, timedOut: false, durationMs: Date.now() - startedAt },
         canvas,
         overflow,
+        measure: { overflowBoxes, wraps, textBoxes, textBoxesTruncated },
+        screenshot,
         font: {
           minBodyPx: minBodyFontPx === null ? null : Number(minBodyFontPx.toFixed(2)),
           violationCount: fontViolations.length,
@@ -226,11 +378,74 @@
     return normalized;
   }
 
+  function safeBox(value) {
+    const raw = { x: Number(value?.x), y: Number(value?.y), w: Number(value?.w), h: Number(value?.h) };
+    if (!Object.values(raw).every(number => Number.isFinite(number) && Math.abs(number) <= 100000)) return null;
+    return { x: Math.round(raw.x), y: Math.round(raw.y), w: Math.round(raw.w), h: Math.round(raw.h) };
+  }
+
   function normalizeResult(raw, config) {
     const issues = (Array.isArray(raw?.issues) ? raw.issues : []).map(safeIssue).slice(0, 30);
     const selectors = safeStrings(raw?.overflow?.selectors, 12, 160);
     const resources = safeStrings(raw?.resources?.items, 20, 200).map(item => item.split(/[\\/]/).slice(-2).join('/'));
+    const overflowBoxes = (Array.isArray(raw?.measure?.overflowBoxes) ? raw.measure.overflowBoxes : [])
+      .map(item => {
+        if (!item || typeof item !== 'object') return null;
+        const box = safeBox(item.box);
+        if (!box) return null;
+        const direction = ['horizontal', 'vertical', 'both'].includes(item.direction) ? item.direction : null;
+        const name = String(item.selector || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+        if (!name || !direction) return null;
+        const fontPx = Number(item.fontPx);
+        return {
+          selector: name,
+          direction,
+          box,
+          ...(Number.isFinite(fontPx) && fontPx > 0 && fontPx <= 400 ? { fontPx: Number(fontPx.toFixed(2)) } : {}),
+        };
+      })
+      .filter(Boolean)
+      .slice(0, MAX_OVERFLOW_BOXES);
+    const wraps = (Array.isArray(raw?.measure?.wraps) ? raw.measure.wraps : [])
+      .map(item => {
+        if (!item || typeof item !== 'object') return null;
+        const name = String(item.selector || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+        const lines = Math.floor(finite(item.lines));
+        const ratio = Number(finite(item.lastLineWidthRatio));
+        if (!name || lines < 2 || lines > 200) return null;
+        const fontPx = Number(item.fontPx);
+        return {
+          selector: name,
+          lines,
+          lastLineWidthRatio: Math.max(0, Math.min(1, Number(ratio.toFixed(2)))),
+          ...(Number.isFinite(fontPx) && fontPx > 0 && fontPx <= 400 ? { fontPx: Number(fontPx.toFixed(2)) } : {}),
+        };
+      })
+      .filter(Boolean)
+      .slice(0, MAX_WRAP_FACTS);
+    const textBoxes = (Array.isArray(raw?.measure?.textBoxes) ? raw.measure.textBoxes : [])
+      .map(item => {
+        if (!item || typeof item !== 'object') return null;
+        const box = safeBox(item.box);
+        const name = String(item.selector || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+        if (!box || !name || box.w <= 0 || box.h <= 0) return null;
+        const fontPx = Number(item.fontPx);
+        return {
+          selector: name,
+          box,
+          ...(Number.isFinite(fontPx) && fontPx > 0 && fontPx <= 400 ? { fontPx: Number(fontPx.toFixed(2)) } : {}),
+        };
+      })
+      .filter(Boolean)
+      .slice(0, MAX_TEXT_BOXES);
     const available = raw?.available !== false && !issues.some(item => item.code === 'RENDER_DIAGNOSTICS_UNAVAILABLE');
+    let screenshot = { available: false };
+    if (config.includeScreenshot === true
+      && typeof raw?.screenshot?.dataUri === 'string'
+      && raw.screenshot.dataUri.startsWith('data:image/jpeg;base64,')
+      && raw.screenshot.dataUri.length <= 4 * 1024 * 1024) {
+      screenshot = { available: true, dataUri: raw.screenshot.dataUri };
+    }
     return {
       schemaVersion: 1,
       available,
@@ -253,6 +468,14 @@
         verticalCount: Math.max(0, Math.floor(finite(raw?.overflow?.verticalCount))),
         selectors,
       },
+      measure: {
+        schemaVersion: 1,
+        overflowBoxes,
+        wraps,
+        textBoxes,
+        textBoxesTruncated: raw?.measure?.textBoxesTruncated === true,
+      },
+      ...(config.includeScreenshot === true ? { screenshot } : {}),
       font: {
         minBodyPx: raw?.font?.minBodyPx == null ? null : finite(raw.font.minBodyPx),
         violationCount: Math.max(0, Math.floor(finite(raw?.font?.violationCount))),
@@ -289,14 +512,21 @@
       width: WIDTH,
       height: HEIGHT,
       expectedTemplate: config.expectedTemplate || '',
+      screenshot: config.includeScreenshot === true,
     }).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
     const runner = `<script>(${diagnosticFrameRunner.toString()})(${safeConfig});<\/script>`;
+    // The screenshot rasterizer runs inside the sandboxed frame, so its source
+    // has to be inlined; a src reference could not be fetched from this origin.
+    const rasterizer = config.includeScreenshot === true && typeof config.screenshotScript === 'string'
+      && config.screenshotScript.length < 300000 && !/<\/script/i.test(config.screenshotScript)
+      ? `<script>${config.screenshotScript}<\/script>`
+      : '';
     const escapedBase = String(baseHref || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
     const base = escapedBase ? `<base href="${escapedBase}">` : '';
     let source = String(html || '').replace(/<base\b[^>]*>/i, '');
-    if (/<head[^>]*>/i.test(source)) return source.replace(/<head([^>]*)>/i, `<head$1>${base}${runner}`);
-    if (/<html[^>]*>/i.test(source)) return source.replace(/<html([^>]*)>/i, `<html$1><head>${base}${runner}</head>`);
-    return `<!doctype html><html><head>${base}${runner}</head><body>${source}</body></html>`;
+    if (/<head[^>]*>/i.test(source)) return source.replace(/<head([^>]*)>/i, `<head$1>${base}${rasterizer}${runner}`);
+    if (/<html[^>]*>/i.test(source)) return source.replace(/<html([^>]*)>/i, `<html$1><head>${base}${rasterizer}${runner}</head>`);
+    return `<!doctype html><html><head>${base}${rasterizer}${runner}</head><body>${source}</body></html>`;
   }
 
   function nonce() {
@@ -311,6 +541,10 @@
       page: Number.isInteger(Number(options?.page)) ? Number(options.page) : null,
       pageId: options?.pageId ? String(options.pageId).slice(0, 120) : null,
       expectedTemplate: String(options?.expectedTemplate || '').slice(0, 120),
+      includeScreenshot: options?.includeScreenshot === true,
+      screenshotScript: options?.includeScreenshot === true && typeof options?.screenshotScript === 'string'
+        ? options.screenshotScript
+        : null,
       nonce: nonce(),
     };
     const iframe = document.createElement('iframe');

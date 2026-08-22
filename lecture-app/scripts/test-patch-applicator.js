@@ -353,6 +353,85 @@ async function main() {
     assert.equal(again.error.code, 'PATCH_VOCABULARY_UNSUPPORTED');
   }
 
+  // ---- deck digest structure summary (_slideStructureSummary) ----
+  {
+    // Real DOM tagName casing: HTML tags uppercase, SVG tags stay lowercase.
+    const el = (tag, className, namespaceURI) => ({ tagName: tag, className: className || '', namespaceURI: namespaceURI || null });
+    const stubDoc = elements => ({ body: { querySelectorAll: () => elements } });
+    const originalParser = agent._newPatchDomParser;
+    agent._newPatchDomParser = () => ({ parseFromString: () => stubDoc([
+      el('DIV', 'slide cover-page'), el('H1', 'title main'), el('P'), el('SCRIPT'), el('BR'),
+      el('SECTION', 'card  extra  '),
+    ]) });
+    const summary = agent._slideStructureSummary('<div class="slide"></div>');
+    // First 12 tag+class features (max 2 classes each), script/br skipped.
+    assert.equal(summary, 'div.slide.cover-page,h1.title.main,p,section.card.extra');
+    // A large inline SVG (either via namespace or lowercase svg tagNames)
+    // never consumes the feature budget: HTML elements after it still fill
+    // all 12 entries.
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const withBigSvg = [
+      ...Array.from({ length: 20 }, (_, i) => el('path', `p${i}`, svgNS)),
+      el('svg', '', svgNS), el('circle', '', svgNS), el('rect', '', svgNS),
+      el('path', 'legacy-stub-no-ns'),
+      ...Array.from({ length: 20 }, (_, i) => el('SECTION', `sec s${i}`)),
+    ];
+    agent._newPatchDomParser = () => ({ parseFromString: () => stubDoc(withBigSvg) });
+    const afterSvg = agent._slideStructureSummary('<div></div>');
+    assert.equal(afterSvg.split(',').length, 12, 'SVG subtree must not eat the budget');
+    assert.ok(!/(^|,)svg|(^|,)path|(^|,)circle|(^|,)rect/.test(afterSvg), `no SVG features leak: ${afterSvg}`);
+    // Empty / unparseable input yields no structure field.
+    assert.equal(agent._slideStructureSummary(''), null);
+    assert.equal(agent._slideStructureSummary('   '), null);
+    agent._newPatchDomParser = () => ({ parseFromString: () => stubDoc([]) });
+    assert.equal(agent._slideStructureSummary('<p>x</p>'), null);
+    // Bounded: a body with many elements never exceeds 300 chars and keeps
+    // at most 12 features.
+    const many = Array.from({ length: 80 }, (_, i) => el('DIV', `${'a'.repeat(30)}${i} ${'b'.repeat(24)}${i}`));
+    agent._newPatchDomParser = () => ({ parseFromString: () => stubDoc(many) });
+    const bounded = agent._slideStructureSummary('<div></div>');
+    assert.ok(bounded.length <= 300);
+    assert.ok(bounded.split(',').length <= 12);
+    assert.ok(bounded.endsWith('…'), 'truncated summaries carry an ellipsis marker');
+    // With short features the entry cap (12) binds before the length cap.
+    const shorts = Array.from({ length: 40 }, () => el('SPAN', 'c'));
+    agent._newPatchDomParser = () => ({ parseFromString: () => stubDoc(shorts) });
+    assert.equal(agent._slideStructureSummary('<span></span>').split(',').length, 12);
+    agent._newPatchDomParser = originalParser;
+  }
+
+  // ---- validate_deck / validate_slide diagnostics summarizer ----
+  {
+    const full = {
+      page: 3, pageId: 's-3', available: true, passed: false,
+      measure: {
+        overflowBoxes: [{ selector: `main.deck`, direction: 'vertical', box: { x: 0, y: 0, w: 10, h: 10 } }],
+        wraps: [{ selector: 'p.a', lines: 2 }, { selector: 'p.b', lines: 3 }],
+        textBoxes: Array.from({ length: 9 }, (_, i) => ({ selector: `p.t${i}`, box: { x: i, y: i, w: 10, h: 10 }, fontPx: 30 })),
+        textBoxesTruncated: true,
+      },
+      issues: [{ code: 'RENDER_VERTICAL_OVERFLOW', severity: 'error' }, { code: 'RENDER_FONT_TOO_SMALL', severity: 'error' }, { code: 'X', severity: 'warning' }],
+    };
+    const summary = agent._diagnosticsSummary(full);
+    // Count-level measure digest only: no full textBoxes/wraps arrays leak.
+    assert.deepEqual(JSON.parse(JSON.stringify(summary.measure)), { overflowCount: 1, wrapCount: 2, textBoxCount: 9, textBoxesTruncated: true });
+    const serialized = JSON.stringify(summary);
+    assert.ok(!serialized.includes('textBoxes":[') && !serialized.includes('wraps":[') && !serialized.includes('overflowBoxes":['));
+    assert.equal(summary.issueCount, 3);
+    assert.equal(summary.errorCount, 2);
+    assert.equal(summary.passed, false);
+    assert.equal(summary.available, true);
+    // Selector samples capped at 5 (overflow boxes first, then text boxes).
+    assert.equal(summary.sampleSelectors.length, 5);
+    assert.equal(summary.sampleSelectors[0], 'main.deck');
+    // Sample cap does not exceed 5 even with 60 text boxes.
+    const wide = { ...full, measure: { ...full.measure, textBoxes: Array.from({ length: 60 }, (_, i) => ({ selector: `p.x${i}`, box: { x: 0, y: 0, w: 1, h: 1 } })) } };
+    assert.equal(agent._diagnosticsSummary(wide).sampleSelectors.length, 5);
+    // Missing diagnostics collapse to null (field absent downstream).
+    assert.equal(agent._diagnosticsSummary(null), null);
+    assert.equal(agent._diagnosticsSummary('x'), null);
+  }
+
   console.log('test-patch-applicator: all assertions passed');
 }
 

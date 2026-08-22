@@ -15,8 +15,18 @@
     "deck_lint",
     "resume_run"
   ],
-  "executionStrategies": ["direct_reply", "bounded_tool_loop", "planned_harness", "rules_engine"],
-  "scopes": ["none", "outline", "page", "deck"],
+  "executionStrategies": [
+    "direct_reply",
+    "bounded_tool_loop",
+    "planned_harness",
+    "rules_engine"
+  ],
+  "scopes": [
+    "none",
+    "outline",
+    "page",
+    "deck"
+  ],
   "states": [
     "created",
     "awaiting_user",
@@ -34,7 +44,12 @@
     "cancelled",
     "reverted"
   ],
-  "terminalStates": ["completed", "cancelled", "failed", "reverted"],
+  "terminalStates": [
+    "completed",
+    "cancelled",
+    "failed",
+    "reverted"
+  ],
   "eventTypes": [
     "task_resolved",
     "task_status",
@@ -70,24 +85,87 @@
     "deck.validate",
     "render.diagnostics.v1",
     "task.receipts.v1",
-    "task.revert.v1", "deck.digests.v1",
-    "deck.snapshot.v1", "patch.apply.v1"
+    "task.revert.v1",
+    "deck.digests.v1",
+    "deck.snapshot.v1",
+    "patch.apply.v1",
+    "render.measure.v1"
   ],
   "transitions": {
-    "created": ["awaiting_user", "resolving", "cancelled"],
-    "awaiting_user": ["resolving", "cancelled"],
-    "resolving": ["resolved", "awaiting_user", "failed", "cancelled"],
-    "resolved": ["planning", "ready", "cancelled"],
-    "planning": ["ready", "paused", "failed", "cancelled"],
-    "ready": ["running", "paused", "cancelled"],
-    "running": ["paused", "repairing", "validating", "failed", "cancelled"],
-    "paused": ["planning", "running", "failed", "cancelled"],
-    "repairing": ["running", "validating", "paused", "failed", "cancelled"],
-    "validating": ["completed", "needs_repair", "paused", "failed", "cancelled"],
-    "needs_repair": ["repairing", "failed", "cancelled"],
-    "completed": ["reverted"],
-    "failed": ["planning", "running", "reverted"],
-    "cancelled": ["reverted"],
+    "created": [
+      "awaiting_user",
+      "resolving",
+      "cancelled"
+    ],
+    "awaiting_user": [
+      "resolving",
+      "cancelled"
+    ],
+    "resolving": [
+      "resolved",
+      "awaiting_user",
+      "failed",
+      "cancelled"
+    ],
+    "resolved": [
+      "planning",
+      "ready",
+      "cancelled"
+    ],
+    "planning": [
+      "ready",
+      "paused",
+      "failed",
+      "cancelled"
+    ],
+    "ready": [
+      "running",
+      "paused",
+      "cancelled"
+    ],
+    "running": [
+      "paused",
+      "repairing",
+      "validating",
+      "failed",
+      "cancelled"
+    ],
+    "paused": [
+      "planning",
+      "running",
+      "failed",
+      "cancelled"
+    ],
+    "repairing": [
+      "running",
+      "validating",
+      "paused",
+      "failed",
+      "cancelled"
+    ],
+    "validating": [
+      "completed",
+      "needs_repair",
+      "paused",
+      "failed",
+      "cancelled"
+    ],
+    "needs_repair": [
+      "repairing",
+      "failed",
+      "cancelled"
+    ],
+    "completed": [
+      "reverted"
+    ],
+    "failed": [
+      "planning",
+      "running",
+      "reverted"
+    ],
+    "cancelled": [
+      "reverted"
+    ],
     "reverted": []
   }
 }
