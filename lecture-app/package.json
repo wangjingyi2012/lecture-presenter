@@ -20,6 +20,7 @@
     "test:ppte-template-center": "node scripts/test-ppte-template-center.js",
     "test:ppt-export-gating": "node scripts/test-ppt-export-gating.js",
     "test:ppte-visual": "node scripts/test-ppte-visual-editor.js",
+    "test:patch-applicator": "node scripts/test-patch-applicator.js",
     "test:updater": "node scripts/test-updater.js",
     "build:release": "node scripts/build-obfuscated.js",
     "encrypt-prompts": "node scripts/encrypt-prompts.js"

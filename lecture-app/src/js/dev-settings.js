@@ -32,6 +32,17 @@ window.DevSettings = {
       CourseLoader.saveAppConfig(appConfig);
     });
 
+    // Cloud analysis consent toggle (revocable; granting normally happens via
+    // the consent dialog shown before the first snapshot upload).
+    const snapshotConsent = document.getElementById('setting-snapshot-consent');
+    if (snapshotConsent) {
+      snapshotConsent.checked = appConfig.lectureaiSnapshotConsent === true;
+      snapshotConsent.addEventListener('change', () => {
+        appConfig.lectureaiSnapshotConsent = snapshotConsent.checked === true;
+        CourseLoader.saveAppConfig(appConfig);
+      });
+    }
+
     // Auto-detect buttons
     document.getElementById('setting-detect-terminal').addEventListener('click', async () => {
       if (!window.__TAURI__) return;

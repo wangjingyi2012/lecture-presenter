@@ -190,6 +190,40 @@
     .ln-sys { color: var(--ink-3); font-size: 11.5px; margin: 1px 0; }
     .ln-muted { color: var(--ink-3); }
 
+    /* cloud lint findings stream: one row per finding, neutral styling */
+    .ln-finding {
+      display: block; font-size: 12.5px; line-height: 1.5;
+      color: var(--ink-2); padding: 3px 9px; margin: 1px 0;
+      border-left: 2px solid var(--orange); background: var(--surface);
+      border-radius: 0 var(--radius-chip) var(--radius-chip) 0;
+    }
+    .ln-finding-count { color: var(--ink-3); font-size: 11.5px; margin: 1px 0 4px; font-weight: 600; }
+    .ln-patch {
+      display: block; font-size: 12.5px; line-height: 1.5;
+      color: var(--ink-2); padding: 3px 9px; margin: 1px 0;
+      border-left: 2px solid var(--green); background: var(--surface);
+      border-radius: 0 var(--radius-chip) var(--radius-chip) 0;
+    }
+
+    /* health report card */
+    .wb-health-report {
+      margin: 6px 0; padding: 12px 14px; background: var(--surface);
+      border: 1px solid var(--line); border-radius: var(--radius-card);
+      animation: wb-fade-up 280ms var(--ease-out) both; max-width: 100%;
+    }
+    .wb-health-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+    .wb-health-title { font-weight: 700; color: var(--ink); }
+    .wb-health-count { color: var(--ink-3); font-size: 11.5px; }
+    .wb-health-list { margin: 0; padding: 0 0 0 18px; max-height: 260px; overflow-y: auto; }
+    .wb-health-item { margin: 5px 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); }
+    .wb-health-item-detail { display: block; color: var(--ink-3); font-size: 11.5px; margin-top: 1px; }
+    .wb-health-more { color: var(--ink-3); font-size: 11.5px; margin-top: 4px; }
+    .wb-health-actions { margin-top: 10px; display: flex; justify-content: flex-end; }
+    .wb-health-fix {
+      padding: 6px 16px; border-radius: 8px; border: 1px solid var(--accent);
+      background: var(--accent); color: #fff; cursor: pointer; font-size: 12.5px;
+    }
+
     /* 规范拦截 (policy guard) — a held-back, recoverable step, not a hard failure */
     .ln-guard {
       display: inline-flex; align-items: flex-start; gap: 7px; align-self: flex-start;
@@ -406,8 +440,11 @@
     @media (prefers-reduced-motion: reduce) { .wb-work-dots i { animation: none; opacity: .7; } }
     .wb-task-checklist { margin-top: 8px; }
     .wb-task-checklist[hidden] { display: none; }
-    .wb-checklist-head { font-size: 11px; color: var(--ink-3); margin-bottom: 5px; font-weight: 500; }
+    .wb-checklist-head { font-size: 11px; color: var(--ink-3); margin-bottom: 5px; font-weight: 500; display: flex; align-items: center; gap: 4px; background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; }
+    .wb-checklist-head:hover { color: var(--ink-2); }
+    .wb-checklist-caret { flex: none; width: 10px; }
     .wb-checklist { list-style: none; margin: 0; padding: 0; max-height: 168px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+    .wb-checklist[hidden] { display: none; }
     .wb-checklist-item { display: flex; align-items: center; gap: 7px; padding: 3px 6px; border-radius: 7px; font-size: 11.5px; color: var(--ink-2); }
     .wb-checklist-item.is-active { background: var(--accent-tint); color: var(--accent-ink); }
     .wb-checklist-mark { flex: none; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; }

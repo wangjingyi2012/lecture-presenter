@@ -55,6 +55,8 @@ window.PpteWorkbenchAgent = {
       else if (type === 'pick-ppte') result = await this._pickPpte(req.payload);
       else if (type === 'recent-ppte') result = this._recentPpte();
       else if (type === 'deck-digests') result = await this._deckDigests();
+      else if (type === 'snapshot-consent') result = await this._snapshotConsent();
+      else if (type === 'upload-deck-snapshot') result = await this._uploadDeckSnapshot();
       else result = { error: '未知请求类型 ' + type };
     } catch (e) {
       result = { error: String(e) };
@@ -338,6 +340,74 @@ window.PpteWorkbenchAgent = {
     }
   },
 
+  // One-time consent for uploading the deck to the cloud for analysis. The
+  // choice persists in app-config (lectureaiSnapshotConsent) and can be
+  // revoked from the settings modal; without it nothing is ever uploaded.
+  async _snapshotConsent() {
+    const appConfig = window.CourseLoader?.appConfig || this.appConfig || {};
+    if (appConfig.lectureaiSnapshotConsent === true) return { granted: true };
+    const granted = await this._showSnapshotConsentModal();
+    if (granted) {
+      appConfig.lectureaiSnapshotConsent = true;
+      try { await window.CourseLoader?.saveAppConfig?.(appConfig); } catch (_) { /* in-memory grant still applies */ }
+      const toggle = document.getElementById('setting-snapshot-consent');
+      if (toggle) toggle.checked = true;
+    }
+    return { granted: granted === true };
+  },
+
+  _showSnapshotConsentModal() {
+    const modal = document.getElementById('snapshot-consent-modal');
+    if (!modal) return Promise.resolve(false);
+    if (!this._snapshotConsentWired) {
+      this._snapshotConsentWired = true;
+      const settle = (granted) => {
+        modal.classList.add('hidden');
+        const resolve = this._snapshotConsentResolve;
+        this._snapshotConsentResolve = null;
+        if (resolve) resolve(granted);
+      };
+      document.getElementById('snapshot-consent-accept')?.addEventListener('click', () => settle(true));
+      document.getElementById('snapshot-consent-cancel')?.addEventListener('click', () => settle(false));
+      document.getElementById('snapshot-consent-overlay')?.addEventListener('click', () => settle(false));
+    }
+    return new Promise((resolve) => {
+      // A second request while the dialog is open refuses by default.
+      if (this._snapshotConsentResolve) this._snapshotConsentResolve(false);
+      this._snapshotConsentResolve = resolve;
+      modal.classList.remove('hidden');
+    });
+  },
+
+  // Packs the current deck (after flushing pending editor edits through the
+  // conflict-safe save path, so the snapshot matches what the user sees) and
+  // uploads it for cloud analysis. Returns {snapshotId, deckHash} or {error}.
+  async _uploadDeckSnapshot() {
+    const pb = this._editor()._pptBuilder;
+    if (!pb?.folderPath || !window.__TAURI__?.core?.invoke) return { error: '课件窗口暂时不可用' };
+    try {
+      await this._prepareTaskContext(pb);
+    } catch (error) {
+      return { error: String(error?.message || error) };
+    }
+    const token = window.Auth?.getToken?.() || '';
+    const serverUrl = (window.Auth?.serverUrl || 'https://design.hz-study-system.com').replace(/\/+$/, '');
+    try {
+      return await window.__TAURI__.core.invoke('upload_deck_snapshot', {
+        dirPath: pb.folderPath,
+        token,
+        serverUrl,
+      });
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (message.startsWith('unauthorized:')) {
+        window.Auth?.showLoginModal?.();
+        return { error: '登录状态已失效，请重新登录后再试。' };
+      }
+      return { error: message };
+    }
+  },
+
   _blueprintHtml(pb, roleMeta) {
     const fileName = String(roleMeta?.blueprintFile || '').split('/').pop();
     return fileName ? String(pb?.templateBlueprintSnapshot?.roles?.[fileName] || '') : '';
@@ -509,12 +579,13 @@ window.PpteWorkbenchAgent = {
   _taskMutationTools: new Set([
     'set_deck_plan', 'write_outline', 'render_template', 'apply_role_template',
     'write_slide', 'insert_slide', 'delete_slide', 'reorder_slides', 'finalize_deck', 'use_icon',
+    'apply_patch',
   ]),
 
   _taskResultIsError(value) {
     const text = String(value || '').trim();
     return /(?:执行出错|保存失败|文件冲突|超出范围|缺少 tool|action 解析失败|未知工具|整理成品页序失败|未打开课件)/.test(text)
-      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_outline|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(text);
+      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_outline|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides|apply_patch))\s*(?:失败|错误|出错)/.test(text);
   },
 
   _taskToolDetails(action, value, pb = null) {
@@ -608,6 +679,10 @@ window.PpteWorkbenchAgent = {
       if (nextFile) paths.add(String(nextFile));
     }
     if (tool === 'write_outline') paths.add('outline.md');
+    if (tool === 'apply_patch') {
+      const rel = this._patchSafeRelativePath(action.file);
+      if (rel) paths.add(rel);
+    }
     if (tool === 'set_deck_plan') paths.add('.lectureai/deck-plan.json');
     if (tool === 'use_icon' && /^[^/\\]+$/.test(String(action.file || ''))) paths.add(`resources/${action.file}`);
     return [...paths];
@@ -749,6 +824,18 @@ window.PpteWorkbenchAgent = {
       // unchanged deck may safely retry the action.
     }
 
+    if (action.tool === 'apply_patch') {
+      // Unknown ops or a newer patch vocabulary must end the batch before
+      // anything is written: answer with a terminal, non-retryable receipt.
+      const unsupported = this._patchSupportError(action, taskSpec);
+      if (unsupported) {
+        const failed = { ok: false, actionId, argsHash, tool: action.tool, error: unsupported };
+        this._taskReceipts.set(receiptKey, failed);
+        try { await this._taskJournalReceipt(pb, runId, failed); } catch (_) { /* best-effort */ }
+        return failed;
+      }
+    }
+
     try {
       // Keep the task context attached only in memory; it is never written to
       // the deck. Finalization uses it to enable the strict stable-id path.
@@ -856,6 +943,7 @@ window.PpteWorkbenchAgent = {
         case 'insert_slide': return await this._toolInsertSlide(pb, a);
         case 'delete_slide': return await this._toolDeleteSlide(pb, a);
         case 'reorder_slides': return await this._toolReorderSlides(pb, a);
+        case 'apply_patch': return await this._toolApplyPatch(pb, a);
         case 'finalize_deck': return await this._toolFinalizeDeck(pb, a);
         case 'read_slide': return this._toolReadSlide(pb, a);
         case 'load_skill': return await this._toolLoadSkill(a);
@@ -1456,6 +1544,296 @@ window.PpteWorkbenchAgent = {
     a._taskReceiptDetails = { order: order.map(value => Number(value) - 1), reordered: true };
     return `reorder_slides 已重排为 [${order.join(',')}]。`;
   },
+
+  // ---------- cloud patch applicator ----------
+  // A small, stable patch vocabulary for concrete one-off fixes issued by the
+  // cloud. The desktop only executes patches; every judgement about WHAT to
+  // change stays server-side. DOM ops replay on a clean DOMParser parse of
+  // the slide HTML using element-child index paths from <body> (the same
+  // addressing scheme as the visual editor's ops-replay); the live document
+  // is never touched or serialized.
+  PATCH_VOCABULARY_VERSION: 1,
+  _PATCH_OPS: new Set(['css_set', 'text_replace', 'dom_remove', 'dom_insert', 'attr_set', 'manifest_splice', 'file_write']),
+
+  _patchSupportError(action, taskSpec) {
+    const upgrade = '本次课件优化需要更新版本的 Lecture Presenter，请升级应用后重试。';
+    const rawVersion = action?.vocabularyVersion ?? taskSpec?.vocabularyVersion;
+    const version = Number(rawVersion == null ? this.PATCH_VOCABULARY_VERSION : rawVersion);
+    if (Number.isFinite(version) && version > this.PATCH_VOCABULARY_VERSION) {
+      return { code: 'PATCH_VOCABULARY_UNSUPPORTED', category: 'protocol', retryable: false, userMessage: upgrade };
+    }
+    if (!this._PATCH_OPS.has(String(action?.op || ''))) {
+      return { code: 'PATCH_VOCABULARY_UNSUPPORTED', category: 'protocol', retryable: false, userMessage: upgrade };
+    }
+    return null;
+  },
+
+  // Deck-relative path guard for patch targets: no absolute paths, no drive
+  // letters, no dot segments, bounded depth and length.
+  _patchSafeRelativePath(value) {
+    const raw = String(value || '').trim().replace(/\\/g, '/');
+    if (!raw || raw.length > 200 || raw.startsWith('/') || /^[a-zA-Z]:\//.test(raw)) return '';
+    const parts = raw.split('/');
+    if (parts.length > 8 || parts.some(part => !part || part === '.' || part === '..')) return '';
+    return parts.join('/');
+  },
+
+  _patchTargetSlide(pb, file) {
+    const rel = this._patchSafeRelativePath(file);
+    if (!rel) return null;
+    const index = (pb?.slides || []).findIndex(slide => String(slide?.file || '') === rel);
+    return index >= 0 ? { slide: pb.slides[index], index, file: rel } : null;
+  },
+
+  // Injectable so tests can run DOM ops with a stub parser (the vm sandbox has
+  // no DOMParser; the production path always uses the native one).
+  _newPatchDomParser() {
+    return new DOMParser();
+  },
+
+  _patchResolvePath(doc, path) {
+    if (!doc || !doc.body) return null;
+    if (path === '' || path == null) return doc.body;
+    let node = doc.body;
+    for (const part of String(path).split('/')) {
+      const index = parseInt(part, 10);
+      if (!Number.isFinite(index) || index < 0 || !node.children || index >= node.children.length) return null;
+      node = node.children[index];
+    }
+    return node || null;
+  },
+
+  _patchResolveTarget(doc, a) {
+    const selector = String(a?.selector || '').trim();
+    if (selector && typeof doc.querySelector === 'function') {
+      try { return doc.querySelector(selector); } catch (_) { return null; }
+    }
+    return this._patchResolvePath(doc, a?.path ?? a?.address);
+  },
+
+  async _toolApplyPatch(pb, a) {
+    const op = String(a?.op || '');
+    if (!this._PATCH_OPS.has(op)) return 'apply_patch 失败：当前应用版本不支持本次优化内容，请升级应用后重试。';
+    const baseRevision = String(a?.baseDeckRevision || a?.base_deck_revision || '').trim();
+    if (baseRevision) {
+      // The whole batch is anchored to the deck state the cloud analyzed; any
+      // drift rejects the patch before anything is written.
+      let current = '';
+      try {
+        current = await this._taskDeckRevision(pb, true);
+      } catch (error) {
+        return `apply_patch 失败：${error.message}`;
+      }
+      if (current && baseRevision !== current) {
+        return 'apply_patch 失败：课件已在任务执行期间发生变化，LectureAI 已暂停写入。';
+      }
+    }
+    let applied;
+    if (op === 'manifest_splice') applied = await this._patchManifestSplice(pb, a);
+    else if (op === 'file_write') applied = await this._patchFileWrite(pb, a);
+    else applied = await this._patchDomOp(pb, a, op);
+    if (!applied?.ok) return `apply_patch 失败：${applied?.error || '补丁未应用'}。本轮必须停止。`;
+    await this._refreshAgentPlanRevision(pb);
+    a._taskReceiptDetails = {
+      patchId: String(a?.patchId || a?.patch_id || '') || null,
+      op,
+      label: String(a?.label || '').trim() || null,
+      applied: true,
+      ...(applied.details || {}),
+    };
+    return `apply_patch 已应用：${String(a?.label || '').trim() || op}。`;
+  },
+
+  async _patchDomOp(pb, a, op) {
+    const target = this._patchTargetSlide(pb, a?.file);
+    if (!target) return { ok: false, error: `目标页面 ${String(a?.file || '') || '空'} 不在当前课件页序中` };
+    let doc;
+    try {
+      doc = this._newPatchDomParser().parseFromString(String(target.slide.html || ''), 'text/html');
+    } catch (_) {
+      return { ok: false, error: '页面解析失败' };
+    }
+    if (!doc?.body || !doc.documentElement) return { ok: false, error: '页面解析失败' };
+
+    if (op === 'css_set') {
+      const el = this._patchResolveTarget(doc, a);
+      const property = String(a?.property || '').trim();
+      if (!el) return { ok: false, error: '目标元素不存在' };
+      if (!/^-?[a-zA-Z][a-zA-Z0-9-]*$/.test(property)) return { ok: false, error: '样式属性名无效' };
+      const value = a?.value;
+      if (value == null || value === '') el.style.removeProperty(property);
+      else el.style.setProperty(property, String(value));
+    } else if (op === 'text_replace') {
+      const el = this._patchResolveTarget(doc, a);
+      if (!el) return { ok: false, error: '目标元素不存在' };
+      const oldText = String(a?.old ?? '');
+      if (!oldText) return { ok: false, error: '缺少待替换文本' };
+      const source = String(el.innerHTML ?? '');
+      if (!source.includes(oldText)) return { ok: false, error: '目标文本与当前页面不一致' };
+      el.innerHTML = source.replace(oldText, String(a?.new ?? ''));
+    } else if (op === 'dom_remove') {
+      const el = this._patchResolveTarget(doc, a);
+      if (!el || el === doc.body || !el.parentNode) return { ok: false, error: '目标元素不存在' };
+      el.parentNode.removeChild(el);
+    } else if (op === 'dom_insert') {
+      const anchor = this._patchResolveTarget(doc, a);
+      if (!anchor) return { ok: false, error: '目标元素不存在' };
+      const fragment = String(a?.html || '');
+      if (!fragment.trim()) return { ok: false, error: '缺少插入内容' };
+      const position = String(a?.position || 'append').trim();
+      const tpl = doc.createElement('template');
+      tpl.innerHTML = fragment;
+      const node = tpl.content?.firstElementChild || null;
+      if (!node) return { ok: false, error: '插入内容无效' };
+      if (position === 'append') {
+        anchor.appendChild(node);
+      } else if (position === 'prepend') {
+        anchor.insertBefore(node, anchor.children?.[0] || null);
+      } else if (position === 'before' || position === 'after') {
+        const parent = anchor.parentNode;
+        if (!parent) return { ok: false, error: '目标元素不存在' };
+        const siblings = Array.prototype.slice.call(parent.children || []);
+        const at = siblings.indexOf(anchor);
+        const ref = position === 'before' ? anchor : (siblings[at + 1] || null);
+        parent.insertBefore(node, ref);
+      } else {
+        return { ok: false, error: `不支持的插入位置 ${position}` };
+      }
+    } else if (op === 'attr_set') {
+      const el = this._patchResolveTarget(doc, a);
+      const attr = String(a?.attr || '').trim();
+      if (!el || el === doc.body) return { ok: false, error: '目标元素不存在' };
+      if (!/^[a-zA-Z][a-zA-Z0-9-_.:]*$/.test(attr)) return { ok: false, error: '属性名无效' };
+      const value = a?.value;
+      if (value == null) el.removeAttribute(attr);
+      else el.setAttribute(attr, String(value));
+    } else {
+      return { ok: false, error: '当前应用版本不支持本次优化内容，请升级应用后重试' };
+    }
+
+    const doctype = doc.doctype ? `<!DOCTYPE ${doc.doctype.name}>` : '<!DOCTYPE html>';
+    const html = `${doctype}\n${doc.documentElement.outerHTML}`;
+    const commit = await this._commitAgentMutation(pb, () => {
+      target.slide.html = html;
+      target.slide.dirty = true;
+      if (target.index === pb.currentSlideIndex) {
+        const ta = document.getElementById('ppt-current-html');
+        if (ta) ta.value = html;
+      }
+      return { requiredFiles: [target.file] };
+    });
+    if (!commit.ok) return { ok: false, error: `${commit.error}。已恢复执行前状态` };
+    return { ok: true, details: { page: target.index + 1, file: target.file } };
+  },
+
+  // Page-order ops (delete / reorder / retitle) reusing the same invariants as
+  // delete_slide and reorder_slides. Sub-ops apply sequentially, each seeing
+  // the working order left by the previous one; page numbers are 1-based
+  // against that working order. Slide files stay on disk - only the manifest
+  // order changes.
+  async _patchManifestSplice(pb, a) {
+    const ops = Array.isArray(a?.ops) ? a.ops : null;
+    if (!ops || !ops.length || ops.length > 200) return { ok: false, error: '页序操作清单无效' };
+    const work = [...pb.slides];
+    let deleted = 0;
+    let reordered = false;
+    let retitled = 0;
+    for (const item of ops) {
+      const type = String(item?.type || item?.op || '');
+      if (type === 'delete') {
+        if (!a?._taskRunId || a?._taskSpec?.targets?.allowDelete !== true) {
+          return { ok: false, error: '当前 LectureAI 任务未授权删除页面' };
+        }
+        const page = Number(item?.page);
+        const index = page - 1;
+        if (!Number.isInteger(page) || index < 0 || index >= work.length) return { ok: false, error: `页码 ${item?.page} 超出范围` };
+        if (work.length <= 1) return { ok: false, error: '课件至少需要保留一页' };
+        const slide = work[index];
+        const pageId = String(slide?.id || '').trim();
+        if (item?.pageId != null && String(item.pageId).trim() !== pageId) return { ok: false, error: '页面稳定标识与当前页不一致' };
+        const protection = this._slideDeletionProtection(pb, slide);
+        if (protection) return { ok: false, error: protection };
+        work.splice(index, 1);
+        deleted += 1;
+      } else if (type === 'reorder') {
+        const order = item?.order;
+        if (!Array.isArray(order) || order.length !== work.length) return { ok: false, error: `页序长度需为 ${work.length}` };
+        const next = [];
+        const seen = new Set();
+        let invalid = false;
+        for (const p of order) {
+          const i = (p | 0) - 1;
+          if (i < 0 || i >= work.length || seen.has(i)) { invalid = true; break; }
+          seen.add(i);
+          next.push(work[i]);
+        }
+        if (invalid) return { ok: false, error: '页序含非法或重复页码' };
+        const finish = next.filter(slide => slide.slide_type === 'finish');
+        if (finish.length === 1 && next[next.length - 1] !== finish[0]) return { ok: false, error: '结束页必须保持在最后一页' };
+        work.splice(0, work.length, ...next);
+        reordered = true;
+      } else if (type === 'retitle') {
+        const page = Number(item?.page);
+        const index = page - 1;
+        const title = String(item?.title || '').trim();
+        if (!Number.isInteger(page) || index < 0 || index >= work.length || !title) return { ok: false, error: '改题操作无效' };
+        work[index].title = title;
+        retitled += 1;
+      } else {
+        return { ok: false, error: '页序操作含无效项' };
+      }
+    }
+    if (!work.length) return { ok: false, error: '课件至少需要保留一页' };
+    const oldCurrentId = pb.slides[pb.currentSlideIndex]?.id;
+    const commit = await this._commitAgentMutation(pb, () => {
+      pb.slides = work;
+      pb.manifest.slides = work;
+      const retained = work.findIndex(slide => slide.id === oldCurrentId);
+      pb.currentSlideIndex = retained >= 0 ? retained : Math.min(pb.currentSlideIndex || 0, work.length - 1);
+      pb.manifestDirty = true;
+      return { requiredFiles: [] };
+    });
+    if (!commit.ok) return { ok: false, error: `${commit.error}。已恢复执行前状态` };
+    return { ok: true, details: { deleted, reordered, retitled, slideCount: work.length } };
+  },
+
+  async _patchFileWrite(pb, a) {
+    const rel = this._patchSafeRelativePath(a?.file);
+    if (!rel) return { ok: false, error: '目标路径不安全' };
+    // The manifest changes only via manifest_splice; agent state, immutable
+    // template blueprints and the author's outline are never patch targets.
+    if (rel === 'manifest.json' || rel === 'outline.md' || rel.startsWith('.lectureai/') || rel.startsWith('.ppte-template/')) {
+      return { ok: false, error: '目标文件不允许写入' };
+    }
+    const content = String(a?.content ?? '');
+    const index = (pb.slides || []).findIndex(slide => String(slide?.file || '') === rel);
+    if (index >= 0) {
+      const commit = await this._commitAgentMutation(pb, () => {
+        pb.slides[index].html = content;
+        pb.slides[index].dirty = true;
+        if (index === pb.currentSlideIndex) {
+          const ta = document.getElementById('ppt-current-html');
+          if (ta) ta.value = content;
+        }
+        return { requiredFiles: [rel] };
+      });
+      if (!commit.ok) return { ok: false, error: `${commit.error}。已恢复执行前状态` };
+      return { ok: true, details: { page: index + 1, file: rel } };
+    }
+    // Non-slide assets (stylesheets, resources): the editor holds no in-memory
+    // state for them, and the journal before-write snapshot taken for this
+    // action already covers rollback.
+    try {
+      await window.__TAURI__.core.invoke('write_text_file', {
+        filePath: `${String(pb.folderPath).replace(/[\\/]+$/, '')}/${rel}`,
+        content,
+      });
+    } catch (error) {
+      return { ok: false, error: `写入 ${rel} 失败：${String(error)}` };
+    }
+    return { ok: true, details: { file: rel } };
+  },
+
 
   _normalizedPlanRole(value) {
     const role = String(value || '').trim().toLowerCase();

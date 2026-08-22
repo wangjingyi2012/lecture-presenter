@@ -71,6 +71,11 @@ assert.equal(protocol.receiptDecision(null, { actionId: 'a1', argsHash: 'h1', ex
 const friendly = protocol.friendlyError({ code: 'VALIDATION_FAILED', category: 'validation_failed', userMessage: 'Pi Runtime 的 validate_deck 失败' });
 assert.equal(friendly.userMessage.includes('Pi'), false);
 assert.equal(friendly.userMessage.includes('validate_deck'), false);
+// Mutation tool ids must never leak into user-facing error text either.
+for (const term of ['delete_slide', 'reorder_slides', 'finalize_deck', 'apply_patch']) {
+  const scrubbed = protocol.friendlyError({ code: 'CLIENT_TOOL_FAILED', userMessage: `${term} 失败：目标页不存在` });
+  assert.equal(scrubbed.userMessage.includes(term), false, `${term} must be scrubbed from user-facing errors`);
+}
 const card = protocol.taskCard(validSpec, { status: 'failed', completedPages: 2, totalPages: 3, revertAvailable: true });
 assert.equal(card.canResume, true);
 assert.equal(card.canRetryFailed, true);

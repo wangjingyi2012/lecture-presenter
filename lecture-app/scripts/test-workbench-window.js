@@ -391,6 +391,16 @@ assert.equal(slash.searchSkills('$', 1, skills).items.length, 2, 'a bare $ shoul
 assert.equal(slash.searchSkills('$secu', 5, skills).items[0].id, 'user:security-course');
 assert.equal(slash.applySkillSuggestion('@2 $ppte', 8, 'ppte-layout').value, '@2 $ppte-layout ');
 assert.deepEqual(Array.from(slash.parseSkillNames('$ppte-layout @2 $security-course $ppte-layout')), ['ppte-layout', 'security-course']);
+// /体检 (health-check): Chinese alias parses to the same command and is listed in help
+const healthByAlias = slash.parse('/体检');
+assert.equal(healthByAlias.command.name, 'health-check', 'the Chinese alias resolves to health-check');
+assert.equal(healthByAlias.command.action, 'health-check');
+assert.equal(healthByAlias.instruction, '', 'action commands build no model instruction');
+const healthByName = slash.parse('/health-check 顺便看看字体');
+assert.equal(healthByName.command.name, 'health-check');
+assert.equal(healthByName.args, '顺便看看字体', 'args after the command name are preserved');
+assert.match(slash.helpMarkdown(), /\/体检/);
+assert.ok(slash.search('/体', 2).items.some(item => item.name === 'health-check'), 'the slash menu matches the Chinese alias');
 
 async function testLectureAiRetriesOneTransientUpstreamFailure() {
   const originalSelectedConfig = wb.selectedConfig;
@@ -968,6 +978,38 @@ function testTaskChecklistTracksPerPageStatus() {
   } finally {
     context.document.getElementById = previousGetElementById;
     wb._taskChecklist = previousChecklist;
+  }
+}
+
+function testTaskChecklistCollapseToggle() {
+  const previousGetElementById = context.document.getElementById;
+  const previousChecklist = wb._taskChecklist;
+  const previousLocalStorage = context.localStorage;
+  const host = { hidden: true, innerHTML: '', querySelector() { return null; } };
+  const card = { querySelector: sel => sel === '[data-task-checklist]' ? host : null };
+  try {
+    context.document.getElementById = id => id === 'wb-task-card' ? card : null;
+    wb._buildTaskChecklist({ targetSlideCount: 2, slides: [{ page: 1, title: '封面' }, { page: 2, title: '总结' }] }, {});
+    wb._renderTaskChecklist();
+    assert.match(host.innerHTML, /<ol class="wb-checklist" hidden/, 'checklist starts collapsed by default');
+    assert.match(host.innerHTML, /aria-expanded="false"/);
+    assert.match(host.innerHTML, /生成清单 · 0\/2/, 'collapsed header still shows the progress count');
+
+    const store = new Map();
+    context.localStorage = { getItem: key => store.has(key) ? store.get(key) : null, setItem: (key, value) => store.set(key, String(value)) };
+    wb._setChecklistCollapsed(false);
+    assert.equal(store.get('wb-checklist-collapsed'), '0', 'expanding persists the preference');
+    assert.doesNotMatch(host.innerHTML, /<ol class="wb-checklist" hidden/, 'expanded state renders the page list');
+    assert.match(host.innerHTML, /aria-expanded="true"/);
+
+    wb._setChecklistCollapsed(true);
+    assert.equal(store.get('wb-checklist-collapsed'), '1');
+    assert.match(host.innerHTML, /<ol class="wb-checklist" hidden/, 'collapsing hides the list again');
+  } finally {
+    context.document.getElementById = previousGetElementById;
+    wb._taskChecklist = previousChecklist;
+    if (previousLocalStorage === undefined) delete context.localStorage;
+    else context.localStorage = previousLocalStorage;
   }
 }
 
@@ -2301,6 +2343,311 @@ async function testRulesEngineTaskReadyIsRefused() {
   }
 }
 
+async function testHealthCheckConsentAndSnapshotFlow() {
+  const originals = {
+    rpc: wb._rpc,
+    refresh: wb._refreshContext,
+    append: wb._appendAssistantMarkdown,
+    log: wb._log,
+    setBusy: wb._setBusy,
+    features: wb._loadLectureAiFeatures,
+    resolve: wb._resolveLectureAiTask,
+    runNative: wb._runLectureAiNativeTask,
+    recordTurn: wb._recordTurn,
+    manifest: wb.manifest,
+    selectedConfig: wb.selectedConfig,
+  };
+  const answers = [];
+  const rpcCalls = [];
+  let resolveArgs = null;
+  let ranTask = null;
+  const taskSpec = {
+    schemaVersion: 1, runId: 'run_lint_12345678',
+    intent: 'deck_lint', scope: 'deck',
+    targets: { pages: [], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+    executionStrategy: 'rules_engine', requiresDeckPlan: false,
+    userFacingGoal: '体检整套课件', acceptanceCriteria: [], requiredCapabilities: ['deck.validate'],
+    confidence: 1, requiresClarification: false,
+  };
+  wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'tok' };
+  wb.manifest = { slides: [{ id: 's1', title: '封面', slideType: 'cover' }] };
+  wb._refreshContext = async () => {};
+  wb._loadLectureAiFeatures = async () => {};
+  wb._setBusy = () => {};
+  wb._log = () => {};
+  wb._appendAssistantMarkdown = text => answers.push(text);
+  wb._resolveLectureAiTask = async (input, slashArg, requestRunId, extraPages, snapshotRef) => {
+    resolveArgs = { input, snapshotRef };
+    return taskSpec;
+  };
+  wb._runLectureAiNativeTask = async spec => { ranTask = spec; };
+  wb._recordTurn = () => {};
+  try {
+    // Consent declined: nothing is uploaded and no task is resolved.
+    wb._rpc = async type => { rpcCalls.push(type); return { granted: false }; };
+    await wb._runHealthCheck();
+    assert.deepEqual(rpcCalls, ['snapshot-consent']);
+    assert.equal(resolveArgs, null, 'without consent there is no resolve');
+    assert.equal(ranTask, null, 'without consent nothing runs');
+    assert.match(answers.at(-1), /需要授权云端分析/);
+    assert.match(answers.at(-1), /处理完成即删除/);
+
+    // Consent granted: snapshot uploads once, resolve carries the reference.
+    rpcCalls.length = 0;
+    wb._rpc = async type => {
+      rpcCalls.push(type);
+      if (type === 'snapshot-consent') return { granted: true };
+      if (type === 'upload-deck-snapshot') return { snapshotId: 'snap-1', deckHash: `sha256:${'d'.repeat(64)}` };
+      return null;
+    };
+    await wb._runHealthCheck();
+    assert.deepEqual(rpcCalls, ['snapshot-consent', 'upload-deck-snapshot']);
+    assert.deepEqual(resolveArgs.snapshotRef, { snapshotId: 'snap-1', deckHash: `sha256:${'d'.repeat(64)}` });
+    assert.equal(ranTask?.intent, 'deck_lint', 'the resolved lint task runs on the native task channel');
+
+    // Non-LectureAI provider: guidance instead of a silent upload.
+    rpcCalls.length = 0;
+    wb.selectedConfig = { aiProvider: 'deepseek', aiApiKey: 'k' };
+    await wb._runHealthCheck();
+    assert.equal(rpcCalls.length, 0, 'non-LectureAI providers never touch the snapshot channel');
+    assert.match(answers.at(-1), /LectureAI/);
+  } finally {
+    wb._rpc = originals.rpc;
+    wb._refreshContext = originals.refresh;
+    wb._appendAssistantMarkdown = originals.append;
+    wb._log = originals.log;
+    wb._setBusy = originals.setBusy;
+    wb._loadLectureAiFeatures = originals.features;
+    wb._resolveLectureAiTask = originals.resolve;
+    wb._runLectureAiNativeTask = originals.runNative;
+    wb._recordTurn = originals.recordTurn;
+    wb.manifest = originals.manifest;
+    wb.selectedConfig = originals.selectedConfig;
+    wb.busy = false;
+  }
+}
+
+async function testResolverUploadsSnapshotWhenRequired() {
+  const originals = {
+    rpc: wb._rpc,
+    log: wb._log,
+    manifest: wb.manifest,
+    selectedConfig: wb.selectedConfig,
+    tauri: context.window.__TAURI__,
+    flagsLoaded: wb._featureFlagsLoaded,
+    flags: wb._featureFlags,
+  };
+  const taskSpec = {
+    schemaVersion: 1, runId: 'run_12345678-1234-1234-1234-123456789abc',
+    intent: 'deck_lint', scope: 'deck',
+    targets: { pages: [], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+    executionStrategy: 'rules_engine', requiresDeckPlan: false,
+    userFacingGoal: '体检整套课件',
+    acceptanceCriteria: [{ type: 'no_unplanned_mutation' }],
+    requiredCapabilities: ['deck.validate'], confidence: 0.99, requiresClarification: false,
+  };
+  wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
+  wb.manifest = {
+    deckId: 'deck-snapshot-test',
+    deckRevision: { deckHash: `sha256:${'a'.repeat(64)}` },
+    slides: [{ id: 's1', title: '封面', slideType: 'cover' }],
+    deckPlan: { plan: null },
+  };
+  wb._recentTurns = [];
+  wb._lastTask = null;
+  wb._featureFlagsLoaded = true;
+  wb._featureFlags = {};
+  wb._log = () => {};
+  const requests = [];
+  try {
+    // First resolve asks for a snapshot; the desktop uploads once and
+    // re-resolves carrying the snapshot reference (single extra round-trip).
+    wb._rpc = async type => (type === 'snapshot-consent'
+      ? { granted: true }
+      : { snapshotId: 'snap-9', deckHash: `sha256:${'e'.repeat(64)}` });
+    context.window.__TAURI__ = { core: { invoke: async (command, args) => {
+      assert.equal(command, 'auth_api_request');
+      requests.push(args);
+      return requests.length === 1
+        ? { ok: true, status: 200, data: { requiresSnapshot: true } }
+        : { ok: true, status: 200, data: { taskSpec, status: 'resolved' } };
+    } } };
+    const spec = await wb._resolveLectureAiTask('体检一下');
+    assert.equal(spec.runId, taskSpec.runId);
+    assert.equal(requests.length, 2);
+    assert.equal('snapshotRef' in requests[0].payload, false, 'the first resolve carries no snapshot');
+    assert.deepEqual(requests[1].payload.snapshotRef, { snapshotId: 'snap-9', deckHash: `sha256:${'e'.repeat(64)}` });
+
+    // Declined consent fails the task with guidance instead of uploading.
+    requests.length = 0;
+    context.window.__TAURI__ = { core: { invoke: async () => {
+      requests.push(1);
+      return { ok: true, status: 200, data: { requiresSnapshot: true } };
+    } } };
+    wb._rpc = async () => ({ granted: false });
+    await assert.rejects(() => wb._resolveLectureAiTask('体检一下'), /授权课件云端分析/);
+    assert.equal(requests.length, 1, 'no second resolve happens without consent');
+  } finally {
+    wb._rpc = originals.rpc;
+    wb._log = originals.log;
+    wb.manifest = originals.manifest;
+    wb.selectedConfig = originals.selectedConfig;
+    context.window.__TAURI__ = originals.tauri;
+    wb._featureFlagsLoaded = originals.flagsLoaded;
+    wb._featureFlags = originals.flags;
+  }
+}
+
+async function testFindingStreamAndHealthReport() {
+  const OriginalWebSocket = context.WebSocket;
+  const originals = {
+    config: wb._lecturePiConfig,
+    rpc: wb._rpc,
+    refresh: wb._refreshContext,
+    append: wb._appendAssistantMarkdown,
+    log: wb._log,
+    setBusy: wb._setBusy,
+    complete: wb._completeLectureAiTaskRun,
+    recordOutcome: wb._recordTaskOutcome,
+    send: wb._send,
+    manifest: wb.manifest,
+    tauri: context.window.__TAURI__,
+    getElementById: context.document.getElementById,
+    createElement: context.document.createElement,
+    deckPath: wb._deckPath,
+    progress: wb._updateTaskProgressSummary,
+  };
+  const answers = [];
+  const logs = [];
+  const progressSummaries = [];
+  const created = [];
+  const messages = {
+    children: [],
+    appendChild(el) { el.parentNode = this; this.children.push(el); },
+    insertBefore(el, ref) {
+      el.parentNode = this;
+      const i = this.children.indexOf(ref);
+      if (i >= 0) this.children.splice(i, 0, el);
+      else this.children.push(el);
+    },
+    get lastElementChild() { return this.children[this.children.length - 1] || null; },
+    scrollTop: 0,
+    scrollHeight: 0,
+  };
+  const input = { value: '' };
+  let sent = 0;
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    constructor() {
+      this.readyState = FakeWebSocket.CONNECTING;
+      setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen(); }, 0);
+    }
+    send(raw) {
+      const message = JSON.parse(raw);
+      if (message.type !== 'start_task') return;
+      setTimeout(() => {
+        this.onmessage({ data: JSON.stringify({ type: 'finding', page: 3, text: '第 3 页发现渐变背景' }) });
+        this.onmessage({ data: JSON.stringify({ type: 'finding', page: 7, text: '第 7 页字号超出主题梯度' }) });
+        this.onmessage({ data: JSON.stringify({ type: 'patch_applied', applied: 1, total: 2, label: '已修复第 3 页背景' }) });
+        this.onmessage({ data: JSON.stringify({ type: 'progress', routeChange: '已切换到更细致的处理方式' }) });
+        this.onmessage({ data: JSON.stringify({
+          type: 'task_complete', runId: 'run_lint_stream_12345678', summary: '体检完成',
+          report: {
+            findings: [
+              { page: 3, text: '第 3 页发现渐变背景', detail: '建议替换为纯色背景', fixable: true },
+              { page: 7, text: '第 7 页字号超出主题梯度', fixable: true },
+            ],
+            fixInstruction: '请修复这次体检发现的问题',
+          },
+        }) });
+      }, 0);
+    }
+    close() { this.readyState = 3; }
+  }
+  context.WebSocket = FakeWebSocket;
+  context.window.__TAURI__ = { core: { invoke: async () => ({ ok: true }) } };
+  context.document.getElementById = id => (id === 'wb-messages' ? messages : (id === 'wb-input' ? input : null));
+  context.document.createElement = () => {
+    const el = {
+      className: '', textContent: '', innerHTML: '', type: '', onclick: null, parentNode: null,
+      _actions: { appended: [], appendChild(child) { this.appended.push(child); } },
+      querySelector(selector) { return selector === '.wb-health-actions' ? this._actions : null; },
+    };
+    created.push(el);
+    return el;
+  };
+  wb._lecturePiConfig = () => ({ url: 'wss://example.test/task', token: 'task-token' });
+  wb._rpc = async () => ({ ok: true });
+  wb._refreshContext = async () => {};
+  wb._appendAssistantMarkdown = text => answers.push(text);
+  wb._log = (type, text) => logs.push({ type, text });
+  wb._setBusy = () => {};
+  wb._completeLectureAiTaskRun = async () => ({ status: 'completed' });
+  wb._recordTaskOutcome = () => {};
+  wb._send = async () => { sent += 1; };
+  wb._deckPath = null;
+  wb._updateTaskProgressSummary = (value, runId) => {
+    progressSummaries.push(String(value));
+    return originals.progress.call(wb, value, runId);
+  };
+  wb.manifest = {
+    deckId: 'deck-lint-stream',
+    deckRevision: { deckHash: `sha256:${'a'.repeat(64)}` },
+    slides: [{ id: 's1', title: '封面', slideType: 'cover' }],
+  };
+  const taskSpec = {
+    schemaVersion: 1, runId: 'run_lint_stream_12345678',
+    intent: 'deck_lint', scope: 'deck',
+    targets: { pages: [], outline: false, allowInsert: false, allowDelete: false, allowReorder: false },
+    executionStrategy: 'rules_engine', requiresDeckPlan: false,
+    userFacingGoal: '体检整套课件', acceptanceCriteria: [], requiredCapabilities: ['deck.validate'],
+    confidence: 1, requiresClarification: false,
+  };
+  try {
+    await wb._runLectureAiNativeTask(taskSpec, '对整套课件做一次全面体检');
+    const classes = messages.children.map(el => el.className);
+    assert.equal(classes.filter(name => name === 'ln ln-finding').length, 2, 'each finding streams as its own row');
+    const counter = messages.children.find(el => el.className === 'ln ln-finding-count');
+    assert.equal(counter?.textContent, '已发现 2 项');
+    assert.ok(classes.includes('ln ln-patch'), 'applied patches stream as rows');
+    assert.ok(progressSummaries.includes('已修复 1/2'), 'patch progress reaches the task card summary');
+    assert.ok(progressSummaries.includes('已发现 2 项问题'));
+    assert.ok(logs.some(entry => entry.type === 'sys' && /更细致的处理方式/.test(entry.text)), 'route changes surface as a status line');
+    const report = messages.children.find(el => el.className === 'wb-health-report');
+    assert.ok(report, 'a completed lint task renders the health report card');
+    assert.match(report.innerHTML, /第 3 页发现渐变背景/);
+    assert.match(report.innerHTML, /建议替换为纯色背景/, 'per-item explanations render');
+    assert.match(report.innerHTML, /共发现 2 项/);
+    const fixButton = report._actions.appended[0];
+    assert.equal(fixButton.textContent, '一键修复');
+    fixButton.onclick();
+    assert.equal(input.value, '请修复这次体检发现的问题', 'the fix button feeds the instruction into the input');
+    assert.equal(sent, 1, 'the fix button submits the instruction');
+    assert.match(answers.at(-1), /任务已完成/);
+  } finally {
+    context.WebSocket = OriginalWebSocket;
+    context.window.__TAURI__ = originals.tauri;
+    context.document.getElementById = originals.getElementById;
+    context.document.createElement = originals.createElement;
+    wb._lecturePiConfig = originals.config;
+    wb._rpc = originals.rpc;
+    wb._refreshContext = originals.refresh;
+    wb._appendAssistantMarkdown = originals.append;
+    wb._log = originals.log;
+    wb._setBusy = originals.setBusy;
+    wb._completeLectureAiTaskRun = originals.complete;
+    wb._recordTaskOutcome = originals.recordOutcome;
+    wb._send = originals.send;
+    wb._deckPath = originals.deckPath;
+    wb._updateTaskProgressSummary = originals.progress;
+    wb.manifest = originals.manifest;
+    wb._lintFindings = [];
+    wb._lintFindingCountEl = null;
+    wb.busy = false;
+  }
+}
+
 async function testUncertainOutcomeRendersThreePartGuidance() {
   const OriginalWebSocket = context.WebSocket;
   const originals = {
@@ -3562,6 +3909,7 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
   testStructuredTaskReceiptDetails();
   testTaskProgressSummaryIsScopedAndFriendly();
   testTaskChecklistTracksPerPageStatus();
+  testTaskChecklistCollapseToggle();
   await testTaskProgressSaveStaysWithOriginalDeck();
   await testValidationDiagnosticsRemainSuccessfulToolReceipts();
   await testCancelledSaveRollsBackAgentMutation();
@@ -3587,6 +3935,9 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
   await testResolverDeckDigestsFollowFeatureFlag();
   await testRulesEngineTaskRunsMutationsWithoutPlannedHarness();
   await testRulesEngineTaskReadyIsRefused();
+  await testHealthCheckConsentAndSnapshotFlow();
+  await testResolverUploadsSnapshotWhenRequired();
+  await testFindingStreamAndHealthReport();
   await testUncertainOutcomeRendersThreePartGuidance();
   await testTaskCompletePayloadLeavesSummaryToServer();
   await testAgentDeckDigestsEnumerateSlidesAndStarters();

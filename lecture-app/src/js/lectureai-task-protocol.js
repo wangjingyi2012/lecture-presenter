@@ -15,9 +15,9 @@
     scopes: Object.freeze(['none', 'outline', 'page', 'deck']),
     states: Object.freeze(['created', 'awaiting_user', 'resolving', 'resolved', 'planning', 'ready', 'running', 'paused', 'repairing', 'validating', 'needs_repair', 'completed', 'failed', 'cancelled', 'reverted']),
     terminalStates: Object.freeze(['completed', 'cancelled', 'failed', 'reverted']),
-    eventTypes: Object.freeze(['task_resolved', 'task_status', 'progress', 'tool_call', 'tool_result', 'validation', 'task_completed', 'task_paused', 'task_failed', 'task_reverted']),
+    eventTypes: Object.freeze(['task_resolved', 'task_status', 'progress', 'finding', 'patch_applied', 'tool_call', 'tool_result', 'validation', 'task_completed', 'task_paused', 'task_failed', 'task_reverted']),
     errorCategories: Object.freeze(['model_correctable', 'stale_state', 'permission', 'quota', 'transient', 'client_unavailable', 'validation_failed', 'protocol']),
-    capabilities: Object.freeze(['deck.plan.v3', 'slide.read', 'slide.write.transactional', 'slide.insert', 'slide.delete', 'slide.reorder', 'outline.write', 'deck.validate', 'render.diagnostics.v1', 'task.receipts.v1', 'task.revert.v1', 'deck.digests.v1']),
+    capabilities: Object.freeze(['deck.plan.v3', 'slide.read', 'slide.write.transactional', 'slide.insert', 'slide.delete', 'slide.reorder', 'outline.write', 'deck.validate', 'render.diagnostics.v1', 'task.receipts.v1', 'task.revert.v1', 'deck.digests.v1', 'deck.snapshot.v1', 'patch.apply.v1']),
     transitions: Object.freeze({
       created: ['awaiting_user', 'resolving', 'cancelled'],
       awaiting_user: ['resolving', 'cancelled'],
@@ -38,7 +38,7 @@
   });
 
   const WRITE_INTENTS = new Set(['outline_write', 'slide_edit', 'slide_insert', 'deck_cleanup', 'deck_rewrite']);
-  const INTERNAL_TERMS = /\b(?:pi(?:\s+(?:agent|runtime))?|runtime|write_slide|insert_slide|render_template|validate_slide|validate_deck|set_deck_plan)\b/gi;
+  const INTERNAL_TERMS = /\b(?:pi(?:\s+(?:agent|runtime))?|runtime|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|render_template|validate_slide|validate_deck|set_deck_plan|apply_patch)\b/gi;
   const FRIENDLY_ERRORS = Object.freeze({
     STALE_DECK: '课件已在任务执行期间发生变化，LectureAI 已暂停写入。',
     PROTOCOL_ACTION_CONFLICT: '任务回执不一致，LectureAI 已停止本轮操作。',

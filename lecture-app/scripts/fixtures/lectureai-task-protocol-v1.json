@@ -39,6 +39,8 @@
     "task_resolved",
     "task_status",
     "progress",
+    "finding",
+    "patch_applied",
     "tool_call",
     "tool_result",
     "validation",
@@ -68,7 +70,8 @@
     "deck.validate",
     "render.diagnostics.v1",
     "task.receipts.v1",
-    "task.revert.v1", "deck.digests.v1"
+    "task.revert.v1", "deck.digests.v1",
+    "deck.snapshot.v1", "patch.apply.v1"
   ],
   "transitions": {
     "created": ["awaiting_user", "resolving", "cancelled"],

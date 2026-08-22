@@ -1711,6 +1711,81 @@ fn zip_ppte_directory(dir_path: &str) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
+/// Deck snapshot zips (cloud analysis) use a privacy-oriented exclusion set:
+/// speaker notes (.note), outline.md and local agent state (.lectureai/) never
+/// leave the machine, while .ppte-template/ and .ppte-links/ stay in because
+/// they are part of the rendered deck content.
+fn zip_deck_snapshot_excluded(entry_name_lower: &str, is_dir: bool) -> bool {
+    if is_dir {
+        return entry_name_lower == ".lectureai";
+    }
+    entry_name_lower == ".ds_store"
+        || entry_name_lower == "outline.md"
+        || entry_name_lower.ends_with(".note")
+}
+
+const DECK_SNAPSHOT_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Packs a PPTE directory into an in-memory zip for cloud analysis, keeping
+/// relative paths with forward slashes on every platform. The uncompressed
+/// total is capped so an oversized deck fails fast instead of uploading.
+fn zip_deck_snapshot_with_limit(dir_path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+
+    let root = std::path::Path::new(dir_path);
+    if !root.is_dir() {
+        return Err(format!("PPTE 目录不存在：{}", dir_path));
+    }
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(&mut buf);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut total_bytes: u64 = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .map_err(|e| format!("读取目录失败 {}：{}", dir.display(), e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let entry_name = entry.file_name().to_string_lossy().to_lowercase();
+            if path.is_dir() {
+                if !zip_deck_snapshot_excluded(&entry_name, true) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if zip_deck_snapshot_excluded(&entry_name, false) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let data = fs::read(&path)
+                .map_err(|e| format!("读取文件失败 {}：{}", path.display(), e))?;
+            total_bytes = total_bytes.saturating_add(data.len() as u64);
+            if total_bytes > max_bytes {
+                return Err(format!(
+                    "课件内容超过云端分析的大小上限（{}MB），未上传",
+                    max_bytes / 1024 / 1024
+                ));
+            }
+            writer.start_file(rel, options).map_err(|e| e.to_string())?;
+            writer.write_all(&data).map_err(|e| e.to_string())?;
+        }
+    }
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(buf.into_inner())
+}
+
+fn zip_deck_snapshot(dir_path: &str) -> Result<Vec<u8>, String> {
+    zip_deck_snapshot_with_limit(dir_path, DECK_SNAPSHOT_MAX_BYTES)
+}
+
 /// Pulls the {"detail": "..."} message out of an error response body, falling
 /// back to the raw text when it is not JSON.
 fn response_detail(text: &str) -> String {
@@ -1785,6 +1860,85 @@ async fn export_pptx_editable(
         .await
         .map_err(|e| format!("导出结果读取失败：{}", e))?;
     save_pptx_with_dialog(&app_handle, &default_name, bytes.to_vec())
+}
+
+/// Uploads a deck snapshot zip for cloud analysis. Mirrors the
+/// export_pptx_editable upload pattern: Bearer auth, an "unauthorized: "
+/// prefix on 401 so the frontend can pop the login modal, and a 300s timeout.
+/// Returns the server-issued {"snapshotId", "deckHash"} pair.
+#[tauri::command]
+async fn upload_deck_snapshot(
+    dir_path: String,
+    token: String,
+    server_url: String,
+) -> Result<serde_json::Value, String> {
+    if token.trim().is_empty() {
+        return Err("unauthorized: 云端分析需要先登录".to_string());
+    }
+    let zip_bytes = zip_deck_snapshot(&dir_path)?;
+
+    let server = server_url.trim_end_matches('/');
+    let file_part = reqwest::multipart::Part::bytes(zip_bytes)
+        .file_name("deck.zip")
+        .mime_str("application/zip")
+        .map_err(|e| e.to_string())?;
+    let form = reqwest::multipart::Form::new().part("file", file_part);
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .post(format!("{}/api/web/ai/decks/snapshot", server))
+        .bearer_auth(token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("云端分析服务连接失败：{}", e))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("云端分析服务响应读取失败：{}", e))?;
+    if status.as_u16() == 401 {
+        let detail = response_detail(&text);
+        return Err(format!(
+            "unauthorized: {}",
+            if detail.trim().is_empty() { "登录状态已失效，请重新登录".to_string() } else { detail }
+        ));
+    }
+    if !status.is_success() {
+        let detail = response_detail(&text);
+        return Err(if detail.trim().is_empty() {
+            format!("云端分析服务错误（{}）", status.as_u16())
+        } else {
+            detail
+        });
+    }
+
+    let data: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| "云端分析服务返回了无效响应".to_string())?;
+    let snapshot_id = data
+        .get("snapshotId")
+        .or_else(|| data.get("snapshot_id"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let deck_hash = data
+        .get("deckHash")
+        .or_else(|| data.get("deck_hash"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    match (snapshot_id, deck_hash) {
+        (Some(snapshot_id), Some(deck_hash)) => Ok(serde_json::json!({
+            "snapshotId": snapshot_id,
+            "deckHash": deck_hash,
+        })),
+        _ => Err("云端分析服务返回了无效响应".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -5587,6 +5741,60 @@ mod ppte_outline_tests {
     }
 
     #[test]
+    fn deck_snapshot_zip_excludes_notes_outline_and_agent_state() {
+        let dir = unique_temp_dir("deck-snapshot");
+        fs::create_dir_all(dir.join(".ppte-template/roles")).unwrap();
+        fs::create_dir_all(dir.join(".ppte-links/g1/snapshots/abc")).unwrap();
+        fs::create_dir_all(dir.join(".lectureai")).unwrap();
+        fs::create_dir_all(dir.join("resources")).unwrap();
+        fs::write(dir.join("manifest.json"), r#"{"title":"t","slides":[]}"#).unwrap();
+        fs::write(dir.join("slide01.html"), "<h1>One</h1>").unwrap();
+        fs::write(dir.join("slide01.note"), "speaker notes stay local").unwrap();
+        fs::write(dir.join("outline.md"), "# 章纲").unwrap();
+        fs::write(dir.join(".DS_Store"), b"junk").unwrap();
+        fs::write(dir.join(".lectureai").join("deck-plan.json"), "{}").unwrap();
+        fs::write(dir.join(".ppte-template/roles/cover.html"), "cover").unwrap();
+        fs::write(dir.join(".ppte-links/g1/snapshots/abc/slide02.html"), "linked").unwrap();
+        fs::write(dir.join("resources/logo.svg"), "<svg/>").unwrap();
+
+        let bytes = zip_deck_snapshot(dir.to_string_lossy().as_ref()).unwrap();
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"slide01.html".to_string()));
+        assert!(names.contains(&"manifest.json".to_string()));
+        // Template blueprints and linked snapshots are rendered content and
+        // must ride along; forward slashes on every platform.
+        assert!(names.contains(&".ppte-template/roles/cover.html".to_string()));
+        assert!(names.contains(&".ppte-links/g1/snapshots/abc/slide02.html".to_string()));
+        assert!(names.contains(&"resources/logo.svg".to_string()));
+        assert!(!names.iter().any(|n| n.ends_with(".note")), "speaker notes must never upload");
+        assert!(!names.iter().any(|n| n.ends_with("outline.md")));
+        assert!(!names.iter().any(|n| n.ends_with(".DS_Store")));
+        assert!(!names.iter().any(|n| n.contains(".lectureai")));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deck_snapshot_zip_enforces_size_limit() {
+        let dir = unique_temp_dir("deck-snapshot-limit");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("slide01.html"), "0123456789").unwrap();
+        fs::write(dir.join("slide02.html"), "0123456789").unwrap();
+
+        let result = zip_deck_snapshot_with_limit(dir.to_string_lossy().as_ref(), 15);
+        assert!(result.is_err(), "an over-limit deck must be rejected");
+        assert!(result.unwrap_err().contains("上限"));
+        // Under the limit the same folder packs fine.
+        assert!(zip_deck_snapshot_with_limit(dir.to_string_lossy().as_ref(), 1024).is_ok());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn deck_file_hashes_are_deterministic_and_folder_scoped() {
         let dir = unique_temp_dir("deck-hashes");
         fs::create_dir_all(dir.join(".ppte-template/roles")).unwrap();
@@ -8720,6 +8928,7 @@ pub fn run() {
             ppte_download_icon,
             save_pptx_file,
             export_pptx_editable,
+            upload_deck_snapshot,
             list_ppt_templates,
             list_deck_templates_builtin,
             get_deck_template_preview,

@@ -2665,6 +2665,81 @@ html, body {
   padding: 18px 22px;
 }
 
+/* ===== Cloud analysis consent dialog ===== */
+#snapshot-consent-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#snapshot-consent-modal.hidden {
+  display: none;
+}
+
+#snapshot-consent-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+#snapshot-consent-dialog {
+  position: relative;
+  width: min(440px, calc(100vw - 48px));
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#snapshot-consent-text {
+  margin: 0;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+#snapshot-consent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 0 22px 18px;
+}
+
+#snapshot-consent-actions button {
+  padding: 7px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+#snapshot-consent-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.dev-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-weight: normal;
+}
+
 /* ===== Markdown Container ===== */
 #md-container {
   flex: 1;

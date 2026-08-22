@@ -270,7 +270,7 @@ window.WorkbenchWindow = {
     const intent = {
       answer: '回答课件问题', outline_write: '整理课件大纲', slide_edit: '修改目标页面',
       slide_insert: '新增课件页面', deck_cleanup: '整理整套课件', deck_rewrite: '重做整套课件',
-      deck_validate: '检查整套课件', resume_run: '继续上次任务',
+      deck_validate: '检查整套课件', deck_lint: '体检整套课件', resume_run: '继续上次任务',
     }[String(run?.intent || spec?.intent || '')];
     return String(run?.userFacingGoal || spec?.userFacingGoal || intent || 'LectureAI 任务').replace(/[\r\n]+/g, ' ').slice(0, 180);
   },
@@ -389,6 +389,20 @@ window.WorkbenchWindow = {
     this._renderTaskChecklist();
   },
 
+  // Checklist collapse preference: collapsed by default (the list eats vertical
+  // space during long generations), persisted across sessions.
+  _checklistCollapsed() {
+    try {
+      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('wb-checklist-collapsed') : null;
+      return stored !== '0';
+    } catch (_) { return true; }
+  },
+
+  _setChecklistCollapsed(collapsed) {
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem('wb-checklist-collapsed', collapsed ? '1' : '0'); } catch (_) { /* non-DOM env */ }
+    this._renderTaskChecklist();
+  },
+
   _renderTaskChecklist() {
     const card = document.getElementById?.('wb-task-card');
     const host = card?.querySelector?.('[data-task-checklist]');
@@ -397,11 +411,15 @@ window.WorkbenchWindow = {
     if (!list || !list.pages.length) { host.hidden = true; host.innerHTML = ''; return; }
     host.hidden = false;
     const doneCount = list.pages.filter(entry => entry.status === 'done').length;
+    const collapsed = this._checklistCollapsed();
     host.innerHTML = `
-      <div class="wb-checklist-head">生成清单 · ${doneCount}/${list.pages.length}</div>
-      <ol class="wb-checklist">
+      <button type="button" class="wb-checklist-head" data-checklist-toggle aria-expanded="${collapsed ? 'false' : 'true'}"><span class="wb-checklist-caret" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>生成清单 · ${doneCount}/${list.pages.length}</button>
+      <ol class="wb-checklist"${collapsed ? ' hidden' : ''}>
         ${list.pages.map(entry => `<li class="wb-checklist-item is-${entry.status}" data-checklist-page="${entry.page}"><span class="wb-checklist-mark" aria-hidden="true">${this._checklistGlyph(entry.status)}</span><span class="wb-checklist-page">P${entry.page}</span><span class="wb-checklist-title" title="${this._escape(entry.title)}">${this._escape(entry.title)}</span></li>`).join('')}
       </ol>`;
+    const toggle = host.querySelector?.('[data-checklist-toggle]');
+    if (toggle) toggle.onclick = () => this._setChecklistCollapsed(!this._checklistCollapsed());
+    if (collapsed) return;
     const active = host.querySelector?.('.wb-checklist-item.is-active');
     if (active?.scrollIntoView) { try { active.scrollIntoView({ block: 'nearest' }); } catch (_) { /* non-DOM env */ } }
   },
@@ -480,6 +498,7 @@ window.WorkbenchWindow = {
       delete_slide: `正在移除${pageText}`,
       reorder_slides: '正在调整页面顺序',
       finalize_deck: '正在整理最终页面顺序',
+      apply_patch: `正在应用云端优化建议${args?.label ? `：${String(args.label).slice(0, 60)}` : ''}`,
       validate_slide: `正在检查${pageText}的内容、版式和动效`,
       validate_deck: '正在检查整套课件',
     }[String(tool || '')] || '正在处理当前任务步骤';
@@ -1437,7 +1456,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
     })}\n任务类型、范围和验收条件由服务端确定；只能在 targets 允许的范围内行动。`;
   },
 
-  async _resolveLectureAiTask(input, slash = null, requestRunId = null, extraPages = null) {
+  async _resolveLectureAiTask(input, slash = null, requestRunId = null, extraPages = null, snapshotRef = null) {
     const protocol = window.LectureAiTaskProtocol;
     if (!protocol) throw new Error('当前客户端缺少 LectureAI 任务协议，请升级后重试。');
     const selected = this.selectedConfig || this.aiConfig || {};
@@ -1485,6 +1504,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       resumeRunId,
       failedPages: Array.isArray(resumePlan?.execution?.failedPages) ? resumePlan.execution.failedPages : [],
     };
+    if (snapshotRef?.snapshotId) payload.snapshotRef = snapshotRef;
     if (this._featureEnabled('lectureai_deck_digests_v1')) {
       // Content digests let the server route purely on local facts (e.g.
       // untouched starter placeholders) without shipping any detection logic
@@ -1520,10 +1540,173 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       const structured = detail && typeof detail === 'object' ? detail : response?.data;
       throw new Error(protocol.friendlyError(structured || { userMessage: String(detail || 'LectureAI 暂时无法识别任务，请稍后重试。') }).userMessage);
     }
+    // The server can ask for a deck snapshot when it has no cached analysis
+    // for this deck revision. Consent first, upload once, then resolve again
+    // carrying the snapshot reference (at most one extra round-trip).
+    if (response?.data?.requiresSnapshot === true && !snapshotRef) {
+      const uploaded = await this._prepareSnapshotRef();
+      if (!uploaded) {
+        throw new Error('需要先授权课件云端分析：课件将上传至云端进行分析与优化，处理完成即删除。再次发送指令并在授权弹窗中同意即可继续。');
+      }
+      return this._resolveLectureAiTask(input, slash, requestRunId, extraPages, uploaded);
+    }
     const spec = response?.data?.taskSpec;
     const checked = protocol.validateTaskSpec(spec);
     if (!checked.valid) throw new Error(`LectureAI 返回的任务合同无效：${checked.errors.join('；')}`);
     return spec;
+  },
+
+  // Consent-gated deck snapshot upload for cloud analysis. Returns
+  // {snapshotId, deckHash} on success, null when the user has not granted
+  // consent (nothing is uploaded in that case); transport failures throw.
+  async _prepareSnapshotRef() {
+    const consent = await this._rpc('snapshot-consent');
+    if (!consent?.granted) return null;
+    this._log('phase', '正在上传课件用于云端分析…', { skipRecord: true });
+    const uploaded = await this._rpc('upload-deck-snapshot');
+    if (uploaded?.error) throw new Error(String(uploaded.error));
+    const snapshotId = String(uploaded?.snapshotId || '').trim();
+    if (!snapshotId) throw new Error('云端分析暂时不可用，请稍后重试。');
+    return { snapshotId, deckHash: String(uploaded?.deckHash || '') || null };
+  },
+
+  // /体检 (health-check): consent -> snapshot upload -> task resolution with
+  // the snapshot reference -> the usual WebSocket task channel streams the
+  // findings back. No new transport: the task bridge is reused end to end.
+  async _runHealthCheck() {
+    const cfg = this.selectedConfig || this.aiConfig || {};
+    if (cfg.aiProvider !== 'lectureai') {
+      this._appendAssistantMarkdown('体检由 LectureAI 云端完成，请先在模型选择器中切换到 LectureAI 并登录。');
+      return;
+    }
+    this.busy = true;
+    this._stopRequested = false;
+    this._setBusy(true, false);
+    try {
+      await this._refreshContext({ prepareTask: true });
+      if (!this.manifest?.slides?.length) {
+        this._appendAssistantMarkdown('未连接课件。请在主窗口打开一个 PPTE 课件进编辑器，再发送指令。');
+        return;
+      }
+      await this._loadLectureAiFeatures();
+      const snapshotRef = await this._prepareSnapshotRef();
+      if (!snapshotRef) {
+        this._appendAssistantMarkdown([
+          '### 需要授权云端分析',
+          '',
+          '体检需要将课件上传至云端进行分析与优化，处理完成即删除。',
+          '再次发送 `/体检` 并在授权弹窗中同意即可继续；之后可在设置中随时关闭该授权。',
+        ].join('\n'));
+        return;
+      }
+      const instruction = '[斜杠命令 /health-check]\n任务：体检；范围：整套课件。对整套课件做一次全面体检，逐项报告发现的问题。';
+      const taskSpec = await this._resolveLectureAiTask(instruction, { command: { name: 'health-check' } }, null, null, snapshotRef);
+      this._recordTurn({ role: 'user', text: '/体检', pages: [], intent: taskSpec?.intent || null });
+      await this._runLectureAiNativeTask(taskSpec, '对整套课件做一次全面体检');
+    } catch (error) {
+      this._appendAssistantMarkdown(`### 体检未能开始\n\n${this._modelErrorMessage(error)}`);
+    } finally {
+      this.busy = false;
+      this._setBusy(false);
+    }
+  },
+
+  // Streaming lint findings: one row per finding plus a rolling counter that
+  // updates in place. The process feel comes from real findings scrolling by,
+  // never from artificial delays.
+  _logFinding(message, runId = '') {
+    const text = this._statusText(message?.text || message?.summary || message?.label || '');
+    if (!text) return;
+    if (!Array.isArray(this._lintFindings)) this._lintFindings = [];
+    this._lintFindings.push({
+      page: Number.isInteger(Number(message?.page)) && Number(message.page) > 0 ? Number(message.page) : null,
+      text,
+      detail: this._statusText(message?.detail || ''),
+      fixable: message?.fixable !== false,
+    });
+    const count = this._lintFindings.length;
+    const m = document.getElementById?.('wb-messages');
+    if (m) {
+      const el = document.createElement('div');
+      el.className = 'ln ln-finding';
+      el.textContent = text;
+      if (this._lintFindingCountEl && this._lintFindingCountEl.parentNode === m) {
+        m.insertBefore(el, this._lintFindingCountEl);
+        this._lintFindingCountEl.textContent = `已发现 ${count} 项`;
+      } else {
+        m.appendChild(el);
+        const counter = document.createElement('div');
+        counter.className = 'ln ln-finding-count';
+        counter.textContent = `已发现 ${count} 项`;
+        m.appendChild(counter);
+        this._lintFindingCountEl = counter;
+      }
+      this._scroll();
+    }
+    this._updateTaskProgressSummary(`已发现 ${count} 项问题`, runId || this._activeTask?.runId);
+  },
+
+  _logPatchProgress(message, runId = '') {
+    const applied = Number(message?.applied ?? message?.done ?? 0);
+    const total = Number(message?.total ?? 0);
+    const summary = total > 0 ? `已修复 ${applied}/${total}` : `已修复 ${applied} 项`;
+    this._updateTaskProgressSummary(summary, runId || this._activeTask?.runId);
+    const label = this._statusText(message?.label || '');
+    if (!label) return;
+    const m = document.getElementById?.('wb-messages');
+    if (!m) return;
+    const el = document.createElement('div');
+    el.className = 'ln ln-patch';
+    el.textContent = label;
+    m.appendChild(el);
+    this._lintFindingCountEl = null;
+    this._scroll();
+  },
+
+  // Health report card rendered when a lint task completes: finding list with
+  // per-item explanations plus a one-click fix entry that continues as a
+  // normal instruction.
+  _renderHealthReport(terminal = {}) {
+    const report = terminal?.report && typeof terminal.report === 'object' ? terminal.report : {};
+    const rawFindings = Array.isArray(report.findings) && report.findings.length ? report.findings : (this._lintFindings || []);
+    const findings = rawFindings.map(item => ({
+      page: Number.isInteger(Number(item?.page)) && Number(item.page) > 0 ? Number(item.page) : null,
+      text: this._statusText(item?.text || item?.label || ''),
+      detail: this._statusText(item?.detail || ''),
+      fixable: item?.fixable !== false,
+    })).filter(item => item.text);
+    const m = document.getElementById?.('wb-messages');
+    if (!m || !findings.length) return;
+    const fixableCount = findings.filter(item => item.fixable).length;
+    const el = document.createElement('div');
+    el.className = 'wb-health-report';
+    const rows = findings.slice(0, 30).map(item => `
+      <li class="wb-health-item">
+        <span class="wb-health-item-text">${item.page ? `第 ${item.page} 页 · ` : ''}${this._escape(item.text)}</span>
+        ${item.detail ? `<span class="wb-health-item-detail">${this._escape(item.detail)}</span>` : ''}
+      </li>`).join('');
+    el.innerHTML = `
+      <div class="wb-health-head"><span class="wb-health-title">体检报告</span><span class="wb-health-count">共发现 ${findings.length} 项${fixableCount ? ` · 可自动修复 ${fixableCount} 项` : ''}</span></div>
+      <ul class="wb-health-list">${rows}</ul>
+      ${findings.length > 30 ? `<div class="wb-health-more">… 其余 ${findings.length - 30} 项已省略</div>` : ''}
+      <div class="wb-health-actions"></div>`;
+    if (fixableCount > 0) {
+      const instruction = String(report.fixInstruction || '').trim() || '请修复这次体检发现的问题';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'wb-health-fix';
+      button.textContent = '一键修复';
+      button.onclick = () => {
+        if (this.busy) return;
+        const input = document.getElementById('wb-input');
+        if (input) input.value = instruction;
+        this._send();
+      };
+      el.querySelector('.wb-health-actions').appendChild(button);
+    }
+    m.appendChild(el);
+    this._lintFindingCountEl = null;
+    this._scroll();
   },
 
   // ---- @-mention resolution (fetch slide HTML via RPC) ----
@@ -1608,6 +1791,14 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       if (inputEl) inputEl.value = '';
       this._autoResizeInput();
       this._hideSlashMenu();
+      return;
+    }
+    if (slash?.command?.action === 'health-check') {
+      this._appendUser(input, []);
+      if (inputEl) inputEl.value = '';
+      this._autoResizeInput();
+      this._hideSlashMenu();
+      await this._runHealthCheck();
       return;
     }
     const cfg = this.selectedConfig || this.aiConfig || {};
@@ -2509,6 +2700,8 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     const recoveredPlan = recoveredRun?.plan && typeof recoveredRun.plan === 'object' ? recoveredRun.plan : null;
     this._taskProgressRunId = String(taskSpec.runId || '');
     this._taskProgressSummary = this._taskProgressText(recoveredRun?.progressSummary || '正在理解任务目标和当前课件状态');
+    this._lintFindings = [];
+    this._lintFindingCountEl = null;
     this._activeTask = {
       taskSpec,
       runId: taskSpec.runId,
@@ -2578,6 +2771,14 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
           markActivity();
           queue = queue.then(async () => {
             const message = JSON.parse(String(event.data || '{}'));
+            if (message.type === 'finding') {
+              this._logFinding(message, taskSpec.runId);
+              return;
+            }
+            if (message.type === 'patch_applied') {
+              this._logPatchProgress(message, taskSpec.runId);
+              return;
+            }
             if (message.type === 'tool_call') {
               this._updateTaskProgressSummary(message.summary || this._nativeTaskStepSummary(message.tool, message.args), taskSpec.runId);
               if (message.summary) this._logThink(message.summary);
@@ -2606,6 +2807,11 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
               return;
             }
             if (message.type === 'progress' || message.type === 'session_started') {
+              if (message.routeChange) {
+                // Route escalation / de-escalation: the server switched the
+                // execution lane mid-task; surface it as a plain status line.
+                this._log('sys', this._friendlyLabel(message.routeChange) || 'LectureAI 已调整处理方式，继续完成当前任务');
+              }
               if (message.summary) {
                 this._updateTaskProgressSummary(message.summary, taskSpec.runId);
                 this._logThink(message.summary);
@@ -2686,6 +2892,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
       this._recordTaskOutcome('completed', summary);
       this._renderTaskCard({ runId: taskSpec.runId, status: 'completed', userFacingGoal: taskSpec.userFacingGoal }, taskSpec);
       this._appendAssistantMarkdown(`### 任务已完成\n\n${summary}`);
+      if (String(taskSpec.intent) === 'deck_lint') this._renderHealthReport(terminal);
     } catch (error) {
       // An uncertain outcome leaves saved edits behind, so it behaves like a
       // pause (continue + revert available) rather than a plain failure.
@@ -3763,6 +3970,7 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     delete_slide: '删除页面',
     reorder_slides: '调整页面顺序',
     finalize_deck: '整理成品页序',
+    apply_patch: '应用云端优化',
     validate_slide: '校验页面',
     validate_deck: '校验整套课件',
     inspect_slides: '检查页面',
@@ -3935,10 +4143,10 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     if (value instanceof Error) return true;
     if (value && typeof value === 'object' && (value.ok === false || value.passed === false || value.error)) return true;
     const rawText = typeof value === 'string' ? value.trim() : '';
-    if (/^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(rawText)) return true;
+    if (/^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides|apply_patch))\s*(?:失败|错误|出错)/.test(rawText)) return true;
     const text = this._resultDisplayText(value, '').trim();
     return /(?:执行出错|保存失败|文件冲突|超出范围|缺少 tool|action 解析失败|未知工具|整理成品页序失败)/.test(text)
-      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides))\s*(?:失败|错误|出错)/.test(text);
+      || /^(?:\[[^\]]+\]|(?:set_deck_plan|write_slide|insert_slide|delete_slide|reorder_slides|finalize_deck|validate_slide|validate_deck|inspect_slides|apply_patch))\s*(?:失败|错误|出错)/.test(text);
   },
 
   _appendDiff(before, after) {

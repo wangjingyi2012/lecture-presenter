@@ -551,6 +551,13 @@
             </div>
             <div class="dev-field-hint" id="setting-caption-hint">API Key 只保存到系统钥匙串；切换后重新开启字幕生效</div>
           </div>
+          <div class="dev-field">
+            <label>LectureAI 云端分析</label>
+            <div class="dev-field-row">
+              <label class="dev-checkbox"><input type="checkbox" id="setting-snapshot-consent"> 允许将课件上传至云端进行分析与优化</label>
+            </div>
+            <div class="dev-field-hint">课件将上传至云端进行分析与优化，处理完成即删除；关闭后云端体检与自动优化不可用</div>
+          </div>
           <div class="dev-field" style="display:none">
             <label>更新服务器</label>
             <div class="dev-field-row">
@@ -559,6 +566,24 @@
             <div class="dev-field-hint">配置在线更新服务器地址</div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cloud analysis consent dialog. Copy is a draft aligned with the cloud
+       PPTX export wording; final wording pending polish. -->
+  <div id="snapshot-consent-modal" class="hidden">
+    <div id="snapshot-consent-overlay"></div>
+    <div id="snapshot-consent-dialog">
+      <div class="course-modal-header">
+        <span>云端分析授权</span>
+      </div>
+      <div class="settings-modal-body">
+        <p id="snapshot-consent-text">课件将上传至云端进行分析与优化，处理完成即删除。该授权一次生效，之后可在设置中随时关闭。</p>
+      </div>
+      <div id="snapshot-consent-actions">
+        <button id="snapshot-consent-cancel">取消</button>
+        <button id="snapshot-consent-accept" class="primary">同意并继续</button>
       </div>
     </div>
   </div>

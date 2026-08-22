@@ -80,6 +80,14 @@ window.PpteSlashCommands = {
       workflow: '先运行综合检查，再按字体、溢出、密度、卡片、文案的顺序修复。每次修改后重新检查，直到没有阻断问题。',
     },
     {
+      name: 'health-check',
+      title: '体检',
+      aliases: ['体检'],
+      description: '上传课件做整套云端体检，逐项展示发现并可一键修复',
+      action: 'health-check',
+      defaultScope: 'deck',
+    },
+    {
       name: 'help',
       title: '命令帮助',
       description: '查看全部斜杠命令及使用方式',
@@ -114,14 +122,15 @@ window.PpteSlashCommands = {
 
   get(name) {
     const normalized = String(name || '').replace(/^\//, '').toLowerCase();
-    return this.commands.find(command => command.name === normalized) || null;
+    return this.commands.find(command => command.name === normalized
+      || (command.aliases || []).some(alias => String(alias).toLowerCase() === normalized)) || null;
   },
 
   tokenAt(value, caret) {
     const text = String(value || '');
     const end = Math.max(0, Math.min(caret == null ? text.length : caret, text.length));
     const before = text.slice(0, end);
-    const match = before.match(/(^|\s)([\/／][a-z-]*)$/i);
+    const match = before.match(/(^|\s)([\/／][a-z\p{L}-]*)$/iu);
     if (!match) return null;
     const token = match[2];
     return { start: end - token.length, end, token, query: token.slice(1).toLowerCase() };
@@ -196,7 +205,8 @@ window.PpteSlashCommands = {
       if (!token.query) return true;
       return command.name.includes(token.query)
         || command.title.includes(token.query)
-        || command.description.includes(token.query);
+        || command.description.includes(token.query)
+        || (command.aliases || []).some(alias => String(alias).toLowerCase().includes(token.query));
     });
     return { token, items };
   },
@@ -256,7 +266,7 @@ window.PpteSlashCommands = {
 
   parse(input, context = {}) {
     const raw = String(input || '').trim();
-    const match = raw.match(/(^|\s)\/([a-z-]+)(?=\s|$)/i);
+    const match = raw.match(/(^|\s)\/([a-z\p{L}-]+)(?=\s|$)/iu);
     if (!match) return null;
     const command = this.get(match[2]);
     if (!command) return { unknown: match[2], raw };
@@ -272,16 +282,17 @@ window.PpteSlashCommands = {
     if (!pages.length && command.defaultScope === 'current' && Number(context.currentPage) > 0) {
       pages.push(Number(context.currentPage));
     }
+    const invoked = String(match[2]).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const args = raw
-      .replace(new RegExp(`(^|\\s)\\/${command.name}(?=\\s|$)`, 'i'), '$1')
+      .replace(new RegExp(`(^|\\s)\\/${invoked}(?=\\s|$)`, 'iu'), '$1')
       .replace(/\s+/g, ' ')
       .trim();
     const scopeLabel = pages.length ? `第 ${pages.join('、')} 页` : '整套课件';
-    const instruction = command.local ? '' : [
+    const instruction = command.local || command.action ? '' : [
       `[斜杠命令 /${command.name}]`,
       `任务：${command.title}；范围：${scopeLabel}。`,
       command.workflow,
-      `必须使用 inspect_slides {check:"${command.check}"${pages.length ? `,pages:[${pages.join(',')}]` : ''}} 获取确定性结果。只读取和修改检查范围内的页面。检查有问题时自动修复；修改后必须再次调用同一检查，检查通过后才能结束。`,
+      command.check ? `必须使用 inspect_slides {check:"${command.check}"${pages.length ? `,pages:[${pages.join(',')}]` : ''}} 获取确定性结果。只读取和修改检查范围内的页面。检查有问题时自动修复；修改后必须再次调用同一检查，检查通过后才能结束。` : '',
       args ? `用户补充：${args}` : '',
     ].filter(Boolean).join('\n');
     return { command, pages, args, raw, scopeLabel, instruction };
@@ -368,7 +379,7 @@ window.PpteSlashCommands = {
 
   helpMarkdown() {
     const rows = this.commands
-      .map(command => `| \`/${command.name}\` | ${command.description} | ${command.local ? '本地' : (command.defaultScope === 'current' ? '当前页' : '整套课件')} |`)
+      .map(command => `| \`/${command.name}\`${(command.aliases || []).length ? `（${command.aliases.map(alias => `\`/${alias}\``).join(' ')}）` : ''} | ${command.description} | ${command.local ? '本地' : (command.defaultScope === 'current' ? '当前页' : '整套课件')} |`)
       .join('\n');
     return `### 可用斜杠命令\n\n| 命令 | 作用 | 默认范围 |\n|---|---|---|\n${rows}\n\n用 \`@页码\` 限定范围，例如 \`@3 /font-check\`。从单页“AI助手”进入时，\`/concept-animate\` 默认处理当前页。`;
   },
