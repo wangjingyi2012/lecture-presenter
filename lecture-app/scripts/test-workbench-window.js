@@ -44,6 +44,7 @@ assert.ok(wb, 'WorkbenchWindow should be defined');
 assert.ok(slash, 'PpteSlashCommands should be defined');
 assert.equal('maxToolRounds' in wb, false, 'deck-level Agent must not have a fixed tool-round cap');
 assert.match(htmlSource, /id="wb-stop"/, 'workbench needs a user-visible stop control');
+assert.match(htmlSource, /id="wb-lecture-mode"[\s\S]*LectureAI · 自动[\s\S]*LectureAI · 快速[\s\S]*LectureAI · 深度/, 'admins need explicit auto, fast and deep LectureAI test modes');
 assert.match(htmlSource, /\.wb-task-card-summary[^}]*white-space:\s*normal[^}]*-webkit-line-clamp:\s*3/s, 'task summaries must remain readable in the narrow workbench window');
 assert.match(htmlSource, /\.wb-task-checklist\b/, 'per-page checklist needs its own styles in the task card');
 assert.match(source, /recoveryRounds > 3/, 'protocol recovery must stop before an infinite paid loop');
@@ -56,6 +57,7 @@ assert.match(source, /用户取消了当前任务/);
 assert.match(source, /_turnGeneration/);
 assert.match(source, /上游模型暂时不可用，1\.2s 后自动重试/, 'transient LectureAI failures should expose the automatic retry phase');
 assert.match(source, /task_resolve/, 'LectureAI turns must resolve a server-owned TaskSpec first');
+assert.match(source, /实际模型：/, 'admin task cards should reveal the actual routed model for A/B testing');
 assert.match(source, /taskSpec\.scope === 'deck'/, 'TaskSpec scope must drive deck routing');
 assert.match(source, /taskSpec\.requiresDeckPlan === true/, 'TaskSpec must drive the plan requirement');
 assert.doesNotMatch(htmlSource, /课件级 Agent|从其他 Agent/, 'workbench chrome must not expose internal agent terminology');
@@ -3400,6 +3402,8 @@ async function testLectureAiTaskResolverRequest() {
   const previousWait = wb._wait;
   const previousLog = wb._log;
   const previousTurns = wb._recentTurns;
+  const previousMode = wb.lectureAiMode;
+  const previousIsAdmin = wb._isAdmin;
   let request = null;
   let attempts = 0;
   const taskSpec = {
@@ -3432,6 +3436,8 @@ async function testLectureAiTaskResolverRequest() {
     { role: 'assistant', text: '优化第 2 页：任务已完成', pages: [2], intent: 'slide_edit' },
   ];
   wb.selectedConfig = { aiProvider: 'lectureai', aiApiKey: 'test-token' };
+  wb._isAdmin = true;
+  wb.lectureAiMode = 'deep';
   wb.currentPage = 2;
   wb.manifest = {
     folderPath: '/private/local/deck',
@@ -3448,6 +3454,7 @@ async function testLectureAiTaskResolverRequest() {
     assert.equal(request.args.action, 'task_resolve');
     assert.equal(request.args.payload.clientKind, 'desktop');
     assert.equal(request.args.payload.clientVersion, '2.2.4');
+    assert.equal(request.args.payload.modelMode, 'deep', 'admin test mode must reach the server task resolver');
     assert.equal(request.args.payload.requestRunId, 'run_request_12345678');
     assert.equal(request.args.payload.deckRevision, `sha256:${'a'.repeat(64)}`);
     assert.deepEqual(request.args.payload.mentions.pages, [2]);
@@ -3467,6 +3474,8 @@ async function testLectureAiTaskResolverRequest() {
     wb._wait = previousWait;
     wb._log = previousLog;
     wb._recentTurns = previousTurns;
+    wb.lectureAiMode = previousMode;
+    wb._isAdmin = previousIsAdmin;
   }
 }
 

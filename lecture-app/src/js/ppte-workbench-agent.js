@@ -185,6 +185,7 @@ window.PpteWorkbenchAgent = {
       aiConfig: settingsConfig,
       providers,
       defaultProvider,
+      isAdmin: window.Auth?.isAdmin?.() === true,
       lectureAiServerUrl: window.Auth?.serverUrl || 'https://design.hz-study-system.com',
       prefillPage: this._pendingPrefill,
       currentPage: pb ? (pb.currentSlideIndex || 0) + 1 : null,

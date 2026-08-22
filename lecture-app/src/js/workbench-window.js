@@ -54,6 +54,8 @@ window.WorkbenchWindow = {
   _featureFlagsLoaded: false,
   _featureFlagsToken: '',
   _lectureAiWebSocketUrl: '',
+  _isAdmin: false,
+  lectureAiMode: 'auto',
 
   async init() {
     // Input discovery must not depend on Tauri event subscriptions. If any
@@ -233,6 +235,18 @@ window.WorkbenchWindow = {
     this.aiConfig = ctx?.aiConfig || null;
     this.lectureAiServerUrl = ctx?.lectureAiServerUrl || 'https://design.hz-study-system.com';
     this.providers = ctx?.providers || [];
+    this._isAdmin = ctx?.isAdmin === true;
+    const modeSel = document.getElementById('wb-lecture-mode');
+    if (modeSel) {
+      let savedMode = 'auto';
+      try { savedMode = window.localStorage?.getItem('lectureai-model-mode') || 'auto'; } catch (_) {}
+      this.lectureAiMode = this._isAdmin && ['auto', 'fast', 'deep'].includes(savedMode) ? savedMode : 'auto';
+      modeSel.value = this.lectureAiMode;
+      modeSel.onchange = () => {
+        this.lectureAiMode = ['auto', 'fast', 'deep'].includes(modeSel.value) ? modeSel.value : 'auto';
+        try { window.localStorage?.setItem('lectureai-model-mode', this.lectureAiMode); } catch (_) {}
+      };
+    }
     // populate model selector
     const sel = document.getElementById('wb-model');
     if (sel) {
@@ -343,11 +357,14 @@ window.WorkbenchWindow = {
       && ['completed', 'failed', 'cancelled', 'paused', 'needs_repair'].includes(status);
     const syncPending = run.serverSync && run.serverSync.status === 'pending';
     const progressSummary = String(this._taskProgressSummary || run.progressSummary || '').trim();
+    const adminModelNote = this._isAdmin
+      ? (run.model ? ` · 实际模型：${this._escape(run.model)}` : ` · 执行模式：${{ auto: '自动', fast: '快速', deep: '深度' }[run.modelMode] || '自动'}`)
+      : '';
     card.hidden = false;
     card.innerHTML = `
       <div class="wb-task-card-head"><span class="wb-task-card-title">LectureAI 任务</span><span class="wb-task-card-status">${this._escape(this._taskStatusLabel(status))}</span></div>
       <div class="wb-task-card-goal" title="${this._escape(this._taskCardGoal(run, spec))}">${this._escape(this._taskCardGoal(run, spec))}</div>
-      <div class="wb-task-card-meta">${completed || total ? `已完成 ${completed}/${total || '?'} 页` : '进度已保存'}${run.errorCode ? ' · 有待处理项' : ''}${syncPending ? ' · 正在同步恢复状态' : ''}</div>
+      <div class="wb-task-card-meta">${completed || total ? `已完成 ${completed}/${total || '?'} 页` : '进度已保存'}${run.errorCode ? ' · 有待处理项' : ''}${syncPending ? ' · 正在同步恢复状态' : ''}${adminModelNote}</div>
       <div class="wb-task-card-meta wb-task-card-summary${this._taskStatusIsLive(status) ? ' is-live' : ''}" data-task-progress-summary-row${progressSummary ? '' : ' hidden'} title="${this._escape(progressSummary)}"><span class="wb-work-dots" aria-hidden="true"><i></i><i></i><i></i></span><strong>工作中：</strong><span data-task-progress-summary-text>${this._escape(progressSummary)}</span></div>
       <div class="wb-task-checklist" data-task-checklist hidden></div>
       <div class="wb-task-card-actions">
@@ -1025,6 +1042,9 @@ window.WorkbenchWindow = {
 
   _applySelectedModel(id) {
     this.selectedConfig = this.providers.find(p => p.id === id)?.config || null;
+    const modeSel = document.getElementById('wb-lecture-mode');
+    if (modeSel) modeSel.hidden = !(this._isAdmin && id === 'lectureai');
+    if (!this._isAdmin) this.lectureAiMode = 'auto';
     this._featureFlagsLoaded = false;
     this._featureFlags = Object.create(null);
     this._loadLectureAiFeatures().then(() => this._loadTaskJournal()).catch(() => {});
@@ -1500,6 +1520,7 @@ plan 至少包含 targetSlideCount、visualSystem、slides；每页包含 page�
       clientKind: 'desktop',
       protocolVersion: protocol.CONTRACT.protocolVersion,
       clientVersion: '2.2.4',
+      modelMode: this._isAdmin ? this.lectureAiMode : 'auto',
       deckId: manifestDeckId || derivedDeckId,
       deckRevision: revision || null,
       slides: (this.manifest?.slides || []).slice(0, 60).map((slide, index) => ({
