@@ -1937,6 +1937,7 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
   const originalSetBusy = wb._setBusy;
   const originalComplete = wb._completeLectureAiTaskRun;
   const originalProgress = wb._updateTaskProgressSummary;
+  const originalRecentTurns = wb._recentTurns;
   const sent = [];
   const answers = [];
   const progress = [];
@@ -2009,6 +2010,10 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
     deckRevision: { deckHash: revision },
     slides: [{ id: 's1', title: '封面', slideType: 'cover' }, { id: 's2', title: '内容', slideType: 'content' }],
   };
+  wb._recentTurns = [
+    { role: 'user', text: '标题被内容区遮挡了', pages: [2], intent: null },
+    { role: 'assistant', text: '第2页已调整', pages: [2], intent: 'slide_edit' },
+  ];
   const taskSpec = {
     schemaVersion: 1,
     runId: 'run_native_task_12345678',
@@ -2023,6 +2028,7 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
     assert.equal(sent[0].type, 'start_task');
     assert.equal(sent[0].task_spec.runId, taskSpec.runId);
     assert.equal(sent[0].task_context.deckRevision, revision);
+    assert.deepEqual(sent[0].task_context.recentTurns.map(turn => turn.text), ['标题被内容区遮挡了', '第2页已调整']);
     assert.equal(sent[1].request_id, 'native-request-1');
     assert.equal(sent[1].actionId, 'run_native_task_12345678:action:1');
     assert.equal(sent[1].argsHash, hash);
@@ -2045,6 +2051,7 @@ async function testNativeTaskWebSocketUsesStructuredReceipts() {
     wb._setBusy = originalSetBusy;
     wb._completeLectureAiTaskRun = originalComplete;
     wb._updateTaskProgressSummary = originalProgress;
+    wb._recentTurns = originalRecentTurns;
     wb.busy = false;
   }
 }
@@ -3064,6 +3071,100 @@ async function testAgentTaskActionStopsBeforeWriteWhenPendingReceiptCannotPersis
   }
 }
 
+async function testWriteSlideAttachesConsentGatedScreenshot() {
+  const originalExecute = agent._executeAction;
+  const originalRevision = agent._taskDeckRevision;
+  const originalInvoke = agentContext.window.__TAURI__.core.invoke;
+  const originalCapture = agent._captureSlideScreenshotForCloud;
+  agent._taskReceipts.clear();
+  agentContext.window.Settings._pptBuilder = pb;
+  agent._taskDeckRevision = async () => `sha256:${'6'.repeat(64)}`;
+  agent._executeAction = async () => 'write_slide 已保存';
+  agentContext.window.__TAURI__.core.invoke = async (command, payload) => {
+    if (command === 'ppte_task_journal_start') return { runId: payload.runId };
+    if (command === 'ppte_task_journal_receipt_get') return null;
+    if (command === 'ppte_task_journal_before_write') return { ok: true };
+    if (command === 'ppte_task_journal_append_receipt') return payload.receipt;
+    return null;
+  };
+  let captures = 0;
+  agent._captureSlideScreenshotForCloud = async (_deck, page) => {
+    captures += 1;
+    return { [String(page)]: 'data:image/jpeg;base64,QUJD' };
+  };
+  const runId = 'run_agent_write_shot_12345678';
+  try {
+    const result = await agent._executeTaskAction({
+      runId,
+      action: { tool: 'write_slide', page: 2, html: '<html></html>' },
+      envelope: {
+        actionId: `${runId}:action:1`,
+        argsHash: `sha256:${'7'.repeat(64)}`,
+        expectedDeckRevision: `sha256:${'6'.repeat(64)}`,
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(captures, 1, 'write_slide captures a post-write render for the cloud');
+    assert.deepEqual(result.renderScreenshots, { 2: 'data:image/jpeg;base64,QUJD' });
+    assert.equal(JSON.stringify(result.result).includes('data:image'), false,
+      'screenshots must never enter the journaled receipt result');
+
+    // A failed capture must not fail the write.
+    agent._captureSlideScreenshotForCloud = async () => null;
+    const plain = await agent._executeTaskAction({
+      runId,
+      action: { tool: 'write_slide', page: 2, html: '<html></html>' },
+      envelope: {
+        actionId: `${runId}:action:2`,
+        argsHash: `sha256:${'8'.repeat(64)}`,
+        expectedDeckRevision: `sha256:${'6'.repeat(64)}`,
+      },
+    });
+    assert.equal(plain.ok, true);
+    assert.equal(plain.renderScreenshots, undefined);
+  } finally {
+    agent._executeAction = originalExecute;
+    agent._taskDeckRevision = originalRevision;
+    agent._captureSlideScreenshotForCloud = originalCapture;
+    agentContext.window.__TAURI__.core.invoke = originalInvoke;
+    agent._taskReceipts.clear();
+  }
+}
+
+async function testTaskReferencePagesAreReadOnlyInLocalExecutor() {
+  agentContext.window.Settings._pptBuilder = pb;
+  const runId = 'run_agent_reference_12345678';
+  const taskSpec = {
+    intent: 'slide_edit', scope: 'page',
+    targets: { pages: [4], referencePages: [5], allowInsert: false, allowDelete: false, allowReorder: false },
+  };
+  const writeReference = await agent._executeTaskAction({
+    runId,
+    taskSpec,
+    action: { tool: 'write_slide', page: 5, html: '<html></html>' },
+    envelope: {
+      actionId: `${runId}:action:1`,
+      argsHash: `sha256:${'9'.repeat(64)}`,
+      expectedDeckRevision: '',
+    },
+  });
+  assert.equal(writeReference.ok, false);
+  assert.equal(writeReference.error.code, 'TASK_PAGE_NOT_AUTHORIZED');
+
+  const readOutside = await agent._executeTaskAction({
+    runId,
+    taskSpec,
+    action: { tool: 'read_slide', page: 6 },
+    envelope: {
+      actionId: `${runId}:action:2`,
+      argsHash: `sha256:${'a'.repeat(64)}`,
+      expectedDeckRevision: '',
+    },
+  });
+  assert.equal(readOutside.ok, false);
+  assert.equal(readOutside.error.code, 'TASK_PAGE_NOT_AUTHORIZED');
+}
+
 function testTaskJournalPredictsRenderedInsertFile() {
   const previousNextFile = agentContext.window.Settings._nextPpteSlideFile;
   agentContext.window.Settings._nextPpteSlideFile = () => 'slide99.html';
@@ -3953,6 +4054,8 @@ async function testTaskJournalRecoveryCleanupAndRevertCompensation() {
   await testAgentTaskActionIsIdempotentAndRevisionSafe();
   await testAgentTaskActionPersistsBeforeWritingAndReplaysAfterRestart();
   await testAgentTaskActionStopsBeforeWriteWhenPendingReceiptCannotPersist();
+  await testWriteSlideAttachesConsentGatedScreenshot();
+  await testTaskReferencePagesAreReadOnlyInLocalExecutor();
   testTaskJournalPredictsRenderedInsertFile();
   await testAgentImportsSelectedExternalSkillFolder();
   testStreamingBubbleRendersFinalAnswerProgressively();

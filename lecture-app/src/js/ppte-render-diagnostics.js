@@ -30,14 +30,15 @@
   // Timeout budget chain (all values must stay ordered largest->smallest):
   //   Pi inactivity timeout (workbench-window.js, 180s)
   //   > worst-case per-page sum of ALL diagnostics runs on that page
-  //     (current margin ~78s: a page may run validate_slide + measure_render,
-  //     each up to DEFAULT_TIMEOUT_MS)
-  //   > DEFAULT_TIMEOUT_MS (frame load + fonts + measurement)
+  //     (a page may run validate_slide + measure_render, each up to
+  //     DEFAULT_TIMEOUT_MS)
+  //   > DEFAULT_TIMEOUT_MS (frame parse + bounded resource settle + measurement)
   //   > SCREENSHOT_TIMEOUT_MS (rasterization fits inside the frame's budget).
-  // Raising DEFAULT_TIMEOUT_MS or adding more per-page diagnostics runs
-  // shrinks the 180s margin; if the total per-page diagnostics time could
-  // approach 180s the Pi socket would drop mid-page, so re-tune together.
-  const DEFAULT_TIMEOUT_MS = 8500;
+  // Collection starts at DOMContentLoaded, NOT load: a single hanging
+  // subresource must never burn the whole frame budget. Fonts and images each
+  // get their own bounded settle inside collect(), so the total stays close to
+  // FONT_SETTLE_MS + IMAGE_SETTLE_MS + measurement even when resources hang.
+  const DEFAULT_TIMEOUT_MS = 4500;
   const MESSAGE_TYPE = 'lectureai-render-diagnostics';
   const MAX_OVERFLOW_BOXES = 12;
   const MAX_WRAP_FACTS = 30;
@@ -45,7 +46,14 @@
   // Must stay well below DEFAULT_TIMEOUT_MS: the screenshot runs inside the
   // diagnostic frame, so a rasterization timeout here must fire first and
   // leave the frame time to report its facts (see budget chain above).
-  const SCREENSHOT_TIMEOUT_MS = 5000;
+  const SCREENSHOT_TIMEOUT_MS = 2500;
+  // Bounded settle inside the frame: fonts and not-yet-complete images get a
+  // short window, then measurement proceeds regardless.
+  const FONT_SETTLE_MS = 600;
+  const IMAGE_SETTLE_MS = 1200;
+  // Snapshots measure end states: kill transitions/animations so stepped or
+  // animated pages settle immediately (same rule as the PPTX image exporter).
+  const MOTION_KILL_CSS = '*,*::before,*::after{transition:none!important;animation:none!important}';
 
   function diagnosticFrameRunner(config) {
     const resourceFailures = [];
@@ -76,7 +84,22 @@
     };
     const post = result => parent.postMessage({ type: config.messageType, nonce: config.nonce, result }, '*');
     const issue = (code, message, extra) => ({ code, severity: 'error', message, ...(extra || {}) });
-    const pause = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    // Two animation frames when the frame is visible — but the diagnostic
+    // frame is parked offscreen at left:-12000px, where browsers may never
+    // produce frames at all, so a bare rAF chain can starve forever. The
+    // setTimeout fallback keeps hidden frames moving (~100ms per pause).
+    const pause = () => new Promise(resolve => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      try {
+        requestAnimationFrame(() => requestAnimationFrame(finish));
+      } catch (_) { finish(); }
+      setTimeout(finish, 100);
+    });
 
     window.addEventListener('error', event => {
       const target = event.target;
@@ -93,9 +116,22 @@
       try {
         await Promise.race([
           document.fonts?.ready || Promise.resolve(),
-          new Promise(resolve => setTimeout(resolve, 600)),
+          new Promise(resolve => setTimeout(resolve, config.fontSettleMs || 0)),
         ]);
       } catch (_) { /* font failures are reflected by resource events */ }
+      // Bounded image settle: never let one hanging subresource stall the run.
+      try {
+        const pending = [...document.querySelectorAll('img')].filter(img => !img.complete);
+        if (pending.length) {
+          await Promise.race([
+            Promise.allSettled(pending.map(img => new Promise(resolve => {
+              img.addEventListener('load', resolve, { once: true });
+              img.addEventListener('error', resolve, { once: true });
+            }))),
+            new Promise(resolve => setTimeout(resolve, config.imageSettleMs || 0)),
+          ]);
+        }
+      } catch (_) { /* image wait is best-effort */ }
       await pause();
 
       const stepRoot = document.querySelector('[data-max-step]');
@@ -138,7 +174,7 @@
         const beyondVertical = rect.top < -2 || rect.bottom > config.height + 2;
         if (beyondHorizontal) horizontal.push(selector(element));
         if (beyondVertical) vertical.push(selector(element));
-        if ((beyondHorizontal || beyondVertical) && overflowBoxes.length < MAX_OVERFLOW_BOXES) {
+        if ((beyondHorizontal || beyondVertical) && overflowBoxes.length < config.maxOverflowBoxes) {
           const name = selector(element);
           // The raw canvas-space box (rounded to integer px). One entry per
           // selector so a repeated class never floods the cap.
@@ -173,7 +209,7 @@
       const textBoxes = [];
       let textBoxesTruncated = false;
       for (const element of textElements) {
-        if (textBoxes.length >= MAX_TEXT_BOXES) { textBoxesTruncated = true; break; }
+        if (textBoxes.length >= config.maxTextBoxes) { textBoxesTruncated = true; break; }
         const rect = element.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) continue;
         if (rect.left < -2 || rect.right > config.width + 2 || rect.top < -2 || rect.bottom > config.height + 2) continue;
@@ -207,7 +243,7 @@
       // ever leaves the frame.
       const wraps = [];
       for (const element of textElements) {
-        if (wraps.length >= MAX_WRAP_FACTS) break;
+        if (wraps.length >= config.maxWrapFacts) break;
         const rect = element.getBoundingClientRect();
         if (rect.width <= 0) continue;
         const range = document.createRange();
@@ -288,6 +324,11 @@
         // The rasterizer (html-to-image) is inlined into this frame by the
         // caller; the sandbox has no network/origin access to load it itself.
         // Failure is a missing fact, never a page failure.
+        // html-to-image resolves its internal image loads through
+        // requestAnimationFrame, which never fires in this offscreen frame —
+        // shim it to a timer for the duration of the rasterization.
+        const realRaf = window.requestAnimationFrame;
+        window.requestAnimationFrame = callback => setTimeout(() => callback(Date.now()), 16);
         try {
           const toJpeg = globalThis.htmlToImage?.toJpeg;
           if (typeof toJpeg !== 'function') throw new Error('unavailable');
@@ -301,12 +342,13 @@
               backgroundColor: '#ffffff',
               pixelRatio: 1,
             }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), SCREENSHOT_TIMEOUT_MS)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), config.screenshotTimeoutMs)),
           ]);
           if (typeof dataUri === 'string' && dataUri.startsWith('data:image/jpeg;base64,')) {
             screenshot = { available: true, dataUri: dataUri.slice(0, 4 * 1024 * 1024) };
           }
         } catch (_) { /* screenshot stays unavailable */ }
+        finally { if (realRaf) window.requestAnimationFrame = realRaf; }
       }
       post({
         schemaVersion: 1,
@@ -329,14 +371,27 @@
       });
     }
 
-    window.addEventListener('load', () => {
+    // Collect as soon as the DOM is parsed, not at window load: one hanging
+    // subresource (custom-protocol image, stylesheet) must never stall the
+    // whole run until the parent timeout. load remains as a safety net in case
+    // DOMContentLoaded was somehow missed.
+    let started = false;
+    const start = () => {
+      if (started) return;
+      started = true;
       collect().catch(() => post({
         schemaVersion: 1,
         available: false,
         passed: false,
         issues: [issue('RENDER_DIAGNOSTICS_UNAVAILABLE', '页面渲染诊断暂不可用')],
       }));
-    }, { once: true });
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start, { once: true });
+      window.addEventListener('load', start, { once: true });
+    } else {
+      start();
+    }
   }
 
   function finite(value, fallback = 0) {
@@ -513,8 +568,18 @@
       height: HEIGHT,
       expectedTemplate: config.expectedTemplate || '',
       screenshot: config.includeScreenshot === true,
+      // Everything the serialized runner needs must ride in this config: the
+      // frame re-evaluates diagnosticFrameRunner from source, so closure
+      // constants (caps, timeouts) would be ReferenceErrors there.
+      screenshotTimeoutMs: SCREENSHOT_TIMEOUT_MS,
+      fontSettleMs: FONT_SETTLE_MS,
+      imageSettleMs: IMAGE_SETTLE_MS,
+      maxOverflowBoxes: MAX_OVERFLOW_BOXES,
+      maxWrapFacts: MAX_WRAP_FACTS,
+      maxTextBoxes: MAX_TEXT_BOXES,
     }).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
     const runner = `<script>(${diagnosticFrameRunner.toString()})(${safeConfig});<\/script>`;
+    const motionKill = `<style data-ppte-diag-motion>${MOTION_KILL_CSS}</style>`;
     // The screenshot rasterizer runs inside the sandboxed frame, so its source
     // has to be inlined; a src reference could not be fetched from this origin.
     const rasterizer = config.includeScreenshot === true && typeof config.screenshotScript === 'string'
@@ -524,9 +589,9 @@
     const escapedBase = String(baseHref || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
     const base = escapedBase ? `<base href="${escapedBase}">` : '';
     let source = String(html || '').replace(/<base\b[^>]*>/i, '');
-    if (/<head[^>]*>/i.test(source)) return source.replace(/<head([^>]*)>/i, `<head$1>${base}${rasterizer}${runner}`);
-    if (/<html[^>]*>/i.test(source)) return source.replace(/<html([^>]*)>/i, `<html$1><head>${base}${rasterizer}${runner}</head>`);
-    return `<!doctype html><html><head>${base}${rasterizer}${runner}</head><body>${source}</body></html>`;
+    if (/<head[^>]*>/i.test(source)) return source.replace(/<head([^>]*)>/i, `<head$1>${base}${motionKill}${rasterizer}${runner}`);
+    if (/<html[^>]*>/i.test(source)) return source.replace(/<html([^>]*)>/i, `<html$1><head>${base}${motionKill}${rasterizer}${runner}</head>`);
+    return `<!doctype html><html><head>${base}${motionKill}${rasterizer}${runner}</head><body>${source}</body></html>`;
   }
 
   function nonce() {

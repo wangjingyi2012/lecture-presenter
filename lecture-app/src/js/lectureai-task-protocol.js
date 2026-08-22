@@ -52,6 +52,9 @@
     CLIENT_UNAVAILABLE: '课件窗口暂时不可用，任务进度已保存。',
     VALIDATION_FAILED: '课件检查未通过，LectureAI 将只修复相关页面。',
     RECEIPT_WRITE_FAILED: '无法建立安全恢复点，LectureAI 未继续写入。',
+    NO_ACTION_TIMEOUT: 'LectureAI 长时间没有执行有效操作，本次任务已自动停止，可直接重试。',
+    REPETITIVE_REASONING: 'LectureAI 出现重复思考，本次任务已自动停止，可直接重试。',
+    OUTPUT_LIMIT: 'LectureAI 本轮输出达到安全上限，任务已停止，可直接重试。',
   });
 
   function newRunId() {
@@ -114,7 +117,18 @@
     const missingCapabilities = (spec.requiredCapabilities || []).filter(item => !supported.has(item));
     if (missingCapabilities.length) errors.push(`当前客户端缺少能力：${missingCapabilities.join('、')}`);
     if (WRITE_INTENTS.has(spec.intent) && !Array.isArray(spec.acceptanceCriteria)) errors.push('可写任务必须声明验收条件');
-    if (!spec.targets || typeof spec.targets !== 'object' || !Array.isArray(spec.targets.pages)) errors.push('TaskSpec targets 无效');
+    if (!spec.targets || typeof spec.targets !== 'object' || !Array.isArray(spec.targets.pages)) {
+      errors.push('TaskSpec targets 无效');
+    } else {
+      const pages = spec.targets.pages;
+      const references = spec.targets.referencePages == null ? [] : spec.targets.referencePages;
+      if (pages.some(page => !Number.isInteger(page) || page < 1 || page > 60)) errors.push('TaskSpec 目标页码无效');
+      if (!Array.isArray(references) || references.some(page => !Number.isInteger(page) || page < 1 || page > 60)) {
+        errors.push('TaskSpec 参考页码无效');
+      } else if (references.some(page => pages.includes(page))) {
+        errors.push('TaskSpec 目标页与参考页不能重叠');
+      }
+    }
     const mutationError = validateMutations(spec.mutations);
     if (mutationError) errors.push(mutationError);
     return { valid: errors.length === 0, errors, missingCapabilities };

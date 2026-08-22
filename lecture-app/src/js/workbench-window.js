@@ -2648,6 +2648,14 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
         title: String(slide.title || '').slice(0, 200),
         role: String(slide.slideType || slide.slide_type || 'content').slice(0, 30),
       })),
+      recentTurns: (this._recentTurns || []).slice(-8).map(turn => ({
+        role: turn.role === 'assistant' ? 'assistant' : 'user',
+        text: String(turn.text || '').slice(0, 300),
+        pages: (Array.isArray(turn.pages) ? turn.pages : [])
+          .filter(page => Number.isInteger(page) && page >= 1 && page <= 60)
+          .slice(0, 8),
+        intent: turn.intent ? String(turn.intent).slice(0, 40) : null,
+      })),
     };
   },
 
@@ -2801,9 +2809,15 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
           }));
         };
         socket.onmessage = event => {
-          markActivity();
+          let incoming;
+          try { incoming = JSON.parse(String(event.data || '{}')); }
+          catch (error) { finish(error); return; }
+          // Repeated prose is not forward progress. Keep the socket's local
+          // fail-safe counting while the server streams only progress lines;
+          // actual tool calls, findings and terminal events reset it.
+          if (!['progress', 'session_started'].includes(incoming.type)) markActivity();
           queue = queue.then(async () => {
-            const message = JSON.parse(String(event.data || '{}'));
+            const message = incoming;
             if (message.type === 'finding') {
               this._logFinding(message, taskSpec.runId);
               return;
@@ -3118,9 +3132,9 @@ ${templateVariant ? `- 当前课件母版变体：${templateVariant}` : ''}
     // Top of the timeout budget chain: this socket idle limit must exceed the
     // worst-case per-page time with no socket traffic, which is dominated by
     // local render diagnostics (each run bounded by PpteRenderDiagnostics
-    // DEFAULT_TIMEOUT_MS = 8.5s, and a page may run several: validate_slide,
+    // DEFAULT_TIMEOUT_MS = 4.5s, and a page may run several: validate_slide,
     // measure_render, plus screenshot time inside each frame). Current worst
-    // case is roughly 102s of diagnostics, leaving ~78s of headroom; raise
+    // case is roughly 54s of diagnostics, leaving >120s of headroom; raise
     // this if per-page diagnostics budgets grow (see the chain comment at the
     // DEFAULT_TIMEOUT_MS constant in ppte-render-diagnostics.js).
     return 180000;

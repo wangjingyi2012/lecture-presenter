@@ -888,6 +888,16 @@ window.PpteWorkbenchAgent = {
     }
     const taskAction = { ...action, _taskRunId: runId, _taskSpec: payload?.taskSpec || null };
     const taskSpec = payload?.taskSpec || null;
+    const targetPages = Array.isArray(taskSpec?.targets?.pages) ? taskSpec.targets.pages.map(Number) : [];
+    const referencePages = Array.isArray(taskSpec?.targets?.referencePages) ? taskSpec.targets.referencePages.map(Number) : [];
+    const actionPage = Number(action.page);
+    if (action.tool === 'read_slide' && [...targetPages, ...referencePages].length
+      && ![...targetPages, ...referencePages].includes(actionPage)) {
+      return { ok: false, actionId, argsHash, error: { code: 'TASK_PAGE_NOT_AUTHORIZED', category: 'permission', retryable: false, userMessage: '当前 LectureAI 任务未授权读取这个页面。' } };
+    }
+    if (['write_slide', 'validate_slide'].includes(action.tool) && targetPages.length && !targetPages.includes(actionPage)) {
+      return { ok: false, actionId, argsHash, error: { code: 'TASK_PAGE_NOT_AUTHORIZED', category: 'permission', retryable: false, userMessage: '当前 LectureAI 任务未授权修改这个页面。' } };
+    }
     if (action.tool === 'delete_slide' && taskSpec?.targets?.allowDelete !== true) {
       return { ok: false, actionId, argsHash, error: { code: 'TASK_MUTATION_NOT_AUTHORIZED', category: 'permission', retryable: false, userMessage: '当前 LectureAI 任务未授权删除页面。' } };
     }
@@ -1006,6 +1016,13 @@ window.PpteWorkbenchAgent = {
       newDeckRevision: newDeckRevision || currentDeckRevision || null,
       result: this._taskToolDetails(taskAction, raw, pb),
     };
+    if (taskAction.tool === 'write_slide') {
+      // Give the cloud model visual feedback on its own edit: a render of the
+      // page it just wrote rides along on the tool result (consent-gated in
+      // _captureSlideScreenshotForCloud, stripped from receipts/journal).
+      const shots = await this._captureSlideScreenshotForCloud(pb, Number(taskAction.page) | 0);
+      if (shots) taskAction._taskMeasureShots = shots;
+    }
     this._taskReceipts.set(receiptKey, receipt);
     try {
       await this._taskJournalReceiptRetry(pb, runId, receipt);
@@ -2522,8 +2539,15 @@ window.PpteWorkbenchAgent = {
       };
     }
     try {
+      // Screenshots rasterize through an SVG foreignObject, which cannot fetch
+      // slide:// / slide.localhost resources. Inline local <img> sources as
+      // data URIs first, otherwise the snapshot renders blank where images
+      // should be (same constraint as the PPTX image exporter).
+      const html = measureOptions?.includeScreenshot === true
+        ? await this._inlineDiagnosticFrameStyles(await this._inlineDiagnosticFrameImages(slide?.html || '', pb, slide), pb, slide)
+        : (slide?.html || '');
       return await window.PpteRenderDiagnostics.diagnose({
-        html: slide?.html || '',
+        html,
         baseHref: this._renderDiagnosticBaseHref(pb),
         page,
         pageId: slide?.id || null,
@@ -2540,6 +2564,102 @@ window.PpteWorkbenchAgent = {
         passed: false,
         issues: [{ code: 'RENDER_DIAGNOSTICS_UNAVAILABLE', severity: 'error', message: '页面渲染诊断暂不可用' }],
       };
+    }
+  },
+
+  // String-level <img> inlining for diagnostic screenshots: the diagnostic
+  // frame is an opaque sandbox (the parent cannot touch its DOM), so local
+  // images must become data URIs before the srcdoc is built, or the
+  // rasterizer's SVG foreignObject cannot paint them. Sources resolve
+  // relative to the slide file's own directory; unreadable or oversized
+  // files keep their original src (the frame then reports them as resource
+  // failures, same as before).
+  async _inlineDiagnosticFrameImages(html, pb, slide) {
+    const source = String(html || '');
+    const folder = String(pb?.folderPath || '').replace(/[\\/]+$/, '');
+    if (!folder || !window.__TAURI__?.core?.invoke || !/<img\b/i.test(source)) return source;
+    const srcs = [...new Set(
+      [...source.matchAll(/<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)]
+        .map(match => match[1] ?? match[2] ?? ''),
+    )].filter(src => src
+      && !/^(?:data:|blob:|https?:|slide:|file:)/i.test(src)
+      && !src.startsWith('//'));
+    if (!srcs.length) return source;
+    const slideFile = String(slide?.file || '').replace(/\\/g, '/');
+    const slideDir = slideFile.includes('/') ? slideFile.split('/').slice(0, -1).join('/') : '';
+    const baseDir = slideDir ? `${folder}/${slideDir}` : folder;
+    const mimes = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+      webp: 'image/webp', svg: 'image/svg+xml', avif: 'image/avif', bmp: 'image/bmp',
+    };
+    let out = source;
+    await Promise.all(srcs.slice(0, 24).map(async src => {
+      try {
+        const rel = decodeURIComponent(src.split(/[?#]/)[0]).replace(/^\.\//, '').replace(/^\/+/, '');
+        if (!rel || rel.split('/').includes('..')) return;
+        const bytes = await window.__TAURI__.core.invoke('read_file_bytes', { filePath: `${baseDir}/${rel}` });
+        if (!Array.isArray(bytes) || !bytes.length || bytes.length > 4 * 1024 * 1024) return;
+        const ext = (rel.split('.').pop() || '').toLowerCase();
+        let binary = '';
+        const CHUNK = 0x8000;
+        for (let i = 0; i < bytes.length; i += CHUNK) binary += String.fromCharCode(...bytes.slice(i, i + CHUNK));
+        const dataUri = `data:${mimes[ext] || 'image/png'};base64,${btoa(binary)}`;
+        out = out.split(`src="${src}"`).join(`src="${dataUri}"`).split(`src='${src}'`).join(`src='${dataUri}'`);
+      } catch (_) { /* unreadable image keeps its original src */ }
+    }));
+    return out;
+  },
+
+  // <link rel="stylesheet" href="..."> → inline <style>, for the same reason
+  // as _inlineDiagnosticFrameImages: the sandboxed diagnostic frame is an
+  // opaque origin, so the rasterizer cannot read cross-origin stylesheet
+  // rules and the snapshot would lose all linked styling.
+  async _inlineDiagnosticFrameStyles(html, pb, slide) {
+    const source = String(html || '');
+    const folder = String(pb?.folderPath || '').replace(/[\\/]+$/, '');
+    if (!folder || !window.__TAURI__?.core?.invoke || !/<link\b/i.test(source)) return source;
+    const slideFile = String(slide?.file || '').replace(/\\/g, '/');
+    const slideDir = slideFile.includes('/') ? slideFile.split('/').slice(0, -1).join('/') : '';
+    const baseDir = slideDir ? `${folder}/${slideDir}` : folder;
+    const links = [...source.matchAll(/<link\b[^>]*\brel\s*=\s*(?:"stylesheet"|'stylesheet')[^>]*>/gi)]
+      .map(match => ({ tag: match[0], href: match[0].match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/i) }))
+      .map(item => ({ tag: item.tag, src: (item.href?.[1] ?? item.href?.[2] ?? '') }))
+      .filter(item => item.src && !/^(?:data:|blob:|https?:|slide:|file:)/i.test(item.src) && !item.src.startsWith('//'))
+      .slice(0, 12);
+    if (!links.length) return source;
+    let out = source;
+    await Promise.all(links.map(async item => {
+      try {
+        const rel = decodeURIComponent(item.src.split(/[?#]/)[0]).replace(/^\.\//, '').replace(/^\/+/, '');
+        if (!rel || rel.split('/').includes('..')) return;
+        const css = await window.__TAURI__.core.invoke('read_text_file', { filePath: `${baseDir}/${rel}` });
+        if (typeof css !== 'string' || !css.length || css.length > 512 * 1024 || /<\/style/i.test(css)) return;
+        out = out.split(item.tag).join(`<style data-inlined-href="${item.src.replace(/"/g, '&quot;')}">${css}</style>`);
+      } catch (_) { /* unreadable stylesheet keeps its link tag */ }
+    }));
+    return out;
+  },
+
+  // After a successful write_slide, render the new page offscreen and attach
+  // a jpeg to the RPC return value (never the receipt or journal) so the
+  // cloud model can SEE the result it just wrote. Same one-time cloud
+  // consent as deck snapshots; any failure is silent — the write itself
+  // already succeeded.
+  async _captureSlideScreenshotForCloud(pb, page) {
+    try {
+      if (!Number.isInteger(page) || page < 1 || page > (pb?.slides?.length || 0)) return null;
+      const consent = await this._snapshotConsent();
+      if (consent.granted !== true) return null;
+      const screenshotScript = await this._measureScreenshotScript();
+      if (!screenshotScript) return null;
+      const diagnostics = await this._renderDiagnosticsForSlide(pb, pb.slides[page - 1], page, this._expectedTemplateForPage(pb, page), {
+        includeScreenshot: true,
+        screenshotScript,
+      });
+      const dataUri = diagnostics?.screenshot?.available === true ? String(diagnostics.screenshot.dataUri || '') : '';
+      return dataUri ? { [String(page)]: dataUri } : null;
+    } catch (_) {
+      return null;
     }
   },
 

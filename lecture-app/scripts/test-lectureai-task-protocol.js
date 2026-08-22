@@ -37,6 +37,19 @@ const validSpec = {
   promptVersion: 'task-resolver-v1',
 };
 assert.equal(protocol.validateTaskSpec(validSpec).valid, true);
+const referenceSpec = {
+  ...validSpec,
+  targets: { ...validSpec.targets, pages: [4], referencePages: [5] },
+};
+assert.equal(protocol.validateTaskSpec(referenceSpec).valid, true, 'disjoint read-only reference pages are valid');
+assert.equal(protocol.validateTaskSpec({
+  ...referenceSpec,
+  targets: { ...referenceSpec.targets, referencePages: [4] },
+}).valid, false, 'a page cannot be both a write target and a read-only reference');
+assert.equal(protocol.validateTaskSpec({
+  ...referenceSpec,
+  targets: { ...referenceSpec.targets, referencePages: [61] },
+}).valid, false, 'reference pages stay inside the task page range');
 const unsupported = protocol.validateTaskSpec(validSpec, ['slide.read']);
 assert.equal(unsupported.valid, false);
 assert.deepEqual(unsupported.missingCapabilities, ['slide.write.transactional', 'deck.validate']);
@@ -71,6 +84,8 @@ assert.equal(protocol.receiptDecision(null, { actionId: 'a1', argsHash: 'h1', ex
 const friendly = protocol.friendlyError({ code: 'VALIDATION_FAILED', category: 'validation_failed', userMessage: 'Pi Runtime 的 validate_deck 失败' });
 assert.equal(friendly.userMessage.includes('Pi'), false);
 assert.equal(friendly.userMessage.includes('validate_deck'), false);
+assert.match(protocol.friendlyError({ code: 'REPETITIVE_REASONING', category: 'model_correctable' }).userMessage, /重复思考/);
+assert.match(protocol.friendlyError({ code: 'OUTPUT_LIMIT', category: 'model_correctable' }).userMessage, /安全上限/);
 // Mutation tool ids must never leak into user-facing error text either.
 for (const term of ['delete_slide', 'reorder_slides', 'finalize_deck', 'apply_patch']) {
   const scrubbed = protocol.friendlyError({ code: 'CLIENT_TOOL_FAILED', userMessage: `${term} 失败：目标页不存在` });
